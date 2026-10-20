@@ -46,8 +46,13 @@ trust translate input.typ --name mymod -o out.rs
   分析,体由 typst-eval 解释——保真路径)、content 块子集(文本/空白/
   换行/嵌入)、顶层引擎值(惰性槽 + module_init)、多文件包(四种
   import 形态,环检测)
-- **实测**:9 个 fixture / 80+ 用例双路逐值一致;性能(干净负载)纯
-  计算 3.4–7.0×、字符串分配主导 1.0×(瓶颈在值层,属 L1 类型化目标)
+- **实测(过程验证)**:10 个 fixture / 90+ 用例双路逐值一致;性能
+  (干净负载)纯计算 3.4–7.0×、字符串分配主导 1.0×(瓶颈在值层,
+  属 L1 类型化目标)
+- **cetz 0.5.2 整包(探索,不入测试框架)**:严格模式整包翻译通过,
+  生成物(37 文件/1.7MB)零错误通过 Rust 编译,注入原版 typst 后与
+  解释器 26/26 调用逐值一致(vector/matrix 含 wasm 插件、coordinate、
+  path-util、sorting、util 默认参数/闭包、版本常量)
 - **已知边界**:markup 样式元素(Strong 等)、`#include`/`#show`、
   参数解构模式、生成物快照测试——见研究路线 §5/§7
 

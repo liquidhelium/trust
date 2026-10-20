@@ -190,6 +190,17 @@ FUNCTION-MAP 的清单法机器化:转译器自检"任意源包每个顶层 `#le
   Engine 求顶层引擎值,重包 `LazyHash` 保持 comemo 哈希正确)——全部
   原版 typst API,零 fork。
 
+### 6.6 v0.x 终态目标冒烟(2026-10-21,探索性、不入过程回路)
+
+- cetz 0.5.2 整包(37 文件)严格模式翻译通过;生成物 1.7MB 零错误编译;
+  混合执行链全通:native 函数 + 解释闭包 + wasm 插件(cetz-core)+
+  外部包(oxifmt 经解释器);
+- 注入原版 typst(InjectWorld + module_init)后 26/26 调用与解释器
+  逐值一致——包括 `#let version = version(0,5,2)` 这类顶层遮蔽全局
+  类型名的引擎值;
+- 关键语义钉子(本轮实测新增):闭包命名参数**仅按名**绑定(eval_closure
+  用 `args.named`);let init 在绑定生效前求值;生成子模块名 = 文件 stem。
+
 ## 7. 风险与开放问题
 
 1. **闭包的 `Func` 构造**:typst-library 无公开的"原生闭包"入口

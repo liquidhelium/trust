@@ -492,7 +492,15 @@ impl Ctx {
     /// 默认值创建期求值;捕获 = 子树标识符 ∩ 外层可解析名字
     /// (保守过捕,解释器按参数/局部遮蔽覆盖,语义不变)。
     fn closure_expr(&mut self, closure: ast::Closure, env: &Env, mode: Mode) -> String {
-        let src_text = closure.to_untyped().full_text().to_string();
+        // 命名闭包(`#let f(x) = ..` 或局部 `let f(x) = ..`)的节点文本
+        // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码;名字保留
+        // 以支持递归自引用。
+        let raw = closure.to_untyped().full_text().to_string();
+        let src_text = if closure.name().is_some() {
+            format!("let {raw}")
+        } else {
+            raw
+        };
         let mut defaults = Vec::new();
         for param in closure.params().children() {
             if let ast::Param::Named(named) = param {

@@ -194,6 +194,7 @@ fn gen_module(fixture: &str) -> Module {
         "closure" => trust_diff::gen_modules::closure::module(),
         "stdlib" => trust_diff::gen_modules::stdlib::module(),
         "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module(),
+        "bench" => trust_diff::gen_modules::bench::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -223,7 +224,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

@@ -108,9 +108,10 @@ pub fn method(
 /// 求值次数与原版一致(创建期)。
 pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value)]) -> Func {
     let root = typst_syntax::parse_code(src);
-    let node = root
-        .children()
-        .find(|child| child.kind() == SyntaxKind::Closure)
+    // 源片段可能是裸闭包 `(x) => ..`(Code 下直接是 Closure)或命名
+    // 绑定形态 `f(x) = ..`(LetBinding 包着 Closure),统一取首个
+    // Closure 节点;命名形态下闭包名保留,递归自引用可用。
+    let node = find_closure_node(&root)
         .expect("closure source parses to a closure")
         .clone();
     let num_pos_params = node
@@ -130,6 +131,14 @@ pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value
         captured: scope,
         num_pos_params,
     })
+}
+
+/// 先序遍历找第一个 Closure 节点。
+fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::SyntaxNode> {
+    if node.kind() == SyntaxKind::Closure {
+        return Some(node);
+    }
+    node.children().find_map(find_closure_node)
 }
 
 /// for 循环的迭代源(对照 `Eval for ast::ForLoop`:数组按值、字典按键值

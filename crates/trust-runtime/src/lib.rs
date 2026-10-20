@@ -411,3 +411,40 @@ pub fn content_sequence(parts: Vec<typst::foundations::Content>) -> typst::found
 pub fn embed(value: Value) -> typst::foundations::Content {
     value.display()
 }
+
+/// 迭代器形态的循环源(数组零物化,值逐个移出;字典/字符串按原版
+/// 逐对/字素),供生成代码内联 `for` 使用(break/continue 原生可用)。
+pub fn iter_values(
+    value: Value,
+    span: Span,
+) -> SourceResult<Box<dyn Iterator<Item = Value>>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    Ok(match value {
+        Value::Array(array) => Box::new(array.into_iter()),
+        Value::Dict(dict) => Box::new(
+            dict.into_iter()
+                .map(|(key, item): (Str, Value)| {
+                    Array::from_iter([key.into_value(), item]).into_value()
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ),
+        Value::Str(string) => Box::new(
+            string
+                .as_str()
+                .graphemes(true)
+                .map(|g| Value::Str(g.into()))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ),
+        Value::Bytes(bytes) => Box::new(
+            bytes
+                .as_slice()
+                .iter()
+                .map(|b| Value::Int(*b as i64))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ),
+        other => bail!(span, "cannot loop over {}", other.ty()),
+    })
+}

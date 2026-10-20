@@ -408,6 +408,8 @@ impl Ctx {
                      __out }}"
                 )
             }
+            ast::Expr::LoopBreak(_) => "{ break; Value::None }".into(),
+            ast::Expr::LoopContinue(_) => "{ continue; Value::None }".into(),
             ast::Expr::ForLoop(for_loop) => {
                 let iterable = self.expr(for_loop.iterable(), env, mode);
                 let mut body_env = env.clone();
@@ -425,7 +427,12 @@ impl Ctx {
                 };
                 let body = self.expr(for_loop.body(), &body_env, mode);
                 format!(
-                    "rt::foreach({iterable}, SPAN, |{binder}| -> SourceResult<Value> {{ Ok({body}) }})?"
+                    "{{ let mut __out = Value::None;\n  \
+                     for {binder} in rt::iter_values({iterable}, SPAN)? {{\n  \
+                     \x20   let __v = {body};\n  \
+                     \x20   __out = rt::join(__out, __v, SPAN)?;\n  \
+                     }}\n  \
+                     __out }}"
                 )
             }
             other => {

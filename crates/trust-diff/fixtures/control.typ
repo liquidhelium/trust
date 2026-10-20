@@ -34,3 +34,26 @@
   out
 }
 #let classify(n) = if n < 0 { "neg" } else if n == 0 { "zero" } else { "pos" }
+#let first-over(nums, limit) = {
+  for n in nums {
+    if n > limit { break }
+    if calc.even(n) { continue }
+  }
+  "done"
+}
+#let sum-odds(nums) = {
+  let total = 0
+  for n in nums {
+    if calc.even(n) { continue }
+    total = total + n
+  }
+  total
+}
+#let skip-to(nums, target) = {
+  let out = ()
+  for n in nums {
+    if n == target { break }
+    out.push(n)
+  }
+  out
+}

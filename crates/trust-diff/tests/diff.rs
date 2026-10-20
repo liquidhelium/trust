@@ -43,6 +43,9 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.classify(-3)",
             "m.classify(0)",
             "m.classify(9)",
+            "m.first-over((1, 2, 9, 1), 5)",
+            "m.sum-odds(range(10))",
+            "m.skip-to((1, 2, 3, 2, 1), 3)",
         ],
         "collections" => vec![
             "m.make-range(5)",

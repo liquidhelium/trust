@@ -225,9 +225,7 @@ fn golden_scope_clone(scope: &Scope) -> Scope {
     scope.clone()
 }
 
-fn gen_module_init(
-    fixture: &str,
-) -> Option<fn(&mut typst::engine::Engine, comemo::Tracked<typst::foundations::Context>, &mut Scope) -> typst::diag::SourceResult<()>> {
+fn gen_module_init(fixture: &str) -> Option<trust_world::ModuleInit> {
     match fixture {
         "toplevel" => Some(trust_diff::gen_modules::toplevel::module_init),
         _ => None,

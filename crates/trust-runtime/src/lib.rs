@@ -183,8 +183,8 @@ pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value
 }
 
 /// 命名参数绑定(仅按名,对照 eval_closure 的 `args.named`)。
-pub fn param_named(args: &mut Args, name: &str, span: Span) -> SourceResult<Option<Value>> {
-    Ok(args.named::<Value>(name)?)
+pub fn param_named(args: &mut Args, name: &str, _span: Span) -> SourceResult<Option<Value>> {
+    args.named::<Value>(name)
 }
 
 /// 有默认值的参数:未提供时求默认值。

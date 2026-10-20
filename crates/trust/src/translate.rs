@@ -1798,7 +1798,7 @@ fn translate_package_inner(
                             "\n#[allow(non_snake_case, dead_code)]\nstatic {slot}: rt::Slot = LazyLock::new(&|| {value});"
                         );
                     }
-                    env.module.push((name.clone(), Ref::Slot(format!("{slot}"))));
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(&name));
                 }
                 ImportItems::Rename(name) => {
@@ -1815,7 +1815,7 @@ fn translate_package_inner(
                             "\n#[allow(non_snake_case, dead_code)]\nstatic {slot}: rt::Slot = LazyLock::new(&|| {value});"
                         );
                     }
-                    env.module.push((name.clone(), Ref::Slot(format!("{slot}"))));
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(name));
                 }
                 ImportItems::List(list) => {
@@ -1906,7 +1906,7 @@ fn translate_package_inner(
                         };
                         env2.module.push((seen.clone(), r));
                     }
-                    env2.module.push((name.as_str().to_string(), Ref::Slot(format!("{slot}"))));
+                    env2.module.push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
                     file_items.push_str(&cx.gen_function(&fun, closure, &env2));

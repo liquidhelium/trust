@@ -39,6 +39,10 @@ use typst::{Library, LibraryExt, World};
 ///
 /// 评估专用(`font()` 恒空),足够支撑不落排版的求值测试;后续需要
 /// 排版对拍时再挂 FontBook。
+/// 模块引擎值初始化函数的签名。
+pub type ModuleInit =
+    fn(&mut typst::engine::Engine, comemo::Tracked<Context>, &mut Scope) -> SourceResult<()>;
+
 pub struct InjectWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
@@ -95,7 +99,7 @@ impl InjectWorld {
         &mut self,
         name: &'static str,
         mut module: Module,
-        init: Option<fn(&mut typst::engine::Engine, comemo::Tracked<Context>, &mut Scope) -> SourceResult<()>>,
+        init: Option<ModuleInit>,
     ) -> Module {
         self.inject_module(name, module.clone());
         if let Some(init) = init {

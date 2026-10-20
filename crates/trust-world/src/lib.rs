@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use comemo::{Track, TrackedMut};
+use comemo::Track;
 use typst::diag::{FileError, FileResult, SourceResult};
 use typst::engine::{Route, Sink, Traced};
 use typst::foundations::{

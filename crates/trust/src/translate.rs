@@ -101,8 +101,6 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut items = String::new();
     let mut defines = String::new();
     let mut engine_defines = String::new();
-    let mut engine_names: Vec<String> = Vec::new();
-    let mut engine_getters: Vec<String> = Vec::new();
     for (i, top) in tops.iter().enumerate() {
         let env = Env {
             locals: Vec::new(),

@@ -58,7 +58,7 @@ fn main() {
     let mut mod_rs = String::from("// 由 build.rs 生成\n");
     for name in &names {
         mod_rs.push_str(&format!(
-            "#[allow(unused)]\npub mod {name} {{\n    include!(concat!(env!(\"OUT_DIR\"), \"/gen/{name}.rs\"));\n}}\n\n"
+            "#[allow(clippy::all, unused, unused_mut, non_snake_case, non_upper_case_globals, dead_code)]\npub mod {name} {{\n    include!(concat!(env!(\"OUT_DIR\"), \"/gen/{name}.rs\"));\n}}\n\n"
         ));
     }
     std::fs::write(gen_dir.join("mod.rs"), mod_rs).expect("write mod.rs");

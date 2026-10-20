@@ -103,6 +103,16 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.mixed(21)",
             "m.joined(\"x\", 5)",
         ],
+        "destructuring" => vec![
+            "m.fst-snd((3, 4))",
+            "m.swap-xy((1, 2))",
+            "m.head-tail((1, 2, 3))",
+            "m.dict-pick((a: 3, b: 4))",
+            "m.dict-rest((a: 1, b: 2, c: 3))",
+            "m.sum-pairs(((1, 2), (3, 4)))",
+            "m.reassign((10, 4))",
+            "m.nested(((1, 2), 3))",
+        ],
         "toplevel" => vec![
             "m.squares5",
             "m.golden-name",
@@ -233,6 +243,7 @@ fn gen_module(fixture: &str) -> Module {
         "bench" => trust_diff::gen_modules::bench::module(),
         "content" => trust_diff::gen_modules::content::module(),
         "toplevel" => trust_diff::gen_modules::toplevel::module(),
+        "destructuring" => trust_diff::gen_modules::destructuring::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -246,7 +257,7 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content, toplevel);
+diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content, toplevel, destructuring);
 
 #[test]
 fn all_fixtures_covered() {
@@ -262,7 +273,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content", "toplevel"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content", "toplevel", "destructuring"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

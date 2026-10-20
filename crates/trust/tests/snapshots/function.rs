@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 use comemo::Tracked;
-use typst::diag::{At, SourceResult};
+use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
     Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,

@@ -104,6 +104,64 @@ fn coverage(root: &str) -> i32 {
     }
     files.sort();
 
+    // 包模式:目录含 lib.typ 时按多文件包整体翻译(顶层 import 可解析)。
+    if path.is_dir() {
+        let has_lib = files
+            .iter()
+            .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("lib.typ"));
+        // entry:最浅的 lib.typ(标准包布局 src/lib.typ)。
+        let entry = files
+            .iter()
+            .filter(|f| f.file_name().and_then(|n| n.to_str()) == Some("lib.typ"))
+            .min_by_key(|f| f.components().count())
+            .map(|f| {
+                f.strip_prefix(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            });
+        if let (true, Some(entry)) = (has_lib, entry) {
+            let src_root = entry.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default();
+            let mut map = std::collections::BTreeMap::new();
+            for file in &files {
+                let rel = file
+                    .strip_prefix(path)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // 只收 entry 所在的包源树(docs/tests/gallery 不入包)。
+                if !src_root.is_empty() && !rel.starts_with(&src_root) {
+                    continue;
+                }
+                if let Ok(src) = std::fs::read_to_string(file) {
+                    map.insert(rel, src);
+                }
+            }
+            let input = trust::PackageInput { files: map, entry };
+            match trust::translate_package(&input, "cetz") {
+                Ok(_) => println!("包模式:整包翻译通过"),
+                Err(diags) => {
+                    let mut kinds: std::collections::BTreeMap<String, usize> =
+                        std::collections::BTreeMap::new();
+                    for d in diags {
+                        let key = if d.message.contains("遇到 ") {
+                            format!("顶层: {}", d.message.split("遇到 ").nth(1).unwrap_or("?"))
+                        } else {
+                            d.message.clone()
+                        };
+                        *kinds.entry(key).or_default() += 1;
+                    }
+                    println!("包模式:整包翻译缺口(按频次):");
+                    let mut es: Vec<_> = kinds.into_iter().collect();
+                    es.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                    for (k, n) in es.iter().take(20) {
+                        println!("  {n:4}  {k}");
+                    }
+                }
+            }
+        }
+    }
+
     use std::collections::BTreeMap;
     let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut per_file: Vec<(String, usize)> = Vec::new();

@@ -2030,7 +2030,10 @@ name = "trust-runtime"
 version = "0.1.0"
 dependencies = [
  "comemo",
+ "ecow",
+ "toml",
  "typst",
+ "typst-eval",
  "typst-syntax",
  "unicode-segmentation",
 ]

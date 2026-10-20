@@ -8,9 +8,11 @@ use comemo::Tracked;
 use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
-    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Scope, Str, Value, ops,
+    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Str, Value, ops,
 };
 use typst::syntax::{Span, Spanned, ast, SyntaxKind};
+use typst::World;
+use comemo::{Track, TrackedMut};
 
 /// 模块级值槽:由生成代码以 `LazyLock::new(&init_fn)` 构造。
 pub type Slot = std::sync::LazyLock<Value, &'static (dyn Fn() -> Value + Send + Sync)>;
@@ -447,4 +449,168 @@ pub fn iter_values(
         ),
         other => bail!(span, "cannot loop over {}", other.ty()),
     })
+}
+
+// --- 解构助手(对照 typst-eval/src/binding.rs 的语义与报错文案) ---
+
+/// 数组解构取第 i 个元素(不足时报错)。
+pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceResult<Value> {
+    match array.at(i as i64, None) {
+        Ok(value) => Ok(value),
+        Err(_) => bail!(span, "{}", elements_mismatch(array.len(), i + 1, false)),
+    }
+}
+
+/// 数组解构的剩余收集(`..rest`);`total` 为模式消费的总位数。
+pub fn d_rest(
+    array: &typst::foundations::Array,
+    i: usize,
+    total: usize,
+    span: Span,
+) -> SourceResult<typst::foundations::Array> {
+    let sink_size = (1 + array.len()).checked_sub(total);
+    match sink_size {
+        Some(sink_size) if i + sink_size <= array.len() => Ok(
+            array.as_slice()[i..i + sink_size].iter().cloned().collect(),
+        ),
+        _ => bail!(span, "{}", elements_mismatch(array.len(), total - 1, true)),
+    }
+}
+
+/// 数组解构结束后校验(还有剩余元素则报错)。
+pub fn d_array_finish(
+    array: &typst::foundations::Array,
+    consumed: usize,
+    span: Span,
+) -> SourceResult<()> {
+    if consumed < array.len() {
+        bail!(span, "{}", elements_mismatch(array.len(), consumed, false));
+    }
+    Ok(())
+}
+
+/// 字典解构按键取值。
+pub fn d_get(dict: &typst::foundations::Dict, key: &str, span: Span) -> SourceResult<Value> {
+    match dict.get(key) {
+        Ok(value) => Ok(value.clone()),
+        Err(_) => bail!(span, "dictionary does not contain key \"{key}\""),
+    }
+}
+
+/// 字典解构的剩余收集(`..rest`,排除已用键)。
+pub fn d_dict_rest(dict: &typst::foundations::Dict, used: &[&str]) -> typst::foundations::Dict {
+    let mut rest = typst::foundations::Dict::new();
+    for (key, value) in dict.iter() {
+        if !used.iter().any(|u| *u == key.as_str()) {
+            rest.insert(key.clone(), value.clone());
+        }
+    }
+    rest
+}
+
+/// 对照原版 wrong_number_of_elements 的文案形态。
+fn elements_mismatch(len: usize, expected: usize, spread: bool) -> String {
+    let quantifier = if len > expected { "too many" } else { "not enough" };
+    let what = if spread {
+        format!("at least {expected} elements")
+    } else if expected == 1 {
+        "a single element".to_string()
+    } else {
+        format!("{expected} elements")
+    };
+    format!("{quantifier} elements to destructure, expected {what}")
+}
+
+/// 字段赋值 `d.k = v`(就地修改局部字典;对照解释器 `Access` 语义)。
+pub fn field_assign(target: &mut Value, key: &str, value: Value, span: Span) -> SourceResult<()> {
+    match target {
+        Value::Dict(dict) => {
+            dict.insert(key.into(), value);
+            Ok(())
+        }
+        other => bail!(span, "cannot mutate field of {}", other.ty()),
+    }
+}
+
+fn error_msg(msg: &str) -> typst::diag::SourceDiagnostic {
+    typst::diag::SourceDiagnostic::error(SPAN_PLACEHOLDER, typst::foundations::Str::from(msg))
+}
+
+const SPAN_PLACEHOLDER: Span = Span::detached();
+
+fn import_external_impl(engine: &mut Engine, spec: typst::syntax::package::PackageSpec) -> SourceResult<Module> {
+    use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
+    let manifest_id =
+        RootedPath::new(VirtualRoot::Package(spec.clone()), VirtualPath::new("typst.toml").expect("path"))
+            .intern();
+    let bytes = engine.world.file(manifest_id).at(SPAN_PLACEHOLDER)?;
+    let text = bytes.as_str().map_err(typst::diag::FileError::from).at(SPAN_PLACEHOLDER)?;
+    let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return Err(ecow::eco_vec![error_msg(&format!(
+                "package manifest is malformed ({})",
+                err.message()
+            ))])
+        }
+    };
+    manifest.validate(&spec).at(SPAN_PLACEHOLDER)?;
+    let entry_id = RootedPath::new(
+        VirtualRoot::Package(spec),
+        VirtualPath::new(&manifest.package.entrypoint).expect("entry path"),
+    )
+    .intern();
+    let source = engine.world.source(entry_id).at(SPAN_PLACEHOLDER)?;
+    let mut sink = typst::engine::Sink::new();
+    let route = typst::engine::Route::default();
+    typst_eval::eval(
+        engine.world,
+        engine.library,
+        typst::engine::Traced::default().track(),
+        sink.track_mut(),
+        route.track(),
+        &source,
+    )
+}
+
+trait OptionExt {
+    fn expect_or(self, what: &str, span: Span) -> SourceResult<Value>;
+}
+impl OptionExt for Option<Value> {
+    fn expect_or(self, what: &str, span: Span) -> SourceResult<Value> {
+        self.ok_or(())
+            .or_else(|_| Err::<Value, ()>(()))
+            .map_err(|_| ecow::eco_vec![typst::diag::SourceDiagnostic::error(span, typst::foundations::Str::from(format!("missing argument: {what}")))])
+    }
+}
+
+/// accessor 方法赋值(`a.at(i) = v` / `first` / `last`,对照
+/// typst-eval/src/methods.rs::call_method_access)。
+pub fn accessor_assign(
+    target: &mut Value,
+    method: &str,
+    index: Option<Value>,
+    value: Value,
+    span: Span,
+) -> SourceResult<()> {
+    match target {
+        Value::Array(array) if matches!(method, "first" | "last" | "at") => {
+            let slot: &mut Value = match method {
+                "first" => array.first_mut().at(span)?,
+                "last" => array.last_mut().at(span)?,
+                _ => {
+                    let i = index.expect_or("index", span)?.cast::<i64>().at(span)?;
+                    array.at_mut(i).at(span)?
+                }
+            };
+            *slot = value;
+            Ok(())
+        }
+        Value::Dict(dict) if method == "at" => {
+            let key = index.expect_or("key", span)?.cast::<Str>().at(span)?;
+            { let slot = dict.at_mut(&key).at(span)?; *slot = value; }
+            Ok(())
+        }
+        other => bail!(span, "type {} has no method `{}`", other.ty(), method),
+    }
 }

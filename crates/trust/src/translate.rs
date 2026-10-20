@@ -33,7 +33,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         return Err(vec![Diag { span: typst_syntax::Span::detached(), message: "源文件未能解析为 markup 模块".into() }]);
     };
 
-    let mut cx = Ctx { diags: Vec::new(), next_id: 0 };
+    let mut cx = Ctx { diags: Vec::new(), next_id: 0, current_file: None, package_files: None, package_mods: None };
     // 第一遍:收集顶层绑定(名字 → 槽),函数绑定取其闭包节点。
     let mut tops: Vec<TopBinding> = Vec::new();
     for expr in markup.exprs() {
@@ -168,7 +168,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         "// 由 trust 从 `{module_name}` 生成,勿手改。\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
-         use typst::diag::{{At, SourceResult}};\n\
+         use typst::diag::{{At, SourceResult, bail}};\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
@@ -186,6 +186,12 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
 struct Ctx {
     diags: Vec<Diag>,
     next_id: usize,
+    /// 包模式下当前处理的文件路径(体内字符串 import 解析用)。
+    current_file: Option<String>,
+    /// 包模式的文件集(字符串 import 解析)。
+    package_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
+    /// 包模式:文件路径 → 生成 mod 名(体内字符串 import 取模块值)。
+    package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
 }
 
 struct TopBinding<'a> {
@@ -204,6 +210,10 @@ enum TopKind<'a> {
 enum Ref {
     Slot(String),
     Engine(String),
+    /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`)。
+    ModuleField { expr: String, name: String },
+    /// 直接以表达式求值的绑定(模块值本身或其字段)。
+    Value(String),
 }
 
 /// 名字解析环境:局部栈 + 可见模块槽(静态作用域,按声明序累积)。
@@ -246,8 +256,10 @@ impl Ctx {
                         writeln!(body, "    let mut {rust} = rt::param(__args, \"{}\", span)?;", escape(&name));
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
-                ast::Param::Pos(_) => {
-                    self.diag(param.span(), "函数参数解构模式暂不支持(仅支持单一标识符)".into());
+                ast::Param::Pos(pattern) => {
+                    // 解构参数(对照 eval_closure:"pattern parameter")。
+                    let value = "rt::param(__args, \"pattern parameter\", span)?".to_string();
+                    body.push_str(&self.destructure(pattern, value, &mut fn_env, Mode::FnBody, false));
                 }
                 ast::Param::Named(named) => {
                     let name = named.name().as_str().to_string();
@@ -421,23 +433,19 @@ impl Ctx {
             ast::Expr::LoopContinue(_) => "{ continue; Value::None }".into(),
             ast::Expr::ForLoop(for_loop) => {
                 let iterable = self.expr(for_loop.iterable(), env, mode);
+                let id = self.fresh_id();
+                let binder = format!("__it{id}");
+                // 模式解构在循环体首展开(单一标识符直接绑定)。
                 let mut body_env = env.clone();
-                let binder = match for_loop.pattern() {
-                    ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
-                        bind_local(&mut body_env, ident.as_str())
-                    }
-                    ast::Pattern::Placeholder(_) => {
-                        bind_local(&mut body_env, "item")
-                    }
-                    _ => {
-                        self.diag(for_loop.pattern().span(), "for 模式暂只支持单一标识符".into());
-                        bind_local(&mut body_env, "item")
-                    }
+                let pattern_code = {
+                    let inner = format!("{{ {binder}.clone() }}");
+                    self.destructure(for_loop.pattern(), inner, &mut body_env, mode, false)
                 };
                 let body = self.expr(for_loop.body(), &body_env, mode);
                 format!(
                     "{{ let mut __out = Value::None;\n  \
                      for {binder} in rt::iter_values({iterable}, SPAN)? {{\n  \
+                     \x20   {pattern_code}\n  \
                      \x20   let __v = {body};\n  \
                      \x20   __out = rt::join(__out, __v, SPAN)?;\n  \
                      }}\n  \
@@ -461,6 +469,10 @@ impl Ctx {
             return match module_ref {
                 Ref::Slot(id) => format!("rt::slot(&{id})"),
                 Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                Ref::ModuleField { expr, name } => {
+                    format!("rt::field(&({expr}), \"{name}\", SPAN)?")
+                }
+                Ref::Value(expr) => expr.clone(),
             };
         }
         if mode == Mode::ModuleInit {
@@ -624,6 +636,15 @@ impl Ctx {
                             escape(&name)
                         ))
                     }
+                    Ref::ModuleField { expr, name: field } => {
+                        captured.push(format!(
+                            "(\"{}\", rt::field(&({expr}), \"{field}\", SPAN)?)",
+                            escape(&name)
+                        ))
+                    }
+                    Ref::Value(expr) => {
+                        captured.push(format!("(\"{}\", {expr})", escape(&name)))
+                    }
                 }
             } else if mode == Mode::FnBody {
                 // 全局名:typst 闭包求值不带库基座(Scopes::new(None)),
@@ -639,6 +660,164 @@ impl Ctx {
         let captured = if captured.is_empty() { "&[]".into() } else { format!("&[{}]", captured.join(", ")) };
         format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}))")
     }
+
+/// 生成解构语句(对照 typst-eval/src/binding.rs):
+/// 数组/字典运行时分派,错误文案与数量校验一致。
+/// `assign = true` 时为解构赋值(目标须为已存在局部)。
+fn destructure(
+    &mut self,
+    pattern: ast::Pattern,
+    value: String,
+    env: &mut Env,
+    mode: Mode,
+    assign: bool,
+) -> String {
+    match pattern {
+        ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
+            let name = ident.as_str().to_string();
+            match env.locals.iter().rev().find(|(n, _)| *n == name) {
+                // 已有同名:解构叶子写入既有变量(遮蔽在可见性上等价)。
+                Some((_, rust)) => format!("{rust} = {value};\n"),
+                None => {
+                    if assign {
+                        self.diag(
+                            ident.span(),
+                            format!("解构赋值目标 `{name}` 不是局部变量"),
+                        );
+                        String::new()
+                    } else {
+                        let rust = bind_local(env, &name);
+                        format!("let mut {rust} = {value};\n")
+                    }
+                }
+            }
+        }
+        ast::Pattern::Placeholder(_) => format!("let _ = {value};\n"),
+        ast::Pattern::Parenthesized(p) => self.destructure(p.pattern(), value, env, mode, assign),
+        ast::Pattern::Destructuring(d) => {
+            let id = self.fresh_id();
+            let tmp = format!("__d{id}");
+            let n_items = d.items().count();
+            let mut out = format!("let {tmp} = {value};\n");
+            // 预分配全部绑定名并提升声明到 match 外:数组/字典两分支
+            // 以赋值形式写入同一批变量。
+            for ident in pattern.bindings() {
+                if env.locals.iter().any(|(n, _)| *n == ident.as_str()) {
+                    continue;
+                }
+                let rust = bind_local(env, ident.as_str());
+                out.push_str(&format!("let mut {rust} = Value::None;\n"));
+            }
+
+            // 数组分支。
+            let mut arr = String::new();
+            let arr_ref = format!("__a{id}");
+            let mut i = 0usize;
+            let mut has_spread = false;
+            for item in d.items() {
+                match item {
+                    ast::DestructuringItem::Pattern(p) => {
+                        let v = format!("rt::d_at(&{arr_ref}, {i}, SPAN)?");
+                        arr.push_str(&self.destructure(p, v, env, mode, true));
+                        i += 1;
+                    }
+                    ast::DestructuringItem::Spread(spread) => {
+                        has_spread = true;
+                        let v =
+                            format!("Value::Array(rt::d_rest(&{arr_ref}, {i}, {n_items}, SPAN)?)");
+                        match spread.sink_expr() {
+                            Some(expr) => {
+                                arr.push_str(&self.destructure(
+                                    ast::Pattern::Normal(expr),
+                                    v,
+                                    env,
+                                    mode,
+                                    true,
+                                ));
+                            }
+                            None => arr.push_str(&format!("let _ = {v};\n")),
+                        }
+                    }
+                    ast::DestructuringItem::Named(_) => {
+                        arr.push_str(
+                            "bail!(SPAN, \"cannot destructure named pattern from an array\");\n",
+                        );
+                    }
+                }
+            }
+            if !has_spread {
+                arr.push_str(&format!("rt::d_array_finish(&{arr_ref}, {i}, SPAN)?;\n"));
+            }
+
+            // 字典分支。
+            let mut dict = String::new();
+            let dict_ref = format!("__k{id}");
+            let mut used: Vec<String> = Vec::new();
+            let mut sink: Option<(ast::Expr, String)> = None;
+            for item in d.items() {
+                match item {
+                    ast::DestructuringItem::Pattern(ast::Pattern::Normal(ast::Expr::Ident(
+                        ident,
+                    ))) => {
+                        let key = ident.as_str().to_string();
+                        used.push(key.clone());
+                        let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));
+                        dict.push_str(&self.destructure(
+                            ast::Pattern::Normal(ast::Expr::Ident(ident)),
+                            v,
+                            env,
+                            mode,
+                            true,
+                        ));
+                    }
+                    ast::DestructuringItem::Named(named) => {
+                        let key = named.name().as_str().to_string();
+                        used.push(key.clone());
+                        let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));
+                        dict.push_str(&self.destructure(named.pattern(), v, env, mode, true));
+                    }
+                    ast::DestructuringItem::Spread(spread) => {
+                        if let Some(expr) = spread.sink_expr() {
+                            sink = Some((expr, format!("__r{id}")));
+                        }
+                    }
+                    ast::DestructuringItem::Pattern(p) => {
+                        let _ = p;
+                        dict.push_str(
+                            "bail!(SPAN, \"cannot destructure unnamed pattern from dictionary\");\n",
+                        );
+                    }
+                }
+            }
+            if let Some((expr, sink_tmp)) = sink {
+                let used_list = used
+                    .iter()
+                    .map(|k| format!("\"{}\"", escape(k)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                dict.push_str(&format!(
+                    "let {sink_tmp} = rt::d_dict_rest(&{dict_ref}, &[{used_list}]);\n"
+                ));
+                dict.push_str(&self.destructure(
+                    ast::Pattern::Normal(expr),
+                    format!("Value::Dict({sink_tmp})"),
+                    env,
+                    mode,
+                    true,
+                ));
+            }
+
+            out.push_str(&format!(
+                "match &{tmp} {{\n    Value::Array({arr_ref}) => {{\n{arr}    }}\n    Value::Dict({dict_ref}) => {{\n{dict}    }}\n    other => bail!(SPAN, \"cannot destructure {{}}\", other.ty()),\n}}\n"
+            ));
+            out
+        }
+        ast::Pattern::Normal(other) => {
+            self.diag(other.span(), "解构模式此处须为标识符".into());
+            String::new()
+        }
+    }
+}
 
     /// 代码块:非末位语句值按 join 语义累积,末位表达式为块值
     /// (对照 typst code block 求值)。
@@ -660,20 +839,134 @@ impl Ctx {
                     Some(init) => self.expr(init, &env, mode),
                     None => "Value::None".into(),
                 };
-                let name = match lets.kind() {
-                    ast::LetBindingKind::Closure(name) => Some(name.as_str().to_string()),
-                    ast::LetBindingKind::Normal(pattern) => match pattern.bindings().as_slice() {
-                        [name] => Some(name.as_str().to_string()),
-                        _ => {
-                            self.diag(lets.span(), "局部解构绑定暂不支持".into());
-                            None
-                        }
-                    },
-                };
-                if let Some(name) = name {
-                    let rust = bind_local(&mut env, &name);
-                    let _ = writeln!(out, "    let mut {rust} = {init};");
+                match lets.kind() {
+                    ast::LetBindingKind::Closure(name) => {
+                        let rust = bind_local(&mut env, name.as_str());
+                        let _ = writeln!(out, "    let mut {rust} = {init};");
+                    }
+                    ast::LetBindingKind::Normal(pattern) => {
+                        let stmts = self.destructure(pattern, init, &mut env, mode, false);
+                        out.push_str("    ");
+                        out.push_str(&stmts.replace('\n', "\n    "));
+                    }
                 }
+                continue;
+            }
+            if let ast::Expr::ModuleImport(import) = stmt {
+                // 函数体内局部 import:解析模块值表达式后抄入局部绑定。
+                let source = import.source();
+                let module_expr: Option<String> = match source {
+                    ast::Expr::Ident(_) | ast::Expr::FieldAccess(_) => {
+                        match parse_module_access(source) {
+                            Some((root, fields)) => {
+                                let base = match env.module.iter().rev().find(|(n, _)| *n == root) {
+                                    Some((_, module_ref)) => match module_ref {
+                                        Ref::Slot(id) => format!("rt::slot(&{id})"),
+                                        Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                                        Ref::Value(e) => e.clone(),
+                                        Ref::ModuleField { expr, name } => {
+                                            format!("rt::field(&({expr}), \"{name}\", SPAN)?")
+                                        }
+                                    },
+                                    None if mode == Mode::FnBody => {
+                                        // 全局模块(如 `import calc: abs`)。
+                                        format!("rt::global(engine, \"{root}\", SPAN)?")
+                                    }
+                                    None => {
+                                        self.diag(source.span(), format!("import 的模块根 `{root}` 不可见"));
+                                        continue;
+                                    }
+                                };
+                                let mut expr = base;
+                                for field in &fields {
+                                    expr =
+                                        format!("rt::field(&({expr}), \"{}\", SPAN)?", escape(field));
+                                }
+                                Some(expr)
+                            }
+                            None => {
+                                self.diag(source.span(), "体内 import 源须为模块访问".into());
+                                continue;
+                            }
+                        }
+                    }
+                    ast::Expr::Str(str_expr) => {
+                        // 字符串路径:包模式解析到包内文件的模块值。
+                        let raw = str_expr.get().to_string();
+                        let (Some(file), Some(files), Some(mods)) = (
+                            self.current_file.clone(),
+                            self.package_files.clone(),
+                            self.package_mods.clone(),
+                        ) else {
+                            self.diag(
+                                str_expr.span(),
+                                "体内字符串 import 仅在包模式支持(须用模块访问形态)".into(),
+                            );
+                            continue;
+                        };
+                        let target = normalize_import(&file, &raw);
+                        match (files.contains_key(&target), mods.get(&target)) {
+                            (true, Some(mod_name)) => {
+                                Some(format!("Value::Module({mod_name}::module())"))
+                            }
+                            _ => {
+                                self.diag(
+                                    str_expr.span(),
+                                    format!("体内 import \"{raw}\" 不在包文件集"),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.diag(source.span(), "体内 import 源暂只支持模块访问".into());
+                        continue;
+                    }
+                };
+                let Some(module_expr) = module_expr else { continue };
+                // 形态:bare / rename → 模块值;列表 → 字段取值。
+                match import.imports() {
+                    None => {
+                        let name = match import.new_name() {
+                            Some(new_name) => new_name.as_str().to_string(),
+                            None => source
+                                .to_untyped()
+                                .full_text()
+                                .rsplit('.')
+                                .next()
+                                .unwrap_or("m")
+                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                                .next()
+                                .unwrap_or("m")
+                                .to_string(),
+                        };
+                        let rust = bind_local(&mut env, &name);
+                        let _ = writeln!(out, "    let mut {rust} = {module_expr};");
+                    }
+                    Some(ast::Imports::Wildcard) => {
+                        self.diag(stmt.span(), "体内通配 import 暂不支持".into());
+                    }
+                    Some(ast::Imports::Items(items)) => {
+                        for item in items.iter() {
+                            let original = item.original_name().as_str().to_string();
+                            let bound = item.bound_name().as_str().to_string();
+                            let rust = bind_local(&mut env, &bound);
+                            let _ = writeln!(
+                                out,
+                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", SPAN)?;",
+                                escape(&original)
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            if let ast::Expr::DestructAssignment(assign_) = stmt {
+                // 解构赋值:目标须为已存在局部(对照 `Access` 语义)。
+                let value = self.expr(assign_.value(), &env, mode);
+                let stmts = self.destructure(assign_.pattern(), value, &mut env, mode, true);
+                out.push_str("    ");
+                out.push_str(&stmts.replace('\n', "\n    "));
                 continue;
             }
             if let ast::Expr::Binary(binary) = stmt
@@ -717,12 +1010,46 @@ impl Ctx {
                         None => {
                             self.diag(
                                 binary.span(),
-                                format!("赋值目标 `{name}` 不是局部变量(模块槽/字段赋值暂不支持)"),
+                                format!("赋值目标 `{name}` 不是局��变量(模块槽赋值暂不支持)"),
                             );
                         }
                     }
+                } else if let ast::Expr::FieldAccess(access) = binary.lhs()
+                    && let ast::Expr::Ident(ident) = access.target()
+                    && let Some((_, rust)) =
+                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
+                {
+                    // 字段赋值 `d.k = v`:就地修改局部字典。
+                    let field = access.field().as_str();
+                    let value = self.expr(binary.rhs(), &env, mode);
+                    let _ = writeln!(
+                        out,
+                        "    rt::field_assign(&mut {rust}, \"{}\", {value}, SPAN)?;",
+                        escape(field)
+                    );
+                } else if let ast::Expr::FuncCall(call) = binary.lhs()
+                    && let ast::Expr::FieldAccess(access) = call.callee()
+                    && let ast::Expr::Ident(ident) = access.target()
+                    && matches!(access.field().as_str(), "at" | "first" | "last")
+                    && let Some((_, rust)) =
+                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
+                {
+                    // accessor 赋值:`a.at(i) = v` / `a.first() = v`。
+                    let method = access.field().as_str();
+                    let mut index = "None".to_string();
+                    for arg in call.args().items() {
+                        if let ast::Arg::Pos(expr) = arg {
+                            index = format!("Some({})", self.expr(expr, &env, mode));
+                            break;
+                        }
+                    }
+                    let value = self.expr(binary.rhs(), &env, mode);
+                    let _ = writeln!(
+                        out,
+                        "    rt::accessor_assign(&mut {rust}, \"{method}\", {index}, {value}, SPAN)?;"
+                    );
                 } else {
-                    self.diag(binary.span(), "字段/解构赋值暂不支持".into());
+                    self.diag(binary.span(), "字段链/复杂目标赋值暂不支持".into());
                 }
                 continue;
             }
@@ -975,6 +1302,9 @@ pub fn translate_package(
         span: typst_syntax::Span,
         target: String,                   // 目标文件路径
         items: ImportItems,
+        external: bool,                   // 外部包("@ns/name:ver")
+        // 模块值表达式 import(`deps.oxifmt`):根绑定名 + 字段链
+        module_access: Option<(String, Vec<String>)>,
     }
     enum ImportItems {
         Bare,
@@ -983,7 +1313,7 @@ pub fn translate_package(
         Wildcard,
     }
 
-    let mut cx = Ctx { diags: Vec::new(), next_id: 0 };
+    let mut cx = Ctx { diags: Vec::new(), next_id: 0, current_file: None, package_files: None, package_mods: None };
     let mut plans: Vec<FilePlan> = Vec::new();
     let mut roots: Vec<(String, typst_syntax::SyntaxNode)> = Vec::new();
     for (path, src) in input.files.iter() {
@@ -1002,15 +1332,30 @@ pub fn translate_package(
             match expr {
                 ast::Expr::Space(_) | ast::Expr::Parbreak(_) => {}
                 ast::Expr::ModuleImport(import) => {
-                    let ast::Expr::Str(path_expr) = import.source() else {
-                        cx.diag(expr.span(), "包内 import 暂只支持字符串路径".into());
-                        continue;
+                    let (raw, external, module_access) = match import.source() {
+                        // 字符串路径:外部包或包内相对/绝对路径。
+                        ast::Expr::Str(path_expr) => {
+                            let raw = path_expr.get().to_string();
+                            let external = raw.starts_with('@');
+                            (raw, external, None)
+                        }
+                        // 模块值表达式 import(`import deps.oxifmt: x`)。
+                        other => match parse_module_access(other) {
+                            Some(access) => (String::new(), false, Some(access)),
+                            None => {
+                                cx.diag(expr.span(), "import 源须为字符串路径或模块字段访问".into());
+                                continue;
+                            }
+                        },
                     };
-                    let raw = path_expr.get().to_string();
-                    let target = normalize_import(path, &raw);
-                    if !input.files.contains_key(&target) {
+                    let target = if module_access.is_some() {
+                        String::new()
+                    } else {
+                        normalize_import(path, &raw)
+                    };
+                    if module_access.is_none() && !external && !input.files.contains_key(&target) {
                         cx.diag(
-                            path_expr.span(),
+                            expr.span(),
                             format!("包内 import \"{raw}\" 解析到 {target},不在文件集中"),
                         );
                         continue;
@@ -1037,7 +1382,7 @@ pub fn translate_package(
                                 .collect(),
                         ),
                     };
-                    imports.push(ImportEdge { span: expr.span(), target, items });
+                    imports.push(ImportEdge { span: expr.span(), target, items, external, module_access });
                 }
                 ast::Expr::LetBinding(lets) => {
                     let names = match lets.kind() {
@@ -1102,6 +1447,15 @@ pub fn translate_package(
         }
     }
 
+    let package_files = std::rc::Rc::new(input.files.clone());
+    let package_mods_map: std::collections::BTreeMap<String, String> = plans
+        .iter()
+        .map(|p| (p.path.clone(), p.mod_name.clone()))
+        .collect();
+    let package_mods = std::rc::Rc::new(package_mods_map);
+    cx.package_files = Some(package_files.clone());
+    cx.package_mods = Some(package_mods.clone());
+
     // 第二遍:逐文件生成(每个文件的函数体可见:自己的绑定 + import 抄入)。
     // 顶层绑定查找表:路径 → (名字 → qualified 槽)。
     let export_table: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
@@ -1121,11 +1475,91 @@ pub fn translate_package(
     let mut items = String::new();
     let mut top_defines = String::new();
     for plan in &plans {
+        cx.current_file = Some(plan.path.clone());
         let is_entry = plan.path == entry;
         let mut env = Env { locals: Vec::new(), module: Vec::new() };
         // 当前文件的 import 抄入(可见绑定 + module() 定义)。
         let mut file_defines = String::new();
         for edge in &plan.imports {
+            // 外部包:引擎槽 + 运行时导入(未翻译依赖走解释器)。
+            if edge.external {
+                let spec = edge.target.clone();
+                let name = match &edge.items {
+                    ImportItems::Rename(name) => name.clone(),
+                    _ => spec_name(&spec),
+                };
+                let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
+                let _ = writeln!(
+                    items,
+                    "\n#[allow(non_snake_case, dead_code)]\npub(super) fn {slot}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {slot}.get() {{ return Ok(v.clone()); }}\n    let v = Value::Module(rt::import_external(engine, \"{spec}\")?);\n    let _ = {slot}.set(v.clone());\n    Ok(v)\n}}\n\
+                     #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();"
+                );
+                match &edge.items {
+                    ImportItems::Bare | ImportItems::Rename(_) => {
+                        env.module.push((name.clone(), Ref::Engine(slot.clone())));
+                        // 引擎绑定不在 engine-less 的 module() 注册。
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name,
+                                Ref::ModuleField {
+                                    expr: format!("{slot}_get(engine, context)?"),
+                                    name: item.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    ImportItems::Wildcard => {
+                        cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
+                    }
+                }
+                continue;
+            }
+            // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
+            if let Some((root, fields)) = &edge.module_access {
+                let base = match env.module.iter().rev().find(|(n, _)| n == root) {
+                    Some((_, module_ref)) => match module_ref {
+                        Ref::Slot(id) => format!("rt::slot(&{id})"),
+                        Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                        Ref::Value(e) => e.clone(),
+                        Ref::ModuleField { expr, name } => {
+                            format!("rt::field(&({expr}), \"{name}\", SPAN)?")
+                        }
+                    },
+                    None => {
+                        cx.diag(edge.span, format!("import 的模块根 `{root}` 不可见(须先 import)"));
+                        continue;
+                    }
+                };
+                let mut expr = base;
+                for field in fields {
+                    expr = format!("rt::field(&({expr}), \"{}\", SPAN)?", escape(field));
+                }
+                match &edge.items {
+                    ImportItems::Bare => {
+                        let name = fields.last().cloned().unwrap_or_else(|| root.clone());
+                        env.module.push((name, Ref::Value(expr)));
+                    }
+                    ImportItems::Rename(name) => {
+                        env.module.push((name.clone(), Ref::Value(expr)));
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name,
+                                Ref::ModuleField { expr: expr.clone(), name: item.clone() },
+                            ));
+                        }
+                    }
+                    ImportItems::Wildcard => {
+                        cx.diag(edge.span, "模块值表达式的通配 import 暂不支持".into());
+                    }
+                }
+                continue;
+            }
             let target_mod = &plans
                 .iter()
                 .find(|p| p.path == edge.target)
@@ -1207,6 +1641,7 @@ pub fn translate_package(
         // 本文件顶层绑定(追加在 import 之后:遮蔽语义)。
         let mut file_items = String::new();
         let mut own: Vec<(String, String)> = Vec::new();
+        let mut own_engine: Vec<String> = Vec::new();
         for expr in plan.markup.exprs() {
             let ast::Expr::LetBinding(lets) = expr else { continue };
             match lets.kind() {
@@ -1222,7 +1657,12 @@ pub fn translate_package(
                         .expect("slot collected");
                     let mut env2 = env.clone();
                     for (seen, seen_slot) in &own {
-                        env2.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
+                        let r = if own_engine.iter().any(|e| e == seen_slot) {
+                            Ref::Engine(seen_slot.clone())
+                        } else {
+                            Ref::Slot(seen_slot.clone())
+                        };
+                        env2.module.push((seen.clone(), r));
                     }
                     env2.module.push((name.as_str().to_string(), Ref::Slot(format!("{slot}"))));
                     let fun = format!("f_{}", lowercase(slot));
@@ -1253,10 +1693,44 @@ pub fn translate_package(
                         .expect("slot collected");
                     let mut env2 = env.clone();
                     for (seen, seen_slot) in &own {
-                        env2.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
+                        let r = if own_engine.iter().any(|e| e == seen_slot) {
+                            Ref::Engine(seen_slot.clone())
+                        } else {
+                            Ref::Slot(seen_slot.clone())
+                        };
+                        env2.module.push((seen.clone(), r));
                     }
                     env2.module.push((name.as_str().to_string(), Ref::Slot(slot.clone())));
+                    let before = cx.diags.len();
                     let value = cx.expr(init_expr, &env2, Mode::ModuleInit);
+                    let needs_engine = cx.diags.len() > before;
+                    if needs_engine {
+                        cx.diags.truncate(before);
+                        // 引擎值:本文件惰性槽;若被其他文件 import 则明确报错。
+                        let imported_elsewhere = plans.iter().any(|p| {
+                            p.path != plan.path
+                                && p.imports.iter().any(|edge| edge.target == plan.path)
+                        });
+                        if imported_elsewhere {
+                            cx.diag(
+                                lets.span(),
+                                format!(
+                                    "顶层引擎值 `{}` 被其他文件 import(暂不支持跨文件引擎值)",
+                                    name.as_str()
+                                ),
+                            );
+                            continue;
+                        }
+                        let value = cx.expr(init_expr, &env2, Mode::FnBody);
+                        file_items.push_str(&format!(
+                            "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({value})\n}}\n\
+                             #[allow(non_snake_case, dead_code)]\nstatic {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
+                             #[allow(non_snake_case, dead_code)]\nfn {slot}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {slot}.get() {{ return Ok(v.clone()); }}\n    let v = {slot}_init(engine, context)?;\n    let _ = {slot}.set(v.clone());\n    Ok(v)\n}}\n"
+                        ));
+                        own_engine.push(slot.clone());
+                        own.push((name.as_str().to_string(), slot.clone()));
+                        continue;
+                    }
                     file_items.push_str(&format!(
                         "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init() -> Value {{\n    {value}\n}}\n\
                          #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: rt::Slot = LazyLock::new(&{slot}_init);\n"
@@ -1266,6 +1740,10 @@ pub fn translate_package(
             }
         }
         for (name, slot) in &own {
+            if own_engine.iter().any(|e| e == slot) {
+                // 引擎值:engine-less 的 module() 无法注册,由宿主 module_init 补。
+                continue;
+            }
             // 入口的导出面在顶层 module(),须限定文件 mod;文件内部 module() 裸引用即可。
             let qualified = format!("{}::{slot}", plan.mod_name);
             let _ = writeln!(
@@ -1298,7 +1776,7 @@ pub fn translate_package(
         "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
-         use typst::diag::{{At, SourceResult}};\n\
+         use typst::diag::{{At, SourceResult, bail}};\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
@@ -1309,12 +1787,41 @@ pub fn translate_package(
     ))
 }
 
-/// 相对当前文件目录解析 import 路径(POSIX 风格)。
+/// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
+fn spec_name(spec: &str) -> String {
+    spec.split('/').nth(1).unwrap_or("pkg").split(':').next().unwrap_or("pkg").to_string()
+}
+
+/// 解析模块值访问链:`deps.oxifmt` → ("deps", ["oxifmt"]);裸 Ident → ("x", [])。
+fn parse_module_access(expr: ast::Expr) -> Option<(String, Vec<String>)> {
+    fn walk(expr: ast::Expr, fields: &mut Vec<String>) -> Option<String> {
+        match expr {
+            ast::Expr::Ident(ident) => Some(ident.as_str().to_string()),
+            ast::Expr::FieldAccess(access) => {
+                let root = walk(access.target(), fields)?;
+                fields.push(access.field().as_str().to_string());
+                Some(root)
+            }
+            _ => None,
+        }
+    }
+    let mut fields = Vec::new();
+    let root = walk(expr, &mut fields)?;
+    fields.reverse();
+    Some((root, fields))
+}
+
+/// 解析 import 路径(POSIX 风格):以 `/` 开头为包根绝对路径,
+/// 其余相对当前文件目录(`..` 归一)。
 fn normalize_import(from: &str, raw: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
-    let dir = match from.rfind('/') {
-        Some(idx) => from[..idx].split('/').collect::<Vec<_>>(),
-        None => Vec::new(),
+    let dir = if raw.starts_with('/') {
+        Vec::new()
+    } else {
+        match from.rfind('/') {
+            Some(idx) => from[..idx].split('/').collect::<Vec<_>>(),
+            None => Vec::new(),
+        }
     };
     parts.extend(dir);
     for seg in raw.split('/') {

@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 use comemo::Tracked;
-use typst::diag::{At, SourceResult};
+use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
     Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
@@ -35,8 +35,10 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     rt::finish(__args, span)?;
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
-    __out = rt::join(__out, { let mut __out = Value::None;
-  for x in rt::iter_values(items.clone(), SPAN)? {
+        __out = rt::join(__out, { let mut __out = Value::None;
+  for __it1 in rt::iter_values(items.clone(), SPAN)? {
+      let mut x = { __it1.clone() };
+
       let __v = { let mut __out = Value::None;
     let _ = __out;
     if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(SPAN)?, std::cmp::Ordering::Greater)), SPAN)? { { let mut __out = Value::None;

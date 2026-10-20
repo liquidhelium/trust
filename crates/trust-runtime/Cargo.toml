@@ -8,5 +8,8 @@ publish = false
 [dependencies]
 typst = "0.15.1"
 typst-syntax = "0.15.1"
+typst-eval = "0.15.1"
 comemo = "0.5.1"
 unicode-segmentation = "1"
+toml = "0.8"
+ecow = "0.2"

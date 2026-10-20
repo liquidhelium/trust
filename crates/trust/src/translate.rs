@@ -112,7 +112,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut defines = String::new();
     let mut engine_defines = String::new();
     for (i, top) in tops.iter().enumerate() {
-        let env = Env {
+        // 函数体可见自身(递归)与此前全部绑定;值 init 在绑定生效前求值,
+        // 同名引用解析到外层,由下方值分支自行处理。
+        let mut env = Env {
             locals: Vec::new(),
             module: tops[..=i]
                 .iter()
@@ -123,12 +125,24 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 })
                 .collect(),
         };
+        let init_env = Env {
+            locals: Vec::new(),
+            module: tops[..i]
+                .iter()
+                .enumerate()
+                .map(|(j, t)| {
+                    let r = if engine_flags[j] { Ref::Engine(t.rust.clone()) } else { Ref::Slot(t.rust.clone()) };
+                    (t.name.clone(), r)
+                })
+                .collect(),
+        };
+        let _ = &mut env;
         match &top.kind {
             TopKind::Value { init } => {
                 let id = &top.rust;
                 if engine_flags[i] {
                     // 引擎值:惰性 OnceLock,首访从函数体/宿主 module_init 强制。
-                    let expr = cx.expr(*init, &env, Mode::FnBody);
+                    let expr = cx.expr(*init, &init_env, Mode::FnBody);
                     let _ = writeln!(
                         items,
                         "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({expr})\n}}\n\
@@ -141,7 +155,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         escape(&top.name)
                     );
                 } else {
-                    let expr = cx.expr(*init, &env, Mode::ModuleInit);
+                    let expr = cx.expr(*init, &init_env, Mode::ModuleInit);
                     let _ = writeln!(
                         items,
                         "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    {expr}\n}}\n\
@@ -1645,6 +1659,7 @@ fn translate_package_inner(
 
     let mut items = String::new();
     let mut top_defines = String::new();
+    let mut engine_init_defines = String::new();
     for plan in &plans {
         cx.current_file = Some(plan.path.clone());
         let is_entry = plan.path == entry;
@@ -1799,7 +1814,13 @@ fn translate_package_inner(
                             Ref::Slot(qualified.clone())
                         };
                         env.module.push((as_name.clone(), r));
-                        if !engine_slots.contains(qualified) {
+                        if engine_slots.contains(qualified) {
+                            let _ = writeln!(
+                                engine_init_defines,
+                                "    scope.define(\"{}\", {qualified}_get(engine, context)?);",
+                                escape(&as_name)
+                            );
+                        } else {
                             let _ = writeln!(
                                 file_defines,
                                 "    scope.define(\"{}\", rt::slot(&{qualified}));",
@@ -1819,7 +1840,13 @@ fn translate_package_inner(
                             Ref::Slot(qualified.clone())
                         };
                         env.module.push((name.clone(), r));
-                        if !engine_slots.contains(qualified) {
+                        if engine_slots.contains(qualified) {
+                            let _ = writeln!(
+                                engine_init_defines,
+                                "    scope.define(\"{}\", {qualified}_get(engine, context)?);",
+                                escape(name)
+                            );
+                        } else {
                             let _ = writeln!(
                                 file_defines,
                                 "    scope.define(\"{}\", rt::slot(&{qualified}));",
@@ -1896,14 +1923,8 @@ fn translate_package_inner(
                         };
                         env2.module.push((seen.clone(), r));
                     }
-                    env2.module.push((
-                        name.as_str().to_string(),
-                        if engine_slots.contains(&qualified_self) {
-                            Ref::Engine(qualified_self.clone())
-                        } else {
-                            Ref::Slot(slot.clone())
-                        },
-                    ));
+                    // init 在绑定生效前求值:同名引用解析到外层(如全局
+                    // 类型),env2 不含本绑定 → 避免引擎槽自引用递归。
                     if engine_slots.contains(&qualified_self) {
                         // 引擎值(拓扑预扫描已定):本文件惰性槽。
                         let value = cx.expr(init_expr, &env2, Mode::FnBody);
@@ -1928,6 +1949,13 @@ fn translate_package_inner(
         for (name, slot) in &own {
             if own_engine.iter().any(|e| e == slot) {
                 // 引擎值:engine-less 的 module() 无法注册,由宿主 module_init 补。
+                if is_entry {
+                    let _ = writeln!(
+                        engine_init_defines,
+                        "    scope.define(\"{}\", {slot}_get(engine, context)?);",
+                        escape(name)
+                    );
+                }
                 continue;
             }
             // 入口的导出面在顶层 module(),须限定文件 mod;文件内部 module() 裸引用即可。
@@ -1965,7 +1993,10 @@ fn translate_package_inner(
          use trust_runtime as rt;\n\n\
          const SPAN: Span = Span::detached();\n\n\
          /// 入口模块的导出面。\n\
-         pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{top_defines}    Module::new(\"{module_name}\", scope)\n}}\n{items}"
+         pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{top_defines}    Module::new(\"{module_name}\", scope)\n}}\n\
+         /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。\n\
+         #[allow(non_snake_case, unused_variables)]\n\
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_init_defines}    let _ = engine;\n    Ok(())\n}}\n{items}"
     )
 }
 

@@ -85,6 +85,17 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.repeat-str(\"ab\", 3)",
             "m.abs-sum((-1, 2, -3))",
         ],
+        "pkg_shapes" => vec![
+            "m.area(3, 4)",
+            "m.describe(\"rect\", 2.5, 3.25)",
+            "m.scale-area(2, 3)",
+            "m.scale-area(2, 3, k: 10)",
+            "m.golden-ratio()",
+            "m.utils.clamp(5, 1, 3)",
+            "m.utils.lerp(0, 10, 0.25)",
+            "m.pad(\"x\")",
+            "m.dec(3.14159)",
+        ],
         _ => vec![],
     }
 }
@@ -95,6 +106,31 @@ fn fixture_src(name: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|_| panic!("read fixture {name}"))
 }
 
+/// 包 fixture 内单个文件。
+fn fixture_file(name: &str, rel: &str) -> String {
+    let path = format!("fixtures/{name}/{rel}");
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"))
+}
+
+/// 包 fixture 的全部 (相对路径, 源码)。
+fn pkg_files(name: &str) -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                walk(&path, &format!("{prefix}{file}/"), out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                out.push((format!("{prefix}{file}"), std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(std::path::Path::new(&format!("fixtures/{name}")), "", &mut out);
+    out
+}
+
 /// 双路执行并比较:golden = 解释器求值 fixture 模块;rust = 生成物模块。
 fn differential(fixture: &str) {
     let calls = cases(fixture);
@@ -102,8 +138,18 @@ fn differential(fixture: &str) {
         panic!("fixture {fixture} 没有对拍用例");
     }
 
-    // golden:解释器。
-    let golden_world = InjectWorld::new(&fixture_src(fixture), vec![]);
+    // golden:解释器(包 fixture 需装配全部源文件)。
+    let golden_world = if fixture.starts_with("pkg_") {
+        let mut world = InjectWorld::new(&fixture_file(fixture, "entry.typ"), vec![]);
+        for (rel, src) in pkg_files(fixture) {
+            if rel != "entry.typ" {
+                world.add_source(&rel, &src);
+            }
+        }
+        world
+    } else {
+        InjectWorld::new(&fixture_src(fixture), vec![])
+    };
     let golden: Module = golden_world.eval_main().expect("golden 模块求值");
     let mut golden_scope = Scope::new();
     golden_scope.define("m", golden.clone());
@@ -147,6 +193,7 @@ fn gen_module(fixture: &str) -> Module {
         "collections" => trust_diff::gen_modules::collections::module(),
         "closure" => trust_diff::gen_modules::closure::module(),
         "stdlib" => trust_diff::gen_modules::stdlib::module(),
+        "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -160,7 +207,7 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith, control, collections, closure, stdlib);
+diff_test!(arith, control, collections, closure, stdlib, pkg_shapes);
 
 #[test]
 fn all_fixtures_covered() {
@@ -176,7 +223,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

@@ -76,6 +76,16 @@ impl InjectWorld {
         }
     }
 
+    /// 追加一个相对主文件的源文件(多文件包形态)。
+    pub fn add_source(&mut self, path: &str, text: &str) {
+        let id = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new(path).unwrap_or_else(|_| panic!("invalid path {path}")),
+        )
+        .intern();
+        self.sources.insert(id, Source::new(id, text.to_string()));
+    }
+
     /// 虚拟化一个包:`spec` 的包解析到 `entry` 入口文件,内容为
     /// `entry_text`(shim,通常一行 `#import <全局模块>: *`)。
     ///

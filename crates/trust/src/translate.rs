@@ -245,6 +245,33 @@ impl Ctx {
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env, mode),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env, mode),
+            ast::Expr::ContentBlock(block) => {
+                // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
+                // 嵌入表达式,构造方式对照 typst-eval/src/markup.rs。
+                let mut parts = Vec::new();
+                for expr in block.body().exprs() {
+                    match expr {
+                        ast::Expr::Text(t) => {
+                            parts.push(format!("rt::text({:?})", t.get().as_str()));
+                        }
+                        ast::Expr::Space(_) => parts.push("rt::space()".into()),
+                        ast::Expr::Linebreak(_) => parts.push("rt::linebreak()".into()),
+                        ast::Expr::Parbreak(_) => parts.push("rt::parbreak()".into()),
+                        ast::Expr::Escape(e) => {
+                            parts.push(format!("rt::text({:?})", e.get().to_string()));
+                        }
+                        other => {
+                            let value = self.expr(other, env, mode);
+                            parts.push(format!("rt::embed({value})"));
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    "Value::Content(Content::sequence(Vec::new()))".into()
+                } else {
+                    format!("Value::Content(rt::content_sequence(vec![{}]))", parts.join(", "))
+                }
+            }
             ast::Expr::Array(array) => {
                 let mut out =
                     String::from("{ let mut __a: Vec<Value> = Vec::new();");
@@ -344,12 +371,7 @@ impl Ctx {
                 };
                 let body = self.expr(for_loop.body(), &body_env, mode);
                 format!(
-                    "{{ let mut __out = Value::None;\n  \
-                     for {binder} in rt::iterate(&({iterable}), SPAN)? {{\n  \
-                     \x20   let __v = {body};\n  \
-                     \x20   __out = rt::join(__out, __v, SPAN)?;\n  \
-                     }}\n  \
-                     __out }}"
+                    "rt::foreach({iterable}, SPAN, |{binder}| -> SourceResult<Value> {{ Ok({body}) }})?"
                 )
             }
             other => {

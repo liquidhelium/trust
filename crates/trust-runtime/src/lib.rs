@@ -341,3 +341,73 @@ pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -
     args.finish()?;
     Ok(output)
 }
+
+/// for 循环的零物化执行(对照 `Eval for ast::ForLoop`):迭代源直接
+/// 消费(数组 into_iter 无逐元素克隆),每轮体值按 join 累积。
+pub fn foreach(
+    value: Value,
+    span: Span,
+    mut f: impl FnMut(Value) -> SourceResult<Value>,
+) -> SourceResult<Value> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut out = Value::None;
+    match value {
+        Value::Array(array) => {
+            for item in array {
+                out = ops::join(out, f(item)?).at(span)?;
+            }
+        }
+        Value::Dict(dict) => {
+            for (key, item) in dict {
+                let pair = Array::from_iter([key.into_value(), item]).into_value();
+                out = ops::join(out, f(pair)?).at(span)?;
+            }
+        }
+        Value::Str(string) => {
+            for grapheme in string.as_str().graphemes(true) {
+                let item = Value::Str(grapheme.into());
+                out = ops::join(out, f(item)?).at(span)?;
+            }
+        }
+        Value::Bytes(bytes) => {
+            for byte in bytes.as_slice() {
+                let item = Value::Int(*byte as i64);
+                out = ops::join(out, f(item)?).at(span)?;
+            }
+        }
+        other => bail!(span, "cannot loop over {}", other.ty()),
+    }
+    Ok(out)
+}
+
+// --- content 直译助手(对照 typst-eval/src/markup.rs 的构造方式) ---
+
+/// 文本片段。
+pub fn text(s: &str) -> typst::foundations::Content {
+    typst::text::TextElem::packed(typst::foundations::Str::from(s))
+}
+
+/// 空格。
+pub fn space() -> typst::foundations::Content {
+    typst::text::SpaceElem::shared().clone()
+}
+
+/// 软换行 `\`。
+pub fn linebreak() -> typst::foundations::Content {
+    typst::text::LinebreakElem::shared().clone()
+}
+
+/// 段落间隔。
+pub fn parbreak() -> typst::foundations::Content {
+    typst::model::ParbreakElem::shared().clone()
+}
+
+/// 标记序列组合(对照 `Content::sequence`)。
+pub fn content_sequence(parts: Vec<typst::foundations::Content>) -> typst::foundations::Content {
+    typst::foundations::Content::sequence(parts)
+}
+
+/// 嵌入表达式的值转为 content(对照 markup 中 `#expr` 的 display 语义)。
+pub fn embed(value: Value) -> typst::foundations::Content {
+    value.display()
+}

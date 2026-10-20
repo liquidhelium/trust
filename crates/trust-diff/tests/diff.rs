@@ -85,6 +85,14 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.repeat-str(\"ab\", 3)",
             "m.abs-sum((-1, 2, -3))",
         ],
+        "content" => vec![
+            "m.label(\"beta\")",
+            "m.badge(\"gold\", 3)",
+            "m.plain()",
+            "m.multiline()",
+            "m.mixed(21)",
+            "m.joined(\"x\", 5)",
+        ],
         "pkg_shapes" => vec![
             "m.area(3, 4)",
             "m.describe(\"rect\", 2.5, 3.25)",
@@ -195,6 +203,7 @@ fn gen_module(fixture: &str) -> Module {
         "stdlib" => trust_diff::gen_modules::stdlib::module(),
         "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module(),
         "bench" => trust_diff::gen_modules::bench::module(),
+        "content" => trust_diff::gen_modules::content::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -208,7 +217,7 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith, control, collections, closure, stdlib, pkg_shapes);
+diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content);
 
 #[test]
 fn all_fixtures_covered() {
@@ -224,7 +233,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

@@ -55,7 +55,6 @@ fn interpreter_vs_compiled() {
         "m.fib-mod(12000 + N)",
         "m.sum-nums(20000 + N)",
         "m.repeat-join(3000 + N)",
-        "m.make-fib(N)(21)",
     ];
 
     let first = round(&templates, 0);
@@ -64,16 +63,27 @@ fn interpreter_vs_compiled() {
 
     let mut interp_total = 0u128;
     let mut comp_total = 0u128;
-    for offset in 0..5 {
-        let calls = round(&templates, offset);
+    for (idx, template) in templates.iter().enumerate() {
+        let mut interp_one = 0u128;
+        let mut comp_one = 0u128;
+        for offset in 0..5 {
+            let calls = round(std::slice::from_ref(template), offset);
 
-        let start = Instant::now();
-        run_interpreted(&calls);
-        interp_total += start.elapsed().as_millis();
+            let start = Instant::now();
+            run_interpreted(&calls);
+            interp_one += start.elapsed().as_millis();
 
-        let start = Instant::now();
-        run_compiled(&calls);
-        comp_total += start.elapsed().as_millis();
+            let start = Instant::now();
+            run_compiled(&calls);
+            comp_one += start.elapsed().as_millis();
+        }
+        interp_total += interp_one;
+        comp_total += comp_one;
+        println!(
+            "  {:16} interp {interp_one:5} ms  compiled {comp_one:5} ms  {:.1}x",
+            template.split('(').next().unwrap_or(template),
+            interp_one as f64 / comp_one as f64
+        );
     }
     println!("interpreter: {interp_total} ms (5 轮合计)");
     println!("compiled:    {comp_total} ms (5 轮合计)");

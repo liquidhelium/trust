@@ -44,7 +44,7 @@ pub fn field(target: &Value, name: &str, span: Span) -> SourceResult<Value> {
     target.field(name, ()).at(span)
 }
 
-/// 调用一个函数值(解释器对非函数调用的报错同款)。
+/// 调用一个函数值;类型值调用其构造器(对照解释器:`str(1)`、`int("5")`)。
 pub fn call(
     func: &Value,
     engine: &mut Engine,
@@ -52,10 +52,13 @@ pub fn call(
     span: Span,
     args: Args,
 ) -> SourceResult<Value> {
-    if let Value::Func(func) = func {
-        func.call(engine, context, args)
-    } else {
-        bail!(span, "expected function or content, found {}", func.ty())
+    match func {
+        Value::Func(func) => func.call(engine, context, args),
+        Value::Type(ty) => {
+            let ctor = ty.constructor().at(span)?;
+            ctor.call(engine, context, args)
+        }
+        other => bail!(span, "expected function or content, found {}", other.ty()),
     }
 }
 
@@ -293,4 +296,39 @@ pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> Source
         }
         other => bail!(span, "cannot spread {}", other.ty()),
     }
+}
+
+/// 可变方法(push/pop/insert/remove)的就地调用,对照
+/// `typst-eval/src/methods.rs::call_method_mut`。
+pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -> SourceResult<Value> {
+    let ty = value.ty();
+    let mut output = Value::None;
+    match value {
+        Value::Array(array) if matches!(method, "push" | "pop" | "insert" | "remove") => {
+            match method {
+                "push" => array.push(args.expect("value")?),
+                "pop" => output = array.pop().at(span)?,
+                "insert" => {
+                    array.insert(args.expect("index")?, args.expect("value")?).at(span)?
+                }
+                _ => {
+                    output = array
+                        .remove(args.expect("index")?, args.named("default")?)
+                        .at(span)?
+                }
+            }
+        }
+        Value::Dict(dict) if matches!(method, "insert" | "remove") => {
+            match method {
+                "insert" => dict.insert(args.expect("key")?, args.expect("value")?),
+                _ => {
+                    output =
+                        dict.remove(args.expect("key")?, args.named("default")?).at(span)?
+                }
+            }
+        }
+        _ => bail!(span, "type {ty} has no method `{method}`"),
+    }
+    args.finish()?;
+    Ok(output)
 }

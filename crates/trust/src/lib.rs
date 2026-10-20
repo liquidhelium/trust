@@ -38,3 +38,19 @@ mod tests {
         assert!(out.contains("rt::param(args, \"a\", span)?"), "generated:\n{out}");
     }
 }
+
+#[cfg(test)]
+mod probe6 {
+    #[test]
+    fn closure_tree() {
+        let root = typst_syntax::parse_code("x => x * 2");
+        fn walk(n: &typst_syntax::SyntaxNode, d: usize, out: &mut String) {
+            use std::fmt::Write;
+            writeln!(out, "{}{:?} {:?}", "  ".repeat(d), n.kind(), n.full_text()).unwrap();
+            for c in n.children() { walk(c, d + 1, out); }
+        }
+        let mut s = String::new();
+        walk(&root, 0, &mut s);
+        panic!("{}", s);
+    }
+}

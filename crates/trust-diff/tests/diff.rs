@@ -29,6 +29,62 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.contains-needle(\"foobar\", \"bar\")",
             "m.contains-needle((1, 2, 3), 2)",
         ],
+        "control" => vec![
+            "m.fact(1)",
+            "m.fact(5)",
+            "m.fact(10)",
+            "m.fib(1)",
+            "m.fib(10)",
+            "m.sum-to(100)",
+            "m.greet(\"Ada\")",
+            "m.greet(\"Ada\", formal: true)",
+            "m.shadow(41)",
+            "m.join-words((\"a\", \"b\", \"c\"))",
+            "m.classify(-3)",
+            "m.classify(0)",
+            "m.classify(9)",
+        ],
+        "collections" => vec![
+            "m.make-range(5)",
+            "m.total((1, 2, 3))",
+            "m.doubled((1, 2, 3))",
+            "m.evens(range(10))",
+            "m.sorted-desc((3, 1, 2))",
+            "m.at-or((1, 2), 1)",
+            "m.at-or((1, 2), 9)",
+            "m.count-in(2, (1, 2, 3))",
+            "m.count-in(9, (1, 2, 3))",
+            "m.dict-make(1, 2)",
+            "m.dict-get((a: 10, b: 32))",
+            "m.dict-keys((x: 1, y: 2))",
+            "m.dict-spread((a: 1))",
+            "m.pair-up((\"a\", \"b\"), (1, 2))",
+            "m.merge-all(((a: 1), (b: 2), (a: 3)))",
+        ],
+        "closure" => vec![
+            "m.adder(10)(5)",
+            "m.compose(calc.sqrt, x => x * 2)(16)",
+            "m.apply-twice(x => x * 3, 2)",
+            "m.greet2(\"Bob\")",
+            "m.greet2(\"Bob\", greeting: \"Yo\")",
+            "m.variadic(1, 2, 3, k: 4)",
+            "m.kwargs(1, a: 2).pos()",
+            "m.kwargs(1, a: 2).at(\"a\")",
+            "m.fold-nums((1, 2, 3), 10, (acc, x) => acc - x)",
+            "m.zip-with((a, b) => a * b, (1, 2), (3, 4))",
+        ],
+        "stdlib" => vec![
+            "m.hypot(3, 4)",
+            "m.clamp01(-1)",
+            "m.clamp01(0.5)",
+            "m.mins((3, 1, 2))",
+            "m.pow-of-two(10)",
+            "m.shout(\"abc\")",
+            "m.str-len(\"héllo\")",
+            "m.to-int(\"42\")",
+            "m.repeat-str(\"ab\", 3)",
+            "m.abs-sum((-1, 2, -3))",
+        ],
         _ => vec![],
     }
 }
@@ -87,6 +143,10 @@ fn golden_scope_clone(scope: &Scope) -> Scope {
 fn gen_module(fixture: &str) -> Module {
     match fixture {
         "arith" => trust_diff::gen_modules::arith::module(),
+        "control" => trust_diff::gen_modules::control::module(),
+        "collections" => trust_diff::gen_modules::collections::module(),
+        "closure" => trust_diff::gen_modules::closure::module(),
+        "stdlib" => trust_diff::gen_modules::stdlib::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -100,7 +160,7 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith);
+diff_test!(arith, control, collections, closure, stdlib);
 
 #[test]
 fn all_fixtures_covered() {
@@ -116,7 +176,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

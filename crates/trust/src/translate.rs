@@ -107,11 +107,13 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let data = format!("D_{}", uppercase(&top.rust));
                 items.push_str(&cx.gen_function(&fun, *closure, &env));
                 items.push_str(&gen_func_data(&data, &fun, &top.name, *closure));
+                let id = &top.rust;
                 let _ = writeln!(
-                    defines,
-                    "    scope.define(\"{}\", Value::Func(Func::from(&{data})));",
-                    escape(&top.name)
+                    items,
+                    "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    Value::Func(Func::from(&{data}))\n}}\n\
+                     #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
                 );
+                let _ = writeln!(defines, "    scope.define(\"{}\", rt::slot(&{id}));", escape(&top.name));
             }
         }
     }
@@ -126,7 +128,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use comemo::Tracked;\n\
          use typst::diag::{{At, SourceResult}};\n\
          use typst::engine::Engine;\n\
-         use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
+         use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\n\
          use trust_runtime as rt;\n\n\
          /// 生成的错误 span:detached(差分对拍只比较值)。\n\
@@ -189,7 +191,7 @@ impl Ctx {
                     let name = ident.as_str().to_string();
                     let rust = bind_local(&mut fn_env, &name);
                     let _ =
-                        writeln!(body, "    let {rust} = rt::param(args, \"{}\", span)?;", escape(&name));
+                        writeln!(body, "    let mut {rust} = rt::param(__args, \"{}\", span)?;", escape(&name));
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
                 ast::Param::Pos(_) => {
@@ -202,7 +204,7 @@ impl Ctx {
                     // 惰性默认值:未提供时在调用点求值(语义边界见文件头)。
                     let _ = writeln!(
                         body,
-                        "    let {rust} = match args.named_or_find::<Value>(\"{}\")? {{\n\
+                        "    let mut {rust} = match __args.named_or_find::<Value>(\"{}\")? {{\n\
                          \x20       Some(value) => value,\n\
                          \x20       None => {default},\n\
                          \x20   }};",
@@ -213,21 +215,21 @@ impl Ctx {
                     Some(ident) => {
                         let name = ident.as_str().to_string();
                         let rust = bind_local(&mut fn_env, &name);
-                        let _ = writeln!(body, "    let {rust} = Value::Args(args.take());");
+                        let _ = writeln!(body, "    let mut {rust} = Value::Args(__args.take());");
                     }
                     None => {
-                        let _ = writeln!(body, "    let _sink = Value::Args(args.take());");
+                        let _ = writeln!(body, "    let mut _sink = Value::Args(__args.take());");
                     }
                 },
             }
         }
-        let _ = writeln!(body, "    rt::finish(args, span)?;");
+        let _ = writeln!(body, "    rt::finish(__args, span)?;");
 
         let value = self.expr(closure.body(), &fn_env, Mode::FnBody);
         let _ = writeln!(body, "    Ok({value})");
 
         format!(
-            "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, args: &mut Args) -> SourceResult<Value> {{\n    let span = args.span;\n{body}}}\n"
+            "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{body}}}\n"
         )
     }
 
@@ -254,7 +256,7 @@ impl Ctx {
                         }
                         ast::ArrayItem::Spread(spread) => {
                             let value = self.expr(spread.expr(), env, mode);
-                            let _ = write!(out, " rt::array_spread(&mut __a, {value})?;");
+                            let _ = write!(out, " rt::array_spread(&mut __a, {value}, SPAN)?;");
                         }
                     }
                 }
@@ -280,7 +282,7 @@ impl Ctx {
                         }
                         ast::DictItem::Spread(spread) => {
                             let value = self.expr(spread.expr(), env, mode);
-                            let _ = write!(out, " rt::dict_spread(&mut __d, {value})?;");
+                            let _ = write!(out, " rt::dict_spread(&mut __d, {value}, SPAN)?;");
                         }
                     }
                 }
@@ -361,7 +363,7 @@ impl Ctx {
     fn ident(&mut self, ident: ast::Ident, env: &Env, mode: Mode) -> String {
         let name = ident.as_str();
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
-            return rust.clone();
+            return format!("{rust}.clone()");
         }
         if let Some((_, rust)) = env.module.iter().rev().find(|(n, _)| n == name) {
             return format!("rt::slot(&{rust})");
@@ -428,18 +430,34 @@ impl Ctx {
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
-                self.diag(call.span(), "可变方法调用(push/pop/insert/remove)暂不支持".into());
+                // 可变方法:目标须为局部变量(typst 语义:就地修改)。
+                if let ast::Expr::Ident(ident) = access.target()
+                    && let Some((_, rust)) =
+                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
+                {
+                    return format!(
+                        "rt::method_mut(&mut {rust}, \"{}\", {args}, SPAN)?",
+                        escape(field)
+                    );
+                }
+                self.diag(
+                    call.span(),
+                    "可变方法的目标不是局部变量(暂只支持直接局部变量)".into(),
+                );
                 return "Value::None".into();
             }
             let target = self.expr(access.target(), env, mode);
-            return format!("rt::method(&({target}), \"{}\", engine, context, {args})?", escape(field));
+            return format!(
+                "{{ let __target = {target}; let __call_args = {args}; rt::method(&__target, \"{}\", engine, context, SPAN, __call_args)? }}",
+                escape(field)
+            );
         }
         if mode == Mode::ModuleInit {
             self.diag(call.span(), "顶层值中的函数调用需要引擎(暂不支持,请包进函数)".into());
             return "Value::None".into();
         }
         let callee = self.expr(call.callee(), env, mode);
-        format!("rt::call(&({callee}), engine, context, {args})?")
+        format!("{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, SPAN, __call_args)? }}")
     }
 
     /// 调用点参数:按源序构造 `Args`。
@@ -483,7 +501,7 @@ impl Ctx {
             }
         }
         let mut names: Vec<String> = Vec::new();
-        collect_idents(closure.to_untyped(), &mut names);
+        collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let mut captured = Vec::new();
         let mut seen = HashSet::new();
         for name in names {
@@ -494,6 +512,14 @@ impl Ctx {
                 captured.push(format!("(\"{}\", {rust}.clone())", escape(&name)));
             } else if let Some((_, rust)) = env.module.iter().rev().find(|(n, _)| *n == name) {
                 captured.push(format!("(\"{}\", rt::slot(&{rust}))", escape(&name)));
+            } else if mode == Mode::FnBody {
+                // 全局名:typst 闭包求值不带库基座(Scopes::new(None)),
+                // 全局引用须在创建期物化进 captured(对照 CapturesVisitor)。
+                captured.push(format!(
+                    "(\"{}\", rt::global(engine, \"{}\", SPAN)?)",
+                    escape(&name),
+                    escape(&name)
+                ));
             }
         }
         let defaults = if defaults.is_empty() { "Vec::new()".into() } else { format!("vec![{}]", defaults.join(", ")) };
@@ -533,7 +559,30 @@ impl Ctx {
                 };
                 if let Some(name) = name {
                     let rust = bind_local(&mut env, &name);
-                    let _ = writeln!(out, "    let {rust} = {init};");
+                    let _ = writeln!(out, "    let mut {rust} = {init};");
+                }
+                continue;
+            }
+            if let ast::Expr::Binary(binary) = stmt
+                && binary.op() == ast::BinOp::Assign
+            {
+                // 局部重赋值 `x = e`(typst 局部可变;遮蔽链上最新槽)。
+                if let ast::Expr::Ident(ident) = binary.lhs() {
+                    let name = ident.as_str();
+                    match env.locals.iter().rev().find(|(n, _)| n == name) {
+                        Some((_, rust)) => {
+                            let value = self.expr(binary.rhs(), &env, mode);
+                            let _ = writeln!(out, "    {rust} = {value};");
+                        }
+                        None => {
+                            self.diag(
+                                binary.span(),
+                                format!("赋值目标 `{name}` 不是局部变量(模块槽/字段赋值暂不支持)"),
+                            );
+                        }
+                    }
+                } else {
+                    self.diag(binary.span(), "字段/解构赋值暂不支持".into());
                 }
                 continue;
             }
@@ -563,12 +612,102 @@ fn bind_local(env: &mut Env, name: &str) -> String {
     rust
 }
 
-fn collect_idents(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
-    if node.kind() == typst_syntax::SyntaxKind::Ident {
-        out.push(node.full_text().to_string());
-    }
-    for child in node.children() {
-        collect_idents(child, out);
+/// 收集闭包子树中的自由变量名(对照 typst-eval 的 `CapturesVisitor`,
+/// 但目标是从"外层视角"确定捕获集):
+/// - 闭包名/参数/内部 let/for 变量/内层闭包的绑定是内部名,跳过;
+/// - 命名参数默认值在外层作用域求值,按外层绑定集分析;
+/// - 字段访问的字段名、命名参数与字典的键名不是变量引用,跳过。
+fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    use typst_syntax::SyntaxKind as K;
+    match node.kind() {
+        K::Closure => {
+            let Some(cl) = node.cast::<ast::Closure>() else { return };
+            // 默认值在外层作用域求值。
+            for param in cl.params().children() {
+                if let ast::Param::Named(named) = param {
+                    collect_idents(named.expr().to_untyped(), bound, out);
+                }
+            }
+            let mut pushed = 0;
+            if let Some(name) = cl.name() {
+                bound.push(name.as_str().to_string());
+                pushed += 1;
+            }
+            for param in cl.params().children() {
+                match param {
+                    ast::Param::Pos(pattern) => {
+                        for ident in pattern.bindings() {
+                            bound.push(ident.as_str().to_string());
+                            pushed += 1;
+                        }
+                    }
+                    ast::Param::Named(named) => {
+                        bound.push(named.name().as_str().to_string());
+                        pushed += 1;
+                    }
+                    ast::Param::Spread(spread) => {
+                        if let Some(ident) = spread.sink_ident() {
+                            bound.push(ident.as_str().to_string());
+                            pushed += 1;
+                        }
+                    }
+                }
+            }
+            collect_idents(cl.body().to_untyped(), bound, out);
+            for _ in 0..pushed {
+                bound.pop();
+            }
+        }
+        K::LetBinding => {
+            let Some(lets) = node.cast::<ast::LetBinding>() else { return };
+            if let Some(init) = lets.init() {
+                collect_idents(init.to_untyped(), bound, out);
+            }
+            let mut pushed = 0;
+            for ident in lets.kind().bindings() {
+                bound.push(ident.as_str().to_string());
+                pushed += 1;
+            }
+            for _ in 0..pushed {
+                bound.pop();
+            }
+        }
+        K::ForLoop => {
+            let Some(for_loop) = node.cast::<ast::ForLoop>() else { return };
+            collect_idents(for_loop.iterable().to_untyped(), bound, out);
+            let mut pushed = 0;
+            for ident in for_loop.pattern().bindings() {
+                bound.push(ident.as_str().to_string());
+                pushed += 1;
+            }
+            collect_idents(for_loop.body().to_untyped(), bound, out);
+            for _ in 0..pushed {
+                bound.pop();
+            }
+        }
+        K::FieldAccess => {
+            let Some(access) = node.cast::<ast::FieldAccess>() else { return };
+            collect_idents(access.target().to_untyped(), bound, out);
+        }
+        K::Named => {
+            let Some(named) = node.cast::<ast::Named>() else { return };
+            collect_idents(named.expr().to_untyped(), bound, out);
+        }
+        K::Keyed => {
+            let Some(keyed) = node.cast::<ast::Keyed>() else { return };
+            collect_idents(keyed.expr().to_untyped(), bound, out);
+        }
+        K::Ident => {
+            let name = node.full_text().to_string();
+            if !bound.contains(&name) {
+                out.push(name);
+            }
+        }
+        _ => {
+            for child in node.children() {
+                collect_idents(child, bound, out);
+            }
+        }
     }
 }
 

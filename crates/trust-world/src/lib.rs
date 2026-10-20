@@ -135,7 +135,7 @@ impl InjectWorld {
     /// 包 FileId 到磁盘仓库路径(仅 VirtualRoot::Package)。
     fn package_path(&self, id: FileId) -> Option<PathBuf> {
         let root = self.packages_root.as_ref()?;
-        let spec = id.package()?;
+        let VirtualRoot::Package(spec) = id.root() else { return None; };
         // 布局:{root}/{namespace}/{name}/{version}/{vpath}。
         let mut path = root
             .join(spec.namespace.as_str())

@@ -12,7 +12,7 @@ use typst::foundations::{
 };
 use typst::syntax::{Span, Spanned, ast, SyntaxKind};
 use typst::World;
-use comemo::{Track, TrackedMut};
+use comemo::Track;
 
 /// 模块级值槽:由生成代码以 `LazyLock::new(&init_fn)` 构造。
 pub type Slot = std::sync::LazyLock<Value, &'static (dyn Fn() -> Value + Send + Sync)>;
@@ -187,27 +187,6 @@ pub fn param_named(args: &mut Args, name: &str, span: Span) -> SourceResult<Opti
     Ok(args.named::<Value>(name)?)
 }
 
-/// 按名或按位绑定一个参数(闭包参数两种给法都接受)。
-#[allow(dead_code)]
-pub fn param(args: &mut Args, name: &str, span: Span) -> SourceResult<Value> {
-    match args.named_or_find::<Value>(name)? {
-        Some(value) => Ok(value),
-        None => {
-            // 复刻 Args::missing_argument 的文案与提示。
-            for item in &args.items {
-                if item.name.as_deref() == Some(name) {
-                    bail!(
-                        item.span,
-                        "the argument `{name}` is positional";
-                        hint: "try removing `{name}:`";
-                    )
-                }
-            }
-            bail!(span, "missing argument: {name}")
-        }
-    }
-}
-
 /// 有默认值的参数:未提供时求默认值。
 pub fn param_or(
     args: &mut Args,
@@ -355,7 +334,6 @@ pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -
     Ok(output)
 }
 
-/// for 循环的零物化执行(对照 `Eval for ast::ForLoop`):迭代源直接
 /// 消费(数组 into_iter 无逐元素克隆),每轮体值按 join 累积。
 pub fn foreach(
     value: &Value,

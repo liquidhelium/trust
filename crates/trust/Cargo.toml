@@ -1,0 +1,10 @@
+[package]
+name = "trust"
+description = "Typst → Rust 转译器(nuitka 路线):把 typst 包编译为驱动 typst-library 值模型的 Rust crate"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+# 前端与手翻基线(typst 0.15.1)同版,保证 AST/语义对齐
+typst-syntax = "0.15.1"

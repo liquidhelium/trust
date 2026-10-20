@@ -279,12 +279,12 @@ impl Ctx {
                     let name = ident.as_str().to_string();
                     let rust = bind_local(&mut fn_env, &name);
                     let _ =
-                        writeln!(body, "    let mut {rust} = rt::param(__args, \"{}\", span)?;", escape(&name));
+                        writeln!(body, "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;", escape(&name));
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
                 ast::Param::Pos(pattern) => {
                     // 解构参数(对照 eval_closure:"pattern parameter")。
-                    let value = "rt::param(__args, \"pattern parameter\", span)?".to_string();
+                    let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
                     body.push_str(&self.destructure(pattern, value, &mut fn_env, Mode::FnBody, false));
                 }
                 ast::Param::Named(named) => {
@@ -295,7 +295,7 @@ impl Ctx {
                     // 惰性默认值:未提供时在调用点求值(语义边界见文件头)。
                     let _ = writeln!(
                         body,
-                        "    let mut {rust} = match __args.named_or_find::<Value>(\"{}\")? {{\n\
+                        "    let mut {rust} = match __args.named::<Value>(\"{}\")? {{\n\
                          \x20       Some(value) => value,\n\
                          \x20       None => {default},\n\
                          \x20   }};",
@@ -1970,7 +1970,7 @@ fn translate_package_inner(
             "\n/// `{}` 的模块作用域(import 抄入 + 本文件顶层绑定)。\n\
              #[allow(non_snake_case, dead_code)]\npub(super) fn module() -> Module {{\n    let mut scope = Scope::new();\n{file_defines}    Module::new(\"{}\", scope)\n}}\n",
             plan.path,
-            escape(&plan.path)
+            module_stem(&plan.path)
         );
         if is_entry {
             top_defines = file_defines;
@@ -2003,6 +2003,11 @@ fn translate_package_inner(
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
 fn spec_name(spec: &str) -> String {
     spec.split('/').nth(1).unwrap_or("pkg").split(':').next().unwrap_or("pkg").to_string()
+}
+
+/// 文件路径的模块名(bare import 的名字 = 文件 stem)。
+fn module_stem(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or("m").split('.').next().unwrap_or("m").to_string()
 }
 
 /// 解析模块值访问链:`deps.oxifmt` → ("deps", ["oxifmt"]);裸 Ident → ("x", [])。

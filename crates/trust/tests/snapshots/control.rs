@@ -31,7 +31,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut S
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
-    let mut items = rt::param(__args, "items", span)?;
+    let mut items = rt::param_pos(__args, "items", span)?;
     rt::finish(__args, span)?;
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };

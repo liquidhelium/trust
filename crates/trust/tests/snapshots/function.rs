@@ -31,8 +31,8 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut S
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_add(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
-    let mut a = rt::param(__args, "a", span)?;
-    let mut b = rt::param(__args, "b", span)?;
+    let mut a = rt::param_pos(__args, "a", span)?;
+    let mut b = rt::param_pos(__args, "b", span)?;
     rt::finish(__args, span)?;
     Ok(ops::add(a.clone(), b.clone()).at(SPAN)?)
 }

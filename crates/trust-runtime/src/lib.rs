@@ -177,7 +177,18 @@ pub fn boolean(value: Value, span: Span) -> SourceResult<bool> {
     value.cast::<bool>().at(span)
 }
 
+/// 位置参数绑定(按声明序,对照 eval_closure 的 `args.expect`)。
+pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value> {
+    args.expect::<Value>(name)
+}
+
+/// 命名参数绑定(仅按名,对照 eval_closure 的 `args.named`)。
+pub fn param_named(args: &mut Args, name: &str, span: Span) -> SourceResult<Option<Value>> {
+    Ok(args.named::<Value>(name)?)
+}
+
 /// 按名或按位绑定一个参数(闭包参数两种给法都接受)。
+#[allow(dead_code)]
 pub fn param(args: &mut Args, name: &str, span: Span) -> SourceResult<Value> {
     match args.named_or_find::<Value>(name)? {
         Some(value) => Ok(value),

@@ -35,6 +35,6 @@ mod tests {
     fn translates_simple_function() {
         let out = super::translate("#let add(a, b) = a + b", "test").expect("translate ok");
         assert!(out.contains("pub fn module()"), "generated:\n{out}");
-        assert!(out.contains("rt::param(__args, \"a\", span)?"), "generated:\n{out}");
+        assert!(out.contains("rt::param_pos(__args, \"a\", span)?"), "generated:\n{out}");
     }
 }

@@ -33,8 +33,8 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut S
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
-    let mut x = rt::param(__args, "x", span)?;
-    let mut k = match __args.named_or_find::<Value>("k")? {
+    let mut x = rt::param_pos(__args, "x", span)?;
+    let mut k = match __args.named::<Value>("k")? {
         Some(value) => value,
         None => Value::Int(2),
     };
@@ -80,7 +80,7 @@ static V1_base: rt::Slot = LazyLock::new(&V1_base_init);
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
-    let mut f = rt::param(__args, "f", span)?;
+    let mut f = rt::param_pos(__args, "f", span)?;
     let mut rest = Value::Args(__args.take());
     rt::finish(__args, span)?;
     Ok({ let __callee = f.clone(); let __call_args = { let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, SPAN, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, SPAN, __call_args)? })

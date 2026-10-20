@@ -1,6 +1,6 @@
 # 研究路线:TRUST —— 把 Typst 包编译成 Rust
 
-日期:2026-10-20 · 状态:初始路线(M0 骨架已建,翻译器未开工)
+日期:2026-10-20 · 状态:初始路线(M0 骨架已建,翻译器未开工;同日修订:验证方法两层分离,cetz 只作终态目标)
 证据基线:prior art 见文末附录(手翻分支 + 诊断文档),全部论断可溯源。
 
 ## 1. 问题定义与验收标准
@@ -17,7 +17,7 @@ cetz 图被放大到 10~16 万次原语调用——排版本身不是堵点)。
 1. **注册兼容**:`#import "@preview/cetz:0.5.2": canvas` 与 `: *`
    全量导入无感;下游包(cetz-plot 0.1.4,只用 `: *` 公开面)不改一字可用。
 2. **输出兼容**:同一 typst 二进制双路(原生注册 / 原 .typ 包)编译同一
-   语料,SVG/PDF 逐字节一致(oracle 法,§5)。
+   语料,SVG/PDF 逐字节一致(oracle 法,§5.2)。
 3. **性能**:达到手翻版量级(NATIVE-API-EVAL §7:native-bench 口径
    10~150×)。
 
@@ -34,7 +34,7 @@ cetz 图被放大到 10~16 万次原语调用——排版本身不是堵点)。
 | FINDINGS(性能诊断) | cetz-diagnose/FINDINGS.md | 慢因账本(四条机制)、VM 原语单价表 → 编译收益的量化依据 |
 | NATIVE-API-EVAL(手翻设计书) | cetz-diagnose/NATIVE-API-EVAL.md | 架构原则("用户可见值=Value,机器几何=struct")、迁移顺序、实测数字 |
 | FAST-PATH-DESIGN(行为钉子) | cetz-diagnose/FAST-PATH-DESIGN.md | 翻译器保真规格:浮点常量/求值顺序/边界行为逐条钉死;oracle 方法论 |
-| 基准/语料脚本 | cetz-diagnose/{native-bench,native-corpus}.py | 验收工具直接复用(改注册路径) |
+| 基准/语料脚本 | cetz-diagnose/{native-bench,native-corpus}.py | 终态验收工具(里程碑门用,不进过程回路,见 §5;改注册路径) |
 | 原版包副本 | cetz-diagnose/cetz-0.5.2-orig、cetz-plot-0.1.4-orig | golden 语义标准(只读,勿作素材改写) |
 
 手翻版踩过的坑 = 翻译器的 hard cases 清单(FINDINGS §GROUP-5、
@@ -117,36 +117,61 @@ crates/trust-runtime   生成代码的运行时支撑:join 语义、参数解构
    `LazyHash` 值,消除每次求值;
 5. **生成 `module()`**:按 lib.rs 的嵌套结构逐名 `define_func` /
    `define`,含 `name`/`version` 元数据;
-6. **生成测试壳**:把原包 `tests/**/test.typ` 挂进生成 crate 的
-   `cargo test`,跑 oracle 对拍(§5)。
+6. **生成 crate 收尾**:附带最小示例与自述。原包 tests **不**默认挂载
+   进 `cargo test`——oracle 对拍属终态验收,由外部脚本执行(§5.2)。
 
-## 5. 保真与验收方法(沿 fast 里程碑法)
+## 5. 验证与验收:两层分离
 
-- **golden**:原版 .typ 包在同一 typst 二进制下的编译输出。语料四级:
-  cetz tests(102 例,`native-corpus.py` 口径)、cetz-diagnose v0~v9
-  消融系列、cetz-plot showcase、cetz gallery;
-- **对拍口径**:SVG/PDF 逐字节;差异按 FUNCTION-MAP 的七类根因归类
-  (结构差异无视觉差者不计缺陷);
-- **工具**:复用 cetz-diagnose 脚本,仅改注册路径;通过率曲线驱动
-  开发节奏(手翻版基线:起步 5/102);
-- **测量纪律**:沿用 diagnose 的 A/B 方法——同机同时间窗、同一二进制
-  双路对比,共享机器负载漂移大,跨时段绝对值不可比;
-- **函数清单核对**:FUNCTION-MAP 的 332 条对照表机器化——转译器自检
-  "原包每个顶层 `#let` 在生成物中有同名绑定",缺口即编译错误。
+**原则:cetz 只能是目标,不能是过程检验。** 测试框架内部不引入 cetz
+语料:日常回路若绑定最重、最脆(对 typst 版本敏感)的语料,通过率会
+诱导转译器对 cetz 过拟合(为凑通过率塞特例),通用正确性无从谈起。
+cetz 语料只在里程碑节点作为终态验收运行,不进 `cargo test`/CI。
+
+### 5.1 过程验证(测试框架内,持续开发回路,与 cetz 无关)
+
+- **语言面 fixtures**:自建小 .typ 程序,逐个覆盖 typst-eval 的语义
+  分支(默认值/命名参数/收集参数、join、闭包的三种身份、dict/array
+  COW、错误路径……),一个语言构造一组;
+- **差分测试**:同一 fixture 双执行——(a) typst-eval 解释执行,
+  (b) 翻译为 Rust 后执行——比较产出值/Content 序列化。golden 由
+  typst 自身生成,不手写期望、不依赖任何目标包(Nuitka 以 CPython
+  差分验证是同一思路);
+- **生成物快照**:小输入 → 生成的 Rust 源码快照测试,锁代码生成形状;
+- **运行时单测**:trust-runtime 的每个 shim(join/参数解构/调用协议)
+  对 typst-eval 对应行为做一致性单测;
+- 以上全部进 `cargo test`,秒~分钟级,是**唯一**的过程门禁。
+
+### 5.2 终态验收(测试框架外,里程碑门,cetz 语料在此)
+
+- 语料四级:cetz tests(102 例)、cetz-diagnose v0~v9 消融、
+  cetz-plot showcase、cetz gallery;工具复用 `native-corpus.py`/
+  `native-bench.py`(仅改注册路径);
+- 对拍口径:同一 typst 二进制双路(原生注册/原 .typ 包)编译,
+  SVG/PDF 逐字节;差异按 FUNCTION-MAP 七类根因归类(结构差异无视觉
+  差者不计缺陷);
+- 通过率只入档、只定里程碑(M3/M4),**不驱动日常开发节奏**;
+- 测量纪律:沿用 diagnose 的 A/B 方法——同机同时间窗、同一二进制
+  双路对比,共享机器负载漂移大,跨时段绝对值不可比。
+
+### 5.3 通用自检(两层通用)
+
+FUNCTION-MAP 的清单法机器化:转译器自检"任意源包每个顶层 `#let`
+在生成物中有同名绑定",缺口即编译错误——与 cetz 无关,对任何包生效。
 
 ## 6. 里程碑
 
 | 阶段 | 内容 | 完成判据 |
 |---|---|---|
 | **M0 骨架**(本仓已就绪) | 工作区、前端可 parse、运行时 crate 占位 | `cargo build && cargo test` 绿;空模块可注册进 fork 编译 |
-| **M1 语言子集** | 无闭包、无 content 的纯函数模块(vector/matrix/sorting/aabb) | 生成物替换原模块后语料该子集对拍通过 |
-| **M2 语义完备** | 闭包、content、默认参数、join、局部 show/set → draw.* 主链 | cetz tests 通过率 ≥ 50% |
-| **M3 整包** | cetz 0.5.2 全导出面(含 plugin 保留路径) | 通过率 ≥ 手翻版当前水平,SVG 逐字节 |
-| **M4 生态** | cetz-plot 兼容;版本钉死分流(编译版本 vs 其他版本) | showcase 全量双路一致 |
+| **M1 语言子集** | 无闭包、无 content 的纯函数翻译;首个真实输入取 cetz 的 vector/matrix/sorting/aabb(**仅作冒烟,不作门禁**) | 自建语言子集 fixtures 差分测试全绿 |
+| **M2 语义完备** | 闭包、content、默认参数、join、局部 show/set 的翻译 | 语言面 fixtures 差分全绿;cetz 覆盖度只作观测指标 |
+| **M3 整包** | cetz 0.5.2 全导出面(含 plugin 保留路径) | 终态验收:通过率 ≥ 手翻版当前水平,SVG 逐字节 |
+| **M4 生态** | cetz-plot 兼容;版本钉死分流(编译版本 vs 其他版本) | 终态验收:showcase 全量双路一致 |
 | **M5 性能** | L1 类型化;L2 按账本逐项(样式代缓存、插件内联) | native-bench 对齐手翻 10~150× |
 
-M1~M3 每步:翻一块、语料对拍一块、通过率入档——手翻 P1~P6 的
-里程碑纪律直接沿用。
+门禁分层:M1/M2 由过程验证把门(§5.1 的 fixtures 与差分);cetz 语料
+只在 M3/M4 作为终态验收运行(§5.2);里程碑推进期间用 §5.1 的回归
+套件保证不倒退。
 
 ## 7. 风险与开放问题
 
@@ -165,6 +190,9 @@ M1~M3 每步:翻一块、语料对拍一块、通过率入档——手翻 P1~P6 
 6. **同盘竞争**:`trust-target` 与手翻 fork 的 `typst-target` 同在
    大盘,容量与 inode 需留意(大盘当前 ~316G 可用,typst-target 已有
    先例规模)。
+7. **fixtures 覆盖盲区**:过程验证不用 cetz 语料后,自建 fixtures 可能
+   不及真实包的长尾;对策:以 typst-eval 语义分支覆盖度为目标度量,
+   盲区由终态验收(M3/M4)兜底发现。
 
 ## 附录:证据位置(绝对路径)
 

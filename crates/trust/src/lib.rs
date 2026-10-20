@@ -35,22 +35,6 @@ mod tests {
     fn translates_simple_function() {
         let out = super::translate("#let add(a, b) = a + b", "test").expect("translate ok");
         assert!(out.contains("pub fn module()"), "generated:\n{out}");
-        assert!(out.contains("rt::param(args, \"a\", span)?"), "generated:\n{out}");
-    }
-}
-
-#[cfg(test)]
-mod probe6 {
-    #[test]
-    fn closure_tree() {
-        let root = typst_syntax::parse_code("x => x * 2");
-        fn walk(n: &typst_syntax::SyntaxNode, d: usize, out: &mut String) {
-            use std::fmt::Write;
-            writeln!(out, "{}{:?} {:?}", "  ".repeat(d), n.kind(), n.full_text()).unwrap();
-            for c in n.children() { walk(c, d + 1, out); }
-        }
-        let mut s = String::new();
-        walk(&root, 0, &mut s);
-        panic!("{}", s);
+        assert!(out.contains("rt::param(__args, \"a\", span)?"), "generated:\n{out}");
     }
 }

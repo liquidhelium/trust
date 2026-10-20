@@ -36,14 +36,14 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(items.clone(), SPAN)? {
+  for __it1 in rt::iter_values(&(items.clone()), SPAN)? {
       let mut x = { __it1.clone() };
 
       let __v = { let mut __out = Value::None;
     let _ = __out;
     if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(SPAN)?, std::cmp::Ordering::Greater)), SPAN)? { { let mut __out = Value::None;
     let _ = __out;
-    rt::method_mut(&mut out, "push", { let mut args = Args::new(SPAN, std::iter::empty::<Value>()); args.push(SPAN, x.clone()); args }, SPAN)?
+    { let __mut_args = { let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>()); __call_args_v.push(SPAN, x.clone()); __call_args_v }; rt::method_mut(&mut out, "push", __mut_args, SPAN)? }
 } } else { Value::None }
 };
       __out = rt::join(__out, __v, SPAN)?;

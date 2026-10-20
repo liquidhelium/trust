@@ -65,6 +65,77 @@ fn main() {
                 }
             }
         }
+        Some("translate-pkg") => {
+            // 探索入口:翻译一个本地包目录(entry 自动探测),把生成源码
+            // 写到 <out>/gen.rs,附 trust-runtime 依赖说明。
+            let mut input: Option<&str> = None;
+            let mut output: Option<&str> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-o" | "--output" => {
+                        output = args.get(i + 1).map(String::as_str);
+                        i += 2;
+                    }
+                    "--lenient" => i += 1,
+                    other => {
+                        input = Some(other);
+                        i += 1;
+                    }
+                }
+            }
+            let (Some(input), Some(output)) = (input, output) else {
+                eprintln!("用法: trust translate-pkg <包根目录> -o <输出.rs> [--lenient]");
+                std::process::exit(2);
+            };
+            let lenient = args.iter().any(|a| a == "--lenient");
+            let root = std::path::Path::new(input);
+            let mut files = std::collections::BTreeMap::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).expect("read dir") {
+                    let entry = entry.expect("entry");
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                        let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                        files.insert(rel, std::fs::read_to_string(&path).expect("read"));
+                    }
+                }
+            }
+            let entry = files
+                .keys()
+                .filter(|k| k.ends_with("lib.typ"))
+                .min_by_key(|k| k.split('/').count())
+                .cloned()
+                .expect("entry lib.typ");
+            // 只收 entry 所在的包源树(docs/tests 等不入包)。
+            let src_root = entry.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default();
+            if !src_root.is_empty() {
+                files.retain(|k, _| k.starts_with(&src_root));
+            }
+            let pkg = trust::PackageInput { files, entry };
+            let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("pkg");
+            if lenient {
+                let (code, diags) = trust::translate_package_lenient(&pkg, name);
+                std::fs::write(output, &code).expect("write");
+                println!("已生成 {output}({} 字节,降级 {} 处)", code.len(), diags.len());
+            } else {
+                match trust::translate_package(&pkg, name) {
+                    Ok(code) => {
+                        std::fs::write(output, &code).expect("write");
+                        println!("已生成 {output}({} 字节)", code.len());
+                    }
+                    Err(diags) => {
+                        for d in diags {
+                            eprintln!("  {:?}: {}", d.span, d.message);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
         Some("coverage") => {
             let Some(root) = args.get(2).map(String::as_str) else {
                 eprintln!("用法: trust coverage <目录或文件.typ>");

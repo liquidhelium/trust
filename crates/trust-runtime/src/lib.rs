@@ -347,7 +347,7 @@ pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -
 /// for 循环的零物化执行(对照 `Eval for ast::ForLoop`):迭代源直接
 /// 消费(数组 into_iter 无逐元素克隆),每轮体值按 join 累积。
 pub fn foreach(
-    value: Value,
+    value: &Value,
     span: Span,
     mut f: impl FnMut(Value) -> SourceResult<Value>,
 ) -> SourceResult<Value> {
@@ -355,13 +355,14 @@ pub fn foreach(
     let mut out = Value::None;
     match value {
         Value::Array(array) => {
-            for item in array {
+            for item in array.clone() {
                 out = ops::join(out, f(item)?).at(span)?;
             }
         }
         Value::Dict(dict) => {
-            for (key, item) in dict {
-                let pair = Array::from_iter([key.into_value(), item]).into_value();
+            for (key, item) in dict.iter() {
+                let pair =
+                    Array::from_iter([key.clone().into_value(), item.clone()]).into_value();
                 out = ops::join(out, f(pair)?).at(span)?;
             }
         }
@@ -417,16 +418,16 @@ pub fn embed(value: Value) -> typst::foundations::Content {
 /// 迭代器形态的循环源(数组零物化,值逐个移出;字典/字符串按原版
 /// 逐对/字素),供生成代码内联 `for` 使用(break/continue 原生可用)。
 pub fn iter_values(
-    value: Value,
+    value: &Value,
     span: Span,
 ) -> SourceResult<Box<dyn Iterator<Item = Value>>> {
     use unicode_segmentation::UnicodeSegmentation;
     Ok(match value {
-        Value::Array(array) => Box::new(array.into_iter()),
+        Value::Array(array) => Box::new(array.clone().into_iter()),
         Value::Dict(dict) => Box::new(
-            dict.into_iter()
-                .map(|(key, item): (Str, Value)| {
-                    Array::from_iter([key.into_value(), item]).into_value()
+            dict.iter()
+                .map(|(key, item): (&Str, &Value)| {
+                    Array::from_iter([key.clone().into_value(), item.clone()]).into_value()
                 })
                 .collect::<Vec<_>>()
                 .into_iter(),
@@ -614,3 +615,43 @@ pub fn accessor_assign(
         other => bail!(span, "type {} has no method `{}`", other.ty(), method),
     }
 }
+
+/// 运行时导入外部包(未被翻译的依赖走解释器,混合执行——对照
+/// typst-eval 的 `import_package` + `resolve_package`)。
+pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> {
+    use typst::syntax::{RootedPath, VirtualPath, VirtualRoot, package::PackageSpec};
+    let spec: PackageSpec = match spec.parse() {
+        Ok(spec) => spec,
+        Err(_) => bail!(Span::detached(), "invalid package spec"),
+    };
+    let manifest_id = RootedPath::new(
+        VirtualRoot::Package(spec.clone()),
+        VirtualPath::new("typst.toml").expect("path"),
+    )
+    .intern();
+    let bytes = engine.world.file(manifest_id).at(SPAN0)?;
+    let text = bytes.as_str().map_err(typst::diag::FileError::from).at(SPAN0)?;
+    let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
+        Ok(manifest) => manifest,
+        Err(err) => bail!(SPAN0, "package manifest is malformed ({})", err.message()),
+    };
+    manifest.validate(&spec).at(SPAN0)?;
+    let entry_id = RootedPath::new(
+        VirtualRoot::Package(spec),
+        VirtualPath::new(&manifest.package.entrypoint).expect("entry"),
+    )
+    .intern();
+    let source = engine.world.source(entry_id).at(SPAN0)?;
+    let mut sink = typst::engine::Sink::new();
+    let route = typst::engine::Route::default();
+    typst_eval::eval(
+        engine.world,
+        engine.library,
+        typst::engine::Traced::default().track(),
+        sink.track_mut(),
+        route.track(),
+        &source,
+    )
+}
+
+const SPAN0: Span = Span::detached();

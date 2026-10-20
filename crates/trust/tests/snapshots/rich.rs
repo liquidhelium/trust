@@ -83,7 +83,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut f = rt::param(__args, "f", span)?;
     let mut rest = Value::Args(__args.take());
     rt::finish(__args, span)?;
-    Ok({ let __callee = f.clone(); let __call_args = { let mut args = Args::new(SPAN, std::iter::empty::<Value>()); rt::spread_args(&mut args, SPAN, rest.clone())?; args }; rt::call(&__callee, engine, context, SPAN, __call_args)? })
+    Ok({ let __callee = f.clone(); let __call_args = { let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, SPAN, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, SPAN, __call_args)? })
 }
 
 #[allow(non_snake_case, dead_code)]

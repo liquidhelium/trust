@@ -193,8 +193,9 @@ FUNCTION-MAP 的清单法机器化:转译器自检"任意源包每个顶层 `#le
 ### 6.6 v0.x 终态目标冒烟(2026-10-21,探索性、不入过程回路)
 
 - cetz 0.5.2 整包(37 文件)严格模式翻译通过;生成物 1.7MB 零错误编译;
-  混合执行链全通:native 函数 + 解释闭包 + wasm 插件(cetz-core)+
-  外部包(oxifmt 经解释器);
+  混合执行链:native 函数 + 解释闭包 + 外部包(oxifmt 经解释器)已验证;
+  纯 wasm 插件函数(cetz-core 的 aabb/bezier 族)不在入口导出面,
+  待 canvas 链路打通后对拍;
 - 注入原版 typst(InjectWorld + module_init)后 26/26 调用与解释器
   逐值一致——包括 `#let version = version(0,5,2)` 这类顶层遮蔽全局
   类型名的引擎值;

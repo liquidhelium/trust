@@ -51,7 +51,7 @@ trust translate input.typ --name mymod -o out.rs
   属 L1 类型化目标)
 - **cetz 0.5.2 整包(探索,不入测试框架)**:严格模式整包翻译通过,
   生成物(37 文件/1.7MB)零错误通过 Rust 编译,注入原版 typst 后与
-  解释器 26/26 调用逐值一致(vector/matrix 含 wasm 插件、coordinate、
+  解释器 26/26 调用逐值一致(vector/matrix/coordinate、
   path-util、sorting、util 默认参数/闭包、版本常量)
 - **已知边界**:markup 样式元素(Strong 等)、`#include`/`#show`、
   参数解构模式、生成物快照测试——见研究路线 §5/§7

@@ -93,6 +93,12 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.mixed(21)",
             "m.joined(\"x\", 5)",
         ],
+        "toplevel" => vec![
+            "m.squares5",
+            "m.golden-name",
+            "m.mean-of",
+            "m.mean(3, 5)",
+        ],
         "pkg_shapes" => vec![
             "m.area(3, 4)",
             "m.describe(\"rect\", 2.5, 3.25)",
@@ -162,9 +168,12 @@ fn differential(fixture: &str) {
     let mut golden_scope = Scope::new();
     golden_scope.define("m", golden.clone());
 
-    // rust:生成物。
-    let rust_module = gen_module(fixture);
-    let rust_world = InjectWorld::new("", vec![]);
+    // rust:生成物(顶层引擎值经 module_init 协议求值合并)。
+    let mut rust_module = gen_module(fixture);
+    let mut rust_world = InjectWorld::new("", vec![]);
+    if let Some(init) = gen_module_init(fixture) {
+        rust_module = rust_world.init_native_module("m", rust_module, Some(init));
+    }
     let mut rust_scope = Scope::new();
     rust_scope.define("m", rust_module.clone());
 
@@ -194,6 +203,15 @@ fn golden_scope_clone(scope: &Scope) -> Scope {
     scope.clone()
 }
 
+fn gen_module_init(
+    fixture: &str,
+) -> Option<fn(&mut typst::engine::Engine, comemo::Tracked<typst::foundations::Context>, &mut Scope) -> typst::diag::SourceResult<()>> {
+    match fixture {
+        "toplevel" => Some(trust_diff::gen_modules::toplevel::module_init),
+        _ => None,
+    }
+}
+
 fn gen_module(fixture: &str) -> Module {
     match fixture {
         "arith" => trust_diff::gen_modules::arith::module(),
@@ -204,6 +222,7 @@ fn gen_module(fixture: &str) -> Module {
         "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module(),
         "bench" => trust_diff::gen_modules::bench::module(),
         "content" => trust_diff::gen_modules::content::module(),
+        "toplevel" => trust_diff::gen_modules::toplevel::module(),
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -217,7 +236,7 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content);
+diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content, toplevel);
 
 #[test]
 fn all_fixtures_covered() {
@@ -233,7 +252,7 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content"];
+    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content", "toplevel"];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

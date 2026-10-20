@@ -76,6 +76,50 @@ impl InjectWorld {
         }
     }
 
+    /// 注入原生模块并完成引擎值初始化:先注入模块(引擎值可引用模块内
+    /// 函数),再用临时 Engine 驱动 `module_init` 合并顶层引擎值,最后以
+    /// 更新后的模块重建 Library(重包 LazyHash 保持 comemo 哈希正确)。
+    pub fn init_native_module(
+        &mut self,
+        name: &'static str,
+        mut module: Module,
+        init: Option<fn(&mut typst::engine::Engine, comemo::Tracked<Context>, &mut Scope) -> SourceResult<()>>,
+    ) -> Module {
+        self.inject_module(name, module.clone());
+        if let Some(init) = init {
+            let mut sink = Sink::new();
+            let world: &dyn World = self;
+            let traced = Traced::default();
+            let mut engine = typst::engine::Engine {
+                library: &self.library,
+                world: world.track(),
+                introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
+                traced: traced.track(),
+                sink: sink.track_mut(),
+                route: Route::default(),
+            };
+            let context = Context::none();
+            init(&mut engine, context.track(), module.scope_mut())
+                .expect("module_init 求值顶层引擎值失败");
+            self.inject_module(name, module.clone());
+            module
+        } else {
+            module
+        }
+    }
+
+    /// 以模块替换全局作用域中的同名定义并重建 Library。
+    fn inject_module(&mut self, name: &'static str, module: Module) {
+        let mut library = Clone::clone(&*self.library);
+        // bind 而非 define:允许替换同名定义(module_init 后的更新)。
+        library
+            .global
+            .scope_mut()
+            .bind(name.into(), Binding::detached(module));
+        library.std = Binding::detached(library.global.clone().into_value());
+        self.library = typst::utils::LazyHash::new(library);
+    }
+
     /// 追加一个相对主文件的源文件(多文件包形态)。
     pub fn add_source(&mut self, path: &str, text: &str) {
         let id = RootedPath::new(

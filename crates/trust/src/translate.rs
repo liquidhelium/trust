@@ -82,25 +82,69 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
-    // 第二遍:逐绑定生成(函数体可见此前所有绑定 → 静态作用域)。
+    // 预判每个顶层值是否需要引擎(决定槽形态;两次生成,翻译纯函数)。
+    let engine_flags: Vec<bool> = tops
+        .iter()
+        .map(|top| match &top.kind {
+            TopKind::Value { init } => {
+                let env = Env { locals: Vec::new(), module: Vec::new() };
+                let before = cx.diags.len();
+                let _ = cx.expr(*init, &env, Mode::ModuleInit);
+                let needs = cx.diags.len() > before;
+                cx.diags.truncate(before);
+                needs
+            }
+            _ => false,
+        })
+        .collect();
+
     let mut items = String::new();
     let mut defines = String::new();
+    let mut engine_defines = String::new();
+    let mut engine_names: Vec<String> = Vec::new();
+    let mut engine_getters: Vec<String> = Vec::new();
     for (i, top) in tops.iter().enumerate() {
         let env = Env {
             locals: Vec::new(),
-            module: tops[..=i].iter().map(|t| (t.name.clone(), t.rust.clone())).collect(),
+            module: tops[..=i]
+                .iter()
+                .enumerate()
+                .map(|(j, t)| {
+                    let r = if engine_flags[j] { Ref::Engine(t.rust.clone()) } else { Ref::Slot(t.rust.clone()) };
+                    (t.name.clone(), r)
+                })
+                .collect(),
         };
         match &top.kind {
             TopKind::Value { init } => {
-                let expr = cx.expr(*init, &env, Mode::ModuleInit);
                 let id = &top.rust;
-                let _ = writeln!(
-                    items,
-                    "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    {expr}\n}}\n\
-                     #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
-                );
-                let _ =
-                    writeln!(defines, "    scope.define(\"{}\", rt::slot(&{id}));", escape(&top.name));
+                if engine_flags[i] {
+                    // 引擎值:惰性 OnceLock,首访从函数体/宿主 module_init 强制。
+                    let expr = cx.expr(*init, &env, Mode::FnBody);
+                    let _ = writeln!(
+                        items,
+                        "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({expr})\n}}\n\
+                         #[allow(non_snake_case, dead_code)]\nstatic {id}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
+                         #[allow(non_snake_case, dead_code)]\nfn {id}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {id}.get() {{ return Ok(v.clone()); }}\n    let v = {id}_init(engine, context)?;\n    let _ = {id}.set(v.clone());\n    Ok(v)\n}}"
+                    );
+                    let _ = writeln!(
+                        engine_defines,
+                        "    scope.define(\"{}\", {id}_get(engine, context)?);",
+                        escape(&top.name)
+                    );
+                } else {
+                    let expr = cx.expr(*init, &env, Mode::ModuleInit);
+                    let _ = writeln!(
+                        items,
+                        "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    {expr}\n}}\n\
+                         #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
+                    );
+                    let _ = writeln!(
+                        defines,
+                        "    scope.define(\"{}\", rt::slot(&{id}));",
+                        escape(&top.name)
+                    );
+                }
             }
             TopKind::Fn { closure } => {
                 let fun = format!("f_{}", lowercase(&top.rust));
@@ -134,7 +178,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          /// 生成的错误 span:detached(差分对拍只比较值)。\n\
          const SPAN: Span = Span::detached();\n\n\
          /// 构建该模块(名字与导出面照抄源文件)。\n\
-         pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{defines}    Module::new(\"{module_name}\", scope)\n}}\n{items}"
+         pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{defines}    Module::new(\"{module_name}\", scope)\n}}\n\
+         /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。\n\
+         #[allow(non_snake_case, unused_variables)]\n\
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_defines}    let _ = engine;\n    Ok(())\n}}\n{items}"
     ))
 }
 
@@ -154,11 +201,18 @@ enum TopKind<'a> {
     Fn { closure: ast::Closure<'a> },
 }
 
+/// 模块绑定的引用形态:普通槽(LazyLock)或引擎槽(OnceLock + getter)。
+#[derive(Clone)]
+enum Ref {
+    Slot(String),
+    Engine(String),
+}
+
 /// 名字解析环境:局部栈 + 可见模块槽(静态作用域,按声明序累积)。
 #[derive(Clone)]
 struct Env {
     locals: Vec<(String, String)>,
-    module: Vec<(String, String)>,
+    module: Vec<(String, Ref)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -387,8 +441,11 @@ impl Ctx {
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return format!("{rust}.clone()");
         }
-        if let Some((_, rust)) = env.module.iter().rev().find(|(n, _)| n == name) {
-            return format!("rt::slot(&{rust})");
+        if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
+            return match module_ref {
+                Ref::Slot(id) => format!("rt::slot(&{id})"),
+                Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+            };
         }
         if mode == Mode::ModuleInit {
             self.diag(
@@ -540,8 +597,18 @@ impl Ctx {
             }
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == name) {
                 captured.push(format!("(\"{}\", {rust}.clone())", escape(&name)));
-            } else if let Some((_, rust)) = env.module.iter().rev().find(|(n, _)| *n == name) {
-                captured.push(format!("(\"{}\", rt::slot(&{rust}))", escape(&name)));
+            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| *n == name) {
+                match module_ref {
+                    Ref::Slot(id) => {
+                        captured.push(format!("(\"{}\", rt::slot(&{id}))", escape(&name)))
+                    }
+                    Ref::Engine(id) => {
+                        captured.push(format!(
+                            "(\"{}\", {id}_get(engine, context)?)",
+                            escape(&name)
+                        ))
+                    }
+                }
             } else if mode == Mode::FnBody {
                 // 全局名:typst 闭包求值不带库基座(Scopes::new(None)),
                 // 全局引用须在创建期物化进 captured(对照 CapturesVisitor)。
@@ -1043,7 +1110,7 @@ pub fn translate_package(
                         items,
                         "\n#[allow(non_snake_case, dead_code)]\nstatic {slot}: rt::Slot = LazyLock::new(&|| {value});"
                     );
-                    env.module.push((name.clone(), format!("{slot}")));
+                    env.module.push((name.clone(), Ref::Slot(format!("{slot}"))));
                     let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(&name));
                 }
                 ImportItems::Rename(name) => {
@@ -1057,7 +1124,7 @@ pub fn translate_package(
                         items,
                         "\n#[allow(non_snake_case, dead_code)]\nstatic {slot}: rt::Slot = LazyLock::new(&|| {value});"
                     );
-                    env.module.push((name.clone(), format!("{slot}")));
+                    env.module.push((name.clone(), Ref::Slot(format!("{slot}"))));
                     let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(name));
                 }
                 ImportItems::List(list) => {
@@ -1070,7 +1137,7 @@ pub fn translate_package(
                             continue;
                         };
                         let as_name = rename.clone().unwrap_or_else(|| name.clone());
-                        env.module.push((as_name.clone(), qualified.clone()));
+                        env.module.push((as_name.clone(), Ref::Slot(qualified.clone())));
                         let _ = writeln!(
                             file_defines,
                             "    scope.define(\"{}\", rt::slot(&{qualified}));",
@@ -1083,7 +1150,7 @@ pub fn translate_package(
                         if env.module.iter().any(|(n, _)| n == name) {
                             continue;
                         }
-                        env.module.push((name.clone(), qualified.clone()));
+                        env.module.push((name.clone(), Ref::Slot(qualified.clone())));
                         let _ = writeln!(
                             file_defines,
                             "    scope.define(\"{}\", rt::slot(&{qualified}));",
@@ -1112,9 +1179,9 @@ pub fn translate_package(
                         .expect("slot collected");
                     let mut env2 = env.clone();
                     for (seen, seen_slot) in &own {
-                        env2.module.push((seen.clone(), seen_slot.clone()));
+                        env2.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
-                    env2.module.push((name.as_str().to_string(), format!("{slot}")));
+                    env2.module.push((name.as_str().to_string(), Ref::Slot(format!("{slot}"))));
                     let fun = format!("f_{}", lowercase(slot));
                     let data = format!("D_{}", uppercase(slot));
                     file_items.push_str(&cx.gen_function(&fun, closure, &env2));
@@ -1143,9 +1210,9 @@ pub fn translate_package(
                         .expect("slot collected");
                     let mut env2 = env.clone();
                     for (seen, seen_slot) in &own {
-                        env2.module.push((seen.clone(), seen_slot.clone()));
+                        env2.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
-                    env2.module.push((name.as_str().to_string(), slot.clone()));
+                    env2.module.push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let value = cx.expr(init_expr, &env2, Mode::ModuleInit);
                     file_items.push_str(&format!(
                         "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init() -> Value {{\n    {value}\n}}\n\

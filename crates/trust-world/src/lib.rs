@@ -45,6 +45,11 @@ pub struct InjectWorld {
     main: FileId,
     sources: HashMap<FileId, Source>,
     files: HashMap<FileId, Bytes>,
+    /// 外部包磁盘根(如 ~/.cache/typst/packages):未命中的包路径回退到这里。
+    packages_root: Option<PathBuf>,
+    /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
+    /// (如 wasm 插件等非源文件)。
+    fs_root: Option<PathBuf>,
 }
 
 impl InjectWorld {
@@ -67,12 +72,19 @@ impl InjectWorld {
         // scope_mut 的写时复制会让两者分叉,这里刷新保持一致。
         library.std = Binding::detached(library.global.clone().into_value());
 
+        let packages_root = std::env::var_os("USER_HOME")
+            .map(|h| PathBuf::from(h).join(".cache/typst/packages"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/typst/packages")))
+            .filter(|p| p.exists());
+        let fs_root = std::env::var("TRUST_WORLD_ROOT").ok().map(PathBuf::from).filter(|p| p.exists());
         Self {
             library: LazyHash::new(library),
             book: LazyHash::new(FontBook::new()),
             main,
             sources: HashMap::from([(main, Source::new(main, main_text.to_string()))]),
             files: HashMap::new(),
+            packages_root,
+            fs_root,
         }
     }
 
@@ -118,6 +130,23 @@ impl InjectWorld {
             .bind(name.into(), Binding::detached(module));
         library.std = Binding::detached(library.global.clone().into_value());
         self.library = typst::utils::LazyHash::new(library);
+    }
+
+    /// 包 FileId 到磁盘仓库路径(仅 VirtualRoot::Package)。
+    fn package_path(&self, id: FileId) -> Option<PathBuf> {
+        let root = self.packages_root.as_ref()?;
+        let spec = id.package()?;
+        // 布局:{root}/{namespace}/{name}/{version}/{vpath}。
+        let mut path = root
+            .join(spec.namespace.as_str())
+            .join(spec.name.as_str())
+            .join(spec.version.to_string());
+        for part in id.vpath().get_with_slash().split('/') {
+            if !part.is_empty() {
+                path = path.join(part);
+            }
+        }
+        path.exists().then_some(path)
     }
 
     /// 追加一个相对主文件的源文件(多文件包形态)。
@@ -217,10 +246,16 @@ impl World for InjectWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.sources
-            .get(&id)
-            .cloned()
-            .ok_or(FileError::NotFound(PathBuf::from("not in this world")))
+        if let Some(source) = self.sources.get(&id) {
+            return Ok(source.clone());
+        }
+        // 包路径回退:磁盘上的包仓库。
+        if let Some(path) = self.package_path(id) {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|_| FileError::NotFound(path.clone()))?;
+            return Ok(Source::new(id, text));
+        }
+        Err(FileError::NotFound(PathBuf::from("not in this world")))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
@@ -228,11 +263,29 @@ impl World for InjectWorld {
             return Ok(bytes.clone());
         }
         // 对源文件,提供其文本的字节视图(World trait 文档认可的等价物)。
-        self.sources
-            .get(&id)
-            .map(|src| Bytes::from_string(src.text().to_string()))
-            .ok_or(FileError::NotFound(PathBuf::from("not in this world")))
+        if let Some(src) = self.sources.get(&id) {
+            return Ok(Bytes::from_string(src.text().to_string()));
+        }
+        if let Some(path) = self.package_path(id) {
+            let bytes = std::fs::read(&path).map_err(|_| FileError::NotFound(path.clone()))?;
+            return Ok(Bytes::new(bytes));
+        }
+        // 项目根文件回退(wasm 插件、数据文件等)。vpath 以 `/` 开头,
+        // join 前必须剥掉,否则会把根整个替换掉。
+        if let Some(root) = &self.fs_root
+            && id.root() == &VirtualRoot::Project
+        {
+            let rel = id.vpath().get_with_slash().trim_start_matches('/');
+            let path = root.join(rel);
+            if path.exists() {
+                let bytes =
+                    std::fs::read(&path).map_err(|_| FileError::NotFound(path.clone()))?;
+                return Ok(Bytes::new(bytes));
+            }
+        }
+        Err(FileError::NotFound(PathBuf::from("not in this world")))
     }
+
 
     fn font(&self, _index: usize) -> Option<Font> {
         None

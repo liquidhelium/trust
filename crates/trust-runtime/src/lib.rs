@@ -533,89 +533,6 @@ pub fn field_assign(target: &mut Value, key: &str, value: Value, span: Span) -> 
     }
 }
 
-fn error_msg(msg: &str) -> typst::diag::SourceDiagnostic {
-    typst::diag::SourceDiagnostic::error(SPAN_PLACEHOLDER, typst::foundations::Str::from(msg))
-}
-
-const SPAN_PLACEHOLDER: Span = Span::detached();
-
-fn import_external_impl(engine: &mut Engine, spec: typst::syntax::package::PackageSpec) -> SourceResult<Module> {
-    use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
-    let manifest_id =
-        RootedPath::new(VirtualRoot::Package(spec.clone()), VirtualPath::new("typst.toml").expect("path"))
-            .intern();
-    let bytes = engine.world.file(manifest_id).at(SPAN_PLACEHOLDER)?;
-    let text = bytes.as_str().map_err(typst::diag::FileError::from).at(SPAN_PLACEHOLDER)?;
-    let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
-        Ok(manifest) => manifest,
-        Err(err) => {
-            return Err(ecow::eco_vec![error_msg(&format!(
-                "package manifest is malformed ({})",
-                err.message()
-            ))])
-        }
-    };
-    manifest.validate(&spec).at(SPAN_PLACEHOLDER)?;
-    let entry_id = RootedPath::new(
-        VirtualRoot::Package(spec),
-        VirtualPath::new(&manifest.package.entrypoint).expect("entry path"),
-    )
-    .intern();
-    let source = engine.world.source(entry_id).at(SPAN_PLACEHOLDER)?;
-    let mut sink = typst::engine::Sink::new();
-    let route = typst::engine::Route::default();
-    typst_eval::eval(
-        engine.world,
-        engine.library,
-        typst::engine::Traced::default().track(),
-        sink.track_mut(),
-        route.track(),
-        &source,
-    )
-}
-
-trait OptionExt {
-    fn expect_or(self, what: &str, span: Span) -> SourceResult<Value>;
-}
-impl OptionExt for Option<Value> {
-    fn expect_or(self, what: &str, span: Span) -> SourceResult<Value> {
-        self.ok_or(())
-            .or_else(|_| Err::<Value, ()>(()))
-            .map_err(|_| ecow::eco_vec![typst::diag::SourceDiagnostic::error(span, typst::foundations::Str::from(format!("missing argument: {what}")))])
-    }
-}
-
-/// accessor 方法赋值(`a.at(i) = v` / `first` / `last`,对照
-/// typst-eval/src/methods.rs::call_method_access)。
-pub fn accessor_assign(
-    target: &mut Value,
-    method: &str,
-    index: Option<Value>,
-    value: Value,
-    span: Span,
-) -> SourceResult<()> {
-    match target {
-        Value::Array(array) if matches!(method, "first" | "last" | "at") => {
-            let slot: &mut Value = match method {
-                "first" => array.first_mut().at(span)?,
-                "last" => array.last_mut().at(span)?,
-                _ => {
-                    let i = index.expect_or("index", span)?.cast::<i64>().at(span)?;
-                    array.at_mut(i).at(span)?
-                }
-            };
-            *slot = value;
-            Ok(())
-        }
-        Value::Dict(dict) if method == "at" => {
-            let key = index.expect_or("key", span)?.cast::<Str>().at(span)?;
-            { let slot = dict.at_mut(&key).at(span)?; *slot = value; }
-            Ok(())
-        }
-        other => bail!(span, "type {} has no method `{}`", other.ty(), method),
-    }
-}
-
 /// 运行时导入外部包(未被翻译的依赖走解释器,混合执行——对照
 /// typst-eval 的 `import_package` + `resolve_package`)。
 pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> {
@@ -655,3 +572,34 @@ pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> 
 }
 
 const SPAN0: Span = Span::detached();
+
+/// accessor 方法赋值(`a.at(i) = v` / `first` / `last`,对照
+/// typst-eval/src/methods.rs::call_method_access)。
+pub fn accessor_assign(
+    target: &mut Value,
+    method: &str,
+    index: Option<Value>,
+    value: Value,
+    span: Span,
+) -> SourceResult<()> {
+    match target {
+        Value::Array(array) if matches!(method, "first" | "last" | "at") => {
+            let slot: &mut Value = match method {
+                "first" => array.first_mut().at(span)?,
+                "last" => array.last_mut().at(span)?,
+                _ => {
+                    let i = index.unwrap_or_else(|| Value::None).cast::<i64>().at(span)?;
+                    array.at_mut(i).at(span)?
+                }
+            };
+            *slot = value;
+            Ok(())
+        }
+        Value::Dict(dict) if method == "at" => {
+            let key = index.unwrap_or_else(|| Value::None).cast::<Str>().at(span)?;
+            { let slot = dict.at_mut(&key).at(span)?; *slot = value; }
+            Ok(())
+        }
+        other => bail!(span, "type {} has no method `{}`", other.ty(), method),
+    }
+}

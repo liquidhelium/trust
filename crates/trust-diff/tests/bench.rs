@@ -55,6 +55,8 @@ fn interpreter_vs_compiled() {
         "m.fib-mod(12000 + N)",
         "m.sum-nums(20000 + N)",
         "m.repeat-join(3000 + N)",
+        "m.call-loop(8000 + N)",
+        "m.map-heavy(2000 + N)",
     ];
 
     let first = round(&templates, 0);

@@ -27,3 +27,12 @@
   let fib(n) = if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
   fib
 }
+#let inc(x) = x + 1
+#let call-loop(n) = {
+  let x = 0
+  for i in range(n) {
+    x = inc(x)
+  }
+  x
+}
+#let map-heavy(n) = range(n).map(i => i * 2).filter(i => calc.even(i)).len()

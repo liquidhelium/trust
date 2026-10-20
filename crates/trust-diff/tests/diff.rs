@@ -28,6 +28,10 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.clamp(11, 1, 10)",
             "m.contains-needle(\"foobar\", \"bar\")",
             "m.contains-needle((1, 2, 3), 2)",
+            "m.pt-of(3)",
+            "m.deg-sum(10deg)",
+            "m.half()",
+            "m.em-plus(1em)",
         ],
         "control" => vec![
             "m.fact(1)",
@@ -46,6 +50,9 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.first-over((1, 2, 9, 1), 5)",
             "m.sum-odds(range(10))",
             "m.skip-to((1, 2, 3, 2, 1), 3)",
+            "m.find-first((4, 9, 2), x => x > 5)",
+            "m.find-first((4, 1, 2), x => x > 5)",
+            "m.accumulate(range(10))",
         ],
         "collections" => vec![
             "m.make-range(5)",

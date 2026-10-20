@@ -57,3 +57,16 @@
   }
   out
 }
+#let find-first(nums, pred) = {
+  for n in nums {
+    if pred(n) { return n }
+  }
+  -1
+}
+#let accumulate(nums) = {
+  let total = 0
+  for n in nums {
+    total += n
+  }
+  total
+}

@@ -171,7 +171,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use typst::diag::{{At, SourceResult}};\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
-         use typst::syntax::Span;\n\
+         use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          /// 生成的错误 span:detached(差分对拍只比较值)。\n\
          const SPAN: Span = Span::detached();\n\n\
@@ -294,6 +294,10 @@ impl Ctx {
             ast::Expr::Bool(b) => format!("Value::Bool({})", b.get()),
             ast::Expr::Int(i) => format!("Value::Int({})", i.get()),
             ast::Expr::Float(f) => format!("Value::Float({:?})", f.get()),
+            ast::Expr::Numeric(n) => {
+                let (value, unit) = n.get();
+                format!("Value::numeric(({value:?}, Unit::{unit:?}))")
+            }
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env, mode),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env, mode),
@@ -405,6 +409,13 @@ impl Ctx {
                      }}\n  \
                      __out }}"
                 )
+            }
+            ast::Expr::FuncReturn(func_return) => {
+                let value = match func_return.body() {
+                    Some(expr) => self.expr(expr, env, mode),
+                    None => "Value::None".into(),
+                };
+                format!("return Ok({value})")
             }
             ast::Expr::LoopBreak(_) => "{ break; Value::None }".into(),
             ast::Expr::LoopContinue(_) => "{ continue; Value::None }".into(),
@@ -666,8 +677,35 @@ impl Ctx {
                 continue;
             }
             if let ast::Expr::Binary(binary) = stmt
-                && binary.op() == ast::BinOp::Assign
+                && matches!(
+                    binary.op(),
+                    ast::BinOp::Assign
+                        | ast::BinOp::AddAssign
+                        | ast::BinOp::SubAssign
+                        | ast::BinOp::MulAssign
+                        | ast::BinOp::DivAssign
+                )
             {
+                // 复合赋值 `x += y` 等价 `x = x + y`(右侧读旧值)。
+                if binary.op() != ast::BinOp::Assign
+                    && let ast::Expr::Ident(ident) = binary.lhs()
+                    && let Some((_, rust)) =
+                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
+                {
+                    let rhs = self.expr(binary.rhs(), &env, mode);
+                    let op = match binary.op() {
+                        ast::BinOp::AddAssign => "add",
+                        ast::BinOp::SubAssign => "sub",
+                        ast::BinOp::MulAssign => "mul",
+                        ast::BinOp::DivAssign => "div",
+                        _ => unreachable!(),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "    {rust} = ops::{op}({rust}, {rhs}).at(SPAN)?;"
+                    );
+                    continue;
+                }
                 // 局部重赋值 `x = e`(typst 局部可变;遮蔽链上最新槽)。
                 if let ast::Expr::Ident(ident) = binary.lhs() {
                     let name = ident.as_str();
@@ -1263,7 +1301,7 @@ pub fn translate_package(
          use typst::diag::{{At, SourceResult}};\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
-         use typst::syntax::Span;\n\
+         use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          const SPAN: Span = Span::detached();\n\n\
          /// 入口模块的导出面。\n\

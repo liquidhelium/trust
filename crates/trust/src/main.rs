@@ -65,11 +65,97 @@ fn main() {
                 }
             }
         }
+        Some("coverage") => {
+            let Some(root) = args.get(2).map(String::as_str) else {
+                eprintln!("用法: trust coverage <目录或文件.typ>");
+                std::process::exit(2);
+            };
+            std::process::exit(coverage(root));
+        }
         _ => {
             eprintln!(
-                "trust {} — typst → rust 转译器\n\n用法:\n  trust translate <input.typ> [--name 模块名] [-o 输出.rs]",
+                "trust {} — typst → rust 转译器\n\n用法:\n  trust translate <input.typ> [--name 模块名] [-o 输出.rs]\n  trust coverage <目录>(覆盖度度量)",
                 env!("CARGO_PKG_VERSION")
             );
         }
     }
+}
+
+/// 覆盖度度量:对一个目录(或文件)的全部 .typ 逐个翻译,
+/// 按诊断消息聚类统计缺口(数据驱动开发优先级)。
+fn coverage(root: &str) -> i32 {
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    let path = std::path::Path::new(root);
+    if path.is_dir() {
+        walk(path, &mut files);
+    } else {
+        files.push(path.to_path_buf());
+    }
+    files.sort();
+
+    use std::collections::BTreeMap;
+    let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut per_file: Vec<(String, usize)> = Vec::new();
+    let mut total = 0usize;
+    let mut ok_files = 0usize;
+    for file in &files {
+        let Ok(src) = std::fs::read_to_string(file) else { continue };
+        total += 1;
+        let diags = match trust::translate(&src, "m") {
+            Ok(_) => Vec::new(),
+            Err(diags) => diags,
+        };
+        if diags.is_empty() {
+            ok_files += 1;
+        }
+        per_file.push((file.display().to_string(), diags.len()));
+        for diag in diags {
+            // 归一化:去掉具体名字/类型,按缺口类别聚类。
+            let key = normalize_diag(&diag.message);
+            *kind_counts.entry(key).or_default() += 1;
+        }
+    }
+
+    println!("文件: {ok_files}/{total} 可整体翻译");
+    println!("\n缺口聚类(按频次):");
+    let mut entries: Vec<_> = kind_counts.into_iter().collect();
+    entries.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (kind, n) in entries.iter().take(24) {
+        println!("  {n:4}  {kind}");
+    }
+    println!("\n最难文件(诊断数):");
+    per_file.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (file, n) in per_file.iter().take(10) {
+        println!("  {n:4}  {file}");
+    }
+    0
+}
+
+/// 把诊断消息归一化为缺口类别。
+fn normalize_diag(message: &str) -> String {
+    let m = message;
+    let pick = |prefix: &str| -> Option<String> {
+        m.find(prefix).map(|i| m[i..].split(')').next().unwrap_or(&m[i..]).to_string())
+    };
+    if m.contains("遇到 ") {
+        return format!("顶层: {}", m.split("遇到 ").nth(1).unwrap_or("?"));
+    }
+    if let Some(e) = pick("表达式 ") {
+        return format!("表达式: {e}");
+    }
+    if m.contains("暂不支持") || m.contains("暂只支持") {
+        return m.to_string();
+    }
+    m.to_string()
 }

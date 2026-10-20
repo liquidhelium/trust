@@ -9,6 +9,7 @@ use typst::foundations::{
     NativeParamInfo, Scope, Value, ops,
 };
 use typst::syntax::Span;
+use typst::syntax::ast::Unit;
 use trust_runtime as rt;
 
 /// 生成的错误 span:detached(差分对拍只比较值)。

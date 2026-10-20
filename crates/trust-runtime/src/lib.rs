@@ -614,3 +614,28 @@ pub fn accessor_assign(
         other => bail!(span, "type {} has no method `{}`", other.ty(), method),
     }
 }
+
+/// 多层字段链赋值 `d.a.b = v`(逐层取可变字典,对照 `Access` 链语义)。
+pub fn field_assign_path(
+    target: &mut Value,
+    path: &[&str],
+    value: Value,
+    span: Span,
+) -> SourceResult<()> {
+    let mut current = target;
+    for (depth, key) in path.iter().enumerate() {
+        let last = depth + 1 == path.len();
+        match current {
+            Value::Dict(dict) if last => {
+                dict.insert((*key).into(), value);
+                return Ok(());
+            }
+            Value::Dict(dict) => {
+                let key = typst::foundations::Str::from(*key);
+                current = dict.at_mut(&key).at(span)?;
+            }
+            other => bail!(span, "cannot mutate field of {}", other.ty()),
+        }
+    }
+    Ok(())
+}

@@ -35,3 +35,11 @@
   let ((a, b), c) = v
   a + b + c
 }
+#let set-deep(d) = {
+  d.a.b = 42
+  d
+}
+#let swap-at(m) = {
+  (m.at(0), m.at(2)) = (m.at(2), m.at(0))
+  m
+}

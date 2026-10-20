@@ -857,6 +857,27 @@ fn destructure(
             out
         }
         ast::Pattern::Normal(other) => {
+            // 解构赋值的 accessor 目标:`(a.at(i), b.at(j)) = ...`。
+            if assign
+                && let ast::Expr::FuncCall(call) = other
+                && let ast::Expr::FieldAccess(access) = call.callee()
+                && let ast::Expr::Ident(ident) = access.target()
+                && matches!(access.field().as_str(), "at" | "first" | "last")
+                && let Some((_, rust)) =
+                    env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
+            {
+                let method = access.field().as_str();
+                let mut index = "None".to_string();
+                for arg in call.args().items() {
+                    if let ast::Arg::Pos(expr) = arg {
+                        index = format!("Some({})", self.expr(expr, env, mode));
+                        break;
+                    }
+                }
+                return format!(
+                    "rt::accessor_assign(&mut {rust}, \"{method}\", {index}, {value}, SPAN)?;\n"
+                );
+            }
             self.diag(other.span(), "解构模式此处须为标识符".into());
             String::new()
         }
@@ -1058,18 +1079,17 @@ fn destructure(
                             );
                         }
                     }
-                } else if let ast::Expr::FieldAccess(access) = binary.lhs()
-                    && let ast::Expr::Ident(ident) = access.target()
-                    && let Some((_, rust)) =
-                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
-                {
-                    // 字段赋值 `d.k = v`:就地修改局部字典。
-                    let field = access.field().as_str();
+                } else if let Some((rust, fields)) = field_chain_place(binary.lhs(), &env) {
+                    // 字段(链)赋值 `d.k = v` / `d.a.b = v`:就地修改局部字典。
+                    let path = fields
+                        .iter()
+                        .map(|f| format!("\"{}\"", escape(f)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let value = self.expr(binary.rhs(), &env, mode);
                     let _ = writeln!(
                         out,
-                        "    {{ let __rhs = {value}; rt::field_assign(&mut {rust}, \"{}\", __rhs, SPAN)?; }}",
-                        escape(field)
+                        "    {{ let __rhs = {value}; rt::field_assign_path(&mut {rust}, &[{path}], __rhs, SPAN)?; }}"
                     );
                 } else if let ast::Expr::FuncCall(call) = binary.lhs()
                     && let ast::Expr::FieldAccess(access) = call.callee()
@@ -2003,6 +2023,29 @@ fn translate_package_inner(
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
 fn spec_name(spec: &str) -> String {
     spec.split('/').nth(1).unwrap_or("pkg").split(':').next().unwrap_or("pkg").to_string()
+}
+
+/// 赋值目标为 `x.a.b.c` 形态:返回 (根局部 rust 名, 字段链)。
+fn field_chain_place(
+    expr: ast::Expr,
+    env: &Env,
+) -> Option<(String, Vec<String>)> {
+    fn walk(expr: ast::Expr, fields: &mut Vec<String>) -> Option<String> {
+        match expr {
+            ast::Expr::Ident(ident) => Some(ident.as_str().to_string()),
+            ast::Expr::FieldAccess(access) => {
+                let root = walk(access.target(), fields)?;
+                fields.push(access.field().as_str().to_string());
+                Some(root)
+            }
+            _ => None,
+        }
+    }
+    let mut fields = Vec::new();
+    let root = walk(expr, &mut fields)?;
+    let (_, rust) = env.locals.iter().rev().find(|(n, _)| *n == root)?;
+    // 后序收集已是从根到叶的字段序,无需 reverse。
+    Some((rust.clone(), fields))
 }
 
 /// 文件路径的模块名(bare import 的名字 = 文件 stem)。

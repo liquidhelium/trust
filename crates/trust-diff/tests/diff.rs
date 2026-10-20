@@ -112,6 +112,8 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.sum-pairs(((1, 2), (3, 4)))",
             "m.reassign((10, 4))",
             "m.nested(((1, 2), 3))",
+            "m.set-deep((a: (b: 1)))",
+            "m.swap-at((1, 2, 3))",
         ],
         "toplevel" => vec![
             "m.squares5",

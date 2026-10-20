@@ -274,39 +274,3 @@ mod tests {
         assert_eq!(v, Value::Int(5));
     }
 }
-
-#[cfg(test)]
-mod probe3 {
-    use super::*;
-    #[test]
-    fn spread_and_closure_probe() {
-        let w = InjectWorld::new("", vec![]);
-        for code in [
-            "math.min(..(3, 1, 2))",
-            "math.min(3, 1, 2)",
-            "(1, 2, 3).filter(x => calc.even(x))",
-        ] {
-            match w.eval_code(code, Scope::new()) {
-                Ok(v) => println!("{code} => {v:?}"),
-                Err(e) => println!("{code} => ERR {}", e.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ")),
-            }
-        }
-        panic!("probe done");
-    }
-}
-
-#[cfg(test)]
-mod probe5 {
-    use super::*;
-    #[test]
-    fn probe() {
-        let w = InjectWorld::new("", vec![]);
-        for code in ["upper(\"abc\")", "\"abc\".upper()", "str.upper(\"abc\")", "\"abc\".to-upper()"] {
-            match w.eval_code(code, Scope::new()) {
-                Ok(v) => println!("{code} => {v:?}"),
-                Err(e) => println!("{code} => ERR {}", e.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; ")),
-            }
-        }
-        panic!("probe done");
-    }
-}

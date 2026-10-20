@@ -173,6 +173,23 @@ FUNCTION-MAP 的清单法机器化:转译器自检"任意源包每个顶层 `#le
 只在 M3/M4 作为终态验收运行(§5.2);里程碑推进期间用 §5.1 的回归
 套件保证不倒退。
 
+## 6.5 v0.x 实测(2026-10-21,trust-diff 差分与基准)
+
+- **覆盖**:9 个语言面 fixture / 80+ 用例,解释器 ↔ 生成物逐值一致;
+  多文件包(四种 import)、顶层引擎值(module_init 协议)、content 块
+  子集均差分通过。
+- **性能(干净负载,避开 comemo memoize 红利)**:纯计算循环 3.4–7.0×;
+  字符串分配主导 1.0×——L0 的天花板在 `Value` 分派与分配,验证了
+  L1 类型化("机器几何进结构体")的必要性。
+- **关键机制发现**:typst-eval 的 `eval_closure` 带 `#[comemo::memoize]`
+  ——解释器闭包同参调用免费,机器翻译的 native 函数无此语义。纯代码
+  下结果等价,但**求值次数与性能不等价**;基准与对拍必须用每轮新参数/
+  新闭包实例的负载形态。L1 若引入 memoize 需显式对齐此语义。
+- **宿主协议落地**:全局模块注入(`Library.global.scope_mut`)、包
+  虚拟化(World 层喂虚拟 manifest + shim 入口)、`module_init`(临时
+  Engine 求顶层引擎值,重包 `LazyHash` 保持 comemo 哈希正确)——全部
+  原版 typst API,零 fork。
+
 ## 7. 风险与开放问题
 
 1. **闭包的 `Func` 构造**:typst-library 无公开的"原生闭包"入口

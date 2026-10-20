@@ -1,0 +1,16 @@
+[package]
+name = "trust-diff"
+description = "差分测试:fixtures 经 trust 翻译为 Rust,与 typst-eval 解释器逐用例对拍(过程验证,与 cetz 无关)"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[build-dependencies]
+trust = { path = "../trust" }
+
+[dependencies]
+trust-runtime = { path = "../trust-runtime" }
+trust-world = { path = "../trust-world" }
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+comemo = "0.5.1"

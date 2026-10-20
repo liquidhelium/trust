@@ -1,0 +1,12 @@
+[package]
+name = "trust-world"
+description = "TRUST 的注入式 Typst World:不经 fork,以自定义 World/Library 注入原生模块并虚拟化包(过程验证 harness 的地基)"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+typst = "0.15.1"
+typst-eval = "0.15.1"
+typst-syntax = "0.15.1"
+comemo = "0.5.1"

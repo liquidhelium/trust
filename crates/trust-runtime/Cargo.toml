@@ -1,9 +1,12 @@
 [package]
 name = "trust-runtime"
-description = "机器翻译生成的 Rust 代码的运行时支撑层(join 语义、参数解构、调用协议、dict/array shim)"
+description = "机器翻译生成的 Rust 代码的运行时支撑层(参数解构、调用协议、闭包构造、join/迭代语义)"
 version.workspace = true
 edition.workspace = true
 publish = false
 
-# 后续将依赖 typst-library(与目标宿主 fork 同源);骨架期保持零依赖。
 [dependencies]
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+comemo = "0.5.1"
+unicode-segmentation = "1"

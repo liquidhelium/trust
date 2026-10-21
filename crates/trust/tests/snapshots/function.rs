@@ -48,7 +48,7 @@ struct __State {
 /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
 pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {
     let mut scope = Scope::new();
-    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
+    let __st = std::sync::Arc::new(__State::default());
     let _ = context;
     if let Some(v) = rt::global_opt(engine, "a")? { rt::fill(&__st.G_V0_add_a, v)?; }
     if let Some(v) = rt::global_opt(engine, "b")? { rt::fill(&__st.G_V0_add_b, v)?; }

@@ -85,8 +85,11 @@ impl Ctx {
         let value = self.expr(closure.body(), &fn_env);
         let _ = writeln!(body, "    Ok({value})");
 
+        // 序言:状态从首个位置参数解包(stub 转发必带,对照原生闭包
+        // C 方案:数据随函数值走,全局注册表寻址退场)。必须在参数
+        // 解包前——state 占据首个位置参数。
         let prologue = if self.used_state {
-            "    let __st = rt::state_require::<__State>(engine)?;\n"
+            "    let __st = rt::take_state::<__State>(__args)?;\n"
         } else {
             ""
         };

@@ -282,8 +282,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 init_code.push_str(&g_code);
                 items.push_str(&cx.gen_function(&fun, slot, *closure, &g_env));
                 items.push_str(&gen_func_data(&data, &fun, name, *closure));
-                // 默认值创建期物化(对照 typst:闭包创建时逐参数求值)。
+                // 默认值创建期物化(对照 typst:闭包创建时逐参数求值);
+                // 同批表达式进 stub 的 defaults。
                 let mut def_code = String::new();
+                let mut defaults = Vec::new();
                 for param in closure.params().children() {
                     if let ast::Param::Named(named) = param {
                         let pname = named.name().as_str();
@@ -294,12 +296,30 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                             def_code,
                             "    {{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; }}"
                         );
+                        defaults.push(format!(
+                            "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
+                        ));
                     }
                 }
                 init_code.push_str(&def_code);
+                // 原生闭包(C 方案):引用模块槽的函数经签名保真 stub
+                // 携带状态;纯函数保持裸 native(与包模式同款判定)。
+                let func_value = if cx.used_state {
+                    let params_src = closure.params().to_untyped().full_text();
+                    let defaults = if defaults.is_empty() {
+                        "Vec::new()".to_string()
+                    } else {
+                        format!("vec![{}]", defaults.join(", "))
+                    };
+                    format!(
+                        "rt::native_closure(&{data}, {params_src:?}, {defaults}, &rt::StateSlot::new(__st.clone()))"
+                    )
+                } else {
+                    format!("Func::from(&{data})")
+                };
                 let _ = writeln!(
                     init_code,
-                    "    {{ let v = Value::Func(Func::from(&{data})); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
+                    "    {{ let v = Value::Func({func_value}); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
                     escape(name)
                 );
             }
@@ -335,6 +355,6 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}))\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = std::sync::Arc::new(__State::default());\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}))\n}}\n{items}"
     ))
 }

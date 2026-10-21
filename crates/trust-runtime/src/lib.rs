@@ -15,26 +15,16 @@ use typst::foundations::{
 };
 use typst::syntax::{Span, Spanned, SyntaxKind, ast};
 
-use ecow::{EcoVec, eco_format, eco_vec};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::diag::SourceDiagnostic;
 
 /// 每构建状态(per-build 槽板)的存储与槽原语。
 ///
 /// 见 `_things/DESIGN-per-build.md`:typst 运行时 = 有限命名槽 + 每次
 /// 求值写一次 + 按值快照;这里提供对应的 Rust 形态——写一次单元
-/// (`OnceLock<Value>`)与按构建键控的状态注册表。
-///
-/// **构建键 = `engine.library` 的内容哈希**(`LazyHash` 缓存,便宜,
-/// 与 comemo 同一失效纪律)。宿主注入模块会重建 Library(哈希变化),
-/// 因此协议是:`module_init` 在注入前的哈希下注册状态,宿主注入后
-/// 调 [`state_rebind_last_to`] 把最近创建的状态搬到注入后的哈希下
-/// (`init_native_module` 已内置)。
-///
-/// 义务与限制:一个 Library 内容 = 一次构建;注册表条目不自动回收。
-pub fn build_key(engine: &Engine) -> u128 {
-    typst::utils::hash128(engine.library)
-}
-
+/// (`OnceLock<Value>`)与随函数值传递的状态句柄([`StateSlot`],
+/// 原生闭包 C 方案):`module_init` 每次求值构造新实例,无全局注册
+/// 表,生命周期随函数值(对照 typst 闭包的数据布局)。
 fn state_error(message: &str) -> EcoVec<SourceDiagnostic> {
     eco_vec![SourceDiagnostic::error(
         Span::detached(),
@@ -85,76 +75,6 @@ pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()>
             .set(value)
             .map_err(|_| state_error("模块槽并发填充冲突")),
     }
-}
-
-type AnyState = std::sync::Arc<dyn std::any::Any + Send + Sync>;
-
-/// 每构建状态的全局注册表:(library 哈希, 状态类型) → 状态实例。
-static STATES: std::sync::LazyLock<
-    std::sync::RwLock<std::collections::HashMap<(u128, std::any::TypeId), AnyState>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-
-thread_local! {
-    /// 最近一次 `state_get_or_insert` 创建/复用的状态(供宿主注入后
-    /// 重绑定;同线程同步协议,见 `state_rebind_last_to`)。
-    static LAST_STATE: std::cell::RefCell<Option<(u128, std::any::TypeId, AnyState)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// 取本构建的类型化状态;不存在则以 `init` 创建(幂等:同构建复用,
-/// 对照 typst 同编译内模块只求值一次)。
-pub fn state_get_or_insert<T: std::any::Any + Send + Sync>(
-    engine: &Engine,
-    init: impl FnOnce() -> T,
-) -> std::sync::Arc<T> {
-    let key = build_key(engine);
-    let type_id = std::any::TypeId::of::<T>();
-    let found = STATES.read().unwrap().get(&(key, type_id)).cloned();
-    let arc: AnyState = match found {
-        Some(found) => found,
-        None => {
-            let fresh: AnyState = std::sync::Arc::new(init());
-            STATES
-                .write()
-                .unwrap()
-                .entry((key, type_id))
-                .or_insert_with(|| fresh.clone())
-                .clone()
-        }
-    };
-    LAST_STATE.with(|slot| *slot.borrow_mut() = Some((key, type_id, arc.clone())));
-    std::sync::Arc::downcast::<T>(arc).expect("state entry type mismatch")
-}
-
-/// 取本构建的类型化状态;未注册(`module_init` 从未在此构建运行)明确报错。
-pub fn state_require<T: std::any::Any + Send + Sync>(
-    engine: &Engine,
-) -> SourceResult<std::sync::Arc<T>> {
-    let key = build_key(engine);
-    let type_id = std::any::TypeId::of::<T>();
-    let found = STATES.read().unwrap().get(&(key, type_id)).cloned();
-    match found {
-        Some(arc) => Ok(std::sync::Arc::downcast::<T>(arc).expect("state entry type mismatch")),
-        None => Err(state_error(
-            "模块状态未注册:宿主未调用 module_init(装配期求值)",
-        )),
-    }
-}
-
-/// 宿主在把模块注入 Library 之后调用:把最近创建的状态搬到注入后的
-/// library 哈希下(注入前的哈希条目保留,供装配期内的嵌套调用)。
-///
-/// `from` 为本次驱动的注入前 library 哈希(守卫):模块求值缓存命中时
-/// 不重新执行 `module_init`,最近状态可能残留自其他构建,不匹配即跳过。
-pub fn state_rebind_last_to(library: &typst::utils::LazyHash<typst::Library>, from: u128) {
-    let to = typst::utils::hash128(library);
-    let Some((from_seen, type_id, arc)) = LAST_STATE.with(|slot| slot.borrow_mut().take()) else {
-        return;
-    };
-    if from_seen != from {
-        return;
-    }
-    STATES.write().unwrap().insert((to, type_id), arc);
 }
 
 /// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`:
@@ -857,6 +777,171 @@ pub fn place_assign<'a>(
         return dict.at_mut(name).at(span);
     }
     place_mut(root, path, span)
+}
+
+/// per-build 状态的不透明句柄:包 `Arc<dyn Any + Send + Sync>` 进
+/// typst 值世界(`Value::Dyn`),随函数值传递(对照 typst 闭包的
+/// captured 数据布局);native 体经 [`take_state`] 从首个位置参数解包。
+#[derive(Clone)]
+pub struct StateSlot(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl StateSlot {
+    /// 包装一份 per-build 状态(`Arc<__State>` 自动协变为 `Arc<dyn Any>`)。
+    pub fn new(state: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        Self(state)
+    }
+}
+
+impl std::fmt::Debug for StateSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("state slot")
+    }
+}
+
+impl typst::foundations::Repr for StateSlot {
+    fn repr(&self) -> EcoString {
+        "state slot".into()
+    }
+}
+
+impl typst::foundations::NativeType for StateSlot {
+    const NAME: &'static str = "state";
+    fn data() -> &'static typst::foundations::NativeTypeData {
+        static DATA: std::sync::OnceLock<typst::foundations::NativeTypeData> =
+            std::sync::OnceLock::new();
+        DATA.get_or_init(|| typst::foundations::NativeTypeData {
+            name: "state",
+            long_name: "state",
+            title: "State",
+            docs: "internal per-build state slot",
+            def_site: typst::utils::DefSite {
+                path: "trust-runtime",
+                key: "StateSlot",
+            },
+            keywords: &[],
+            constructor: std::sync::LazyLock::new(|| None),
+            scope: std::sync::LazyLock::new(typst::foundations::Scope::new),
+        })
+    }
+}
+
+impl PartialEq for StateSlot {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::hash::Hash for StateSlot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (std::sync::Arc::as_ptr(&self.0) as *const u8 as usize).hash(state);
+    }
+}
+
+/// 签名保真的 stub 闭包(原生闭包 C 方案):`{name}{params}` 原签名
+/// 保留(参数检查/`params()`/repr/默认值自省全保真),转发体把状态
+/// 句柄作为首个位置参数传给 native 实现。`defaults` 为创建期物化值
+/// (对照 typst 闭包创建期求值默认值;调用期缺失参数从 defaults 取,
+/// AST 里的默认值表达式不会被求值)。状态随函数值走,生命周期与
+/// 函数值一致——全局注册表寻址(STATES 线)由此退场。
+pub fn native_closure(
+    data: &'static typst::foundations::NativeFuncData,
+    params_src: &str,
+    defaults: Vec<Value>,
+    state: &StateSlot,
+) -> Func {
+    // 转发实参列表:位置/解构参数按名,命名参数具名转发(保持 named
+    // 语义),sink 展开;无名 sink 在 stub 签名里补一个合成名。
+    let params_src = ensure_named_sink(params_src);
+    let arg_list = forward_args(&params_src);
+    let src = format!(
+        "let {}{params_src} = __trust_impl(__trust_state, {arg_list})",
+        data.name
+    );
+    let source = virtual_closure_source(&src);
+    let root = source.root();
+    let node = find_closure_node(root)
+        .unwrap_or_else(|| panic!("native closure stub parses: {src}"))
+        .clone();
+    let num_pos_params = node
+        .cast::<ast::Closure>()
+        .expect("closure node casts")
+        .params()
+        .children()
+        .filter(|p| matches!(p, ast::Param::Pos(_)))
+        .count();
+    let mut scope = Scope::new();
+    scope.define("__trust_impl", Func::from(data));
+    scope.define(
+        "__trust_state",
+        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
+    );
+    let closure_span = node.span();
+    Func::from(Closure {
+        node: ClosureNode::Closure(node),
+        defaults,
+        captured: scope,
+        num_pos_params,
+    })
+    .spanned(closure_span)
+}
+
+/// stub 签名里的无名 sink(`(..)`)补合成名,转发体才能引用。
+fn ensure_named_sink(params_src: &str) -> String {
+    if params_src.contains("..)") || params_src.trim_end().ends_with("..)") {
+        return params_src.replace("..)", "..__trust_sink)");
+    }
+    params_src.to_string()
+}
+
+/// 从参数表文本提取转发实参(位置名、`name: name` 具名、`..sink`)。
+fn forward_args(params_src: &str) -> String {
+    let root = typst_syntax::parse_code(&format!("let f{params_src} = none"));
+    let Some(closure_node) = find_closure_node(&root) else {
+        return String::new();
+    };
+    let Some(closure) = closure_node.cast::<ast::Closure>() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut nth_pattern = 0usize;
+    for param in closure.params().children() {
+        match param {
+            ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
+                parts.push(ident.as_str().to_string());
+            }
+            ast::Param::Pos(_) => {
+                parts.push(format!("__trust_p{nth_pattern}"));
+                nth_pattern += 1;
+            }
+            ast::Param::Named(named) => {
+                let name = named.name().as_str();
+                parts.push(format!("{name}: {name}"));
+            }
+            ast::Param::Spread(spread) => match spread.sink_ident() {
+                Some(ident) => parts.push(format!("..{}", ident.as_str())),
+                None => parts.push("..__trust_sink".to_string()),
+            },
+        }
+    }
+    parts.join(", ")
+}
+
+/// native 体序言:从首个位置参数解包 per-build 状态并从实参中移除
+/// (对照 stub 转发:`__trust_impl(__trust_state, ..用户实参)`)。
+pub fn take_state<T: std::any::Any + Send + Sync>(
+    args: &mut Args,
+) -> SourceResult<std::sync::Arc<T>> {
+    let value: Value = args.expect("__trust_state")?;
+    match value {
+        Value::Dyn(dynamic) => match dynamic.downcast::<StateSlot>() {
+            Some(slot) => match slot.0.clone().downcast::<T>() {
+                Ok(arc) => Ok(arc),
+                Err(_) => Err(state_error("状态句柄类型不符(生成器 bug)")),
+            },
+            None => Err(state_error("首个位置参数不是状态句柄(生成器 bug)")),
+        },
+        _ => Err(state_error("首个位置参数不是状态句柄(生成器 bug)")),
+    }
 }
 
 /// 沿路径段取可变引用(对照 `Expr::access`)。

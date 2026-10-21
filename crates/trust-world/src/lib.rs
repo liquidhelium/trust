@@ -140,7 +140,6 @@ impl InjectWorld {
     /// 缓存(与 `typst_eval::eval` 同一机制):同 (world 读取约束,
     /// library 内容, init 函数) 不二次求值,依赖变化自动失效。
     pub fn init_native_module(&mut self, name: &'static str, init: ModuleInit) -> Module {
-        let from = typst::utils::hash128(&self.library);
         let world: &dyn World = self;
         let module =
             eval_native_module(world.track(), &self.library, init).unwrap_or_else(|diags| {
@@ -150,10 +149,6 @@ impl InjectWorld {
                 )
             });
         self.inject_module(name, module.clone());
-        // 注入重建了 Library(哈希变化):把装配期状态搬到注入后的
-        // 哈希下,后续函数调用按新哈希取状态(from 守卫:缓存命中时
-        // 最近状态可能残留自其他构建,不匹配即跳过)。
-        trust_runtime::state_rebind_last_to(&self.library, from);
         module
     }
 

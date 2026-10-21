@@ -54,12 +54,12 @@ struct __State {
 /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
 pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {
     let mut scope = Scope::new();
-    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
+    let __st = std::sync::Arc::new(__State::default());
     let _ = context;
     if let Some(v) = rt::global_opt(engine, "x")? { rt::fill(&__st.G_V0_scale_x, v)?; }
     if let Some(v) = rt::global_opt(engine, "k")? { rt::fill(&__st.G_V0_scale_k, v)?; }
     { let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; }
-    { let v = Value::Func(Func::from(&D_V0_scale)); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
+    { let v = Value::Func(rt::native_closure(&D_V0_scale, "(x, k: 2)", vec![{ let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; v }], &rt::StateSlot::new(__st.clone()))); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
         let mut V1_base = Value::None;
 V1_base = v.clone();
@@ -74,7 +74,7 @@ V1_base = v.clone();
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
-    let __st = rt::state_require::<__State>(engine)?;
+    let __st = rt::take_state::<__State>(__args)?;
     let mut x = rt::param_pos(__args, "x", span)?;
     let mut k = match __args.named::<Value>("k")? {
         Some(value) => value,

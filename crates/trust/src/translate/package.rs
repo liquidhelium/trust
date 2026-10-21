@@ -574,22 +574,40 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &g_env));
                     file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
                     // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
-                    // env2 = import + 此前绑定,不含本函数自身)。
+                    // env2 = import + 此前绑定,不含本函数自身)。同一批
+                    // 表达式进 stub 的 defaults(调用期缺失参数取值用,
+                    // 对照 Closure.defaults 语义)。
+                    let mut defaults = Vec::new();
                     for param in closure.params().children() {
                         if let ast::Param::Named(named) = param {
                             let pname = named.name().as_str();
                             let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
                             state_fields.push(def_slot.clone());
                             let value = cx.expr(named.expr(), &env2);
-                            let _ = writeln!(
-                                binding_code,
-                                "    {{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; }}"
-                            );
+                            defaults.push(format!(
+                                "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
+                            ));
                         }
                     }
+                    // 原生闭包(C 方案):签名保真 stub + 状态随值走。
+                    // 不引用模块槽的纯函数保持裸 native(无状态前缀,
+                    // 序言无 take_state,两边按同一 used_state 判定)。
+                    let params_src = closure.params().to_untyped().full_text();
+                    let defaults = if defaults.is_empty() {
+                        "Vec::new()".to_string()
+                    } else {
+                        format!("vec![{}]", defaults.join(", "))
+                    };
+                    let func_value = if cx.used_state {
+                        format!(
+                            "rt::native_closure(&{data}, {params_src:?}, {defaults}, &rt::StateSlot::new(__st.clone()))"
+                        )
+                    } else {
+                        format!("Func::from(&{data})")
+                    };
                     let _ = writeln!(
                         binding_code,
-                        "    rt::fill(&__st.{slot}, Value::Func(Func::from(&{data})))?;"
+                        "    rt::fill(&__st.{slot}, Value::Func({func_value}))?;"
                     );
                     let _ = writeln!(
                         file_defines,
@@ -698,7 +716,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let _ = writeln!(
             body,
             "\n    /// `{}` 的求值:填 import 槽与自身绑定槽(模块求值的镜像)。\n\
-             \x20   pub(super) fn eval(__st: &__State, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
+             \x20   pub(super) fn eval(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
              \x20       let _ = (&*engine, context);\n{import_fills}{binding_code}        Ok(())\n    }}",
             plan.path
         );
@@ -706,7 +724,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             body,
             "\n    /// `{}` 的模块作用域(import 抄入 + 本文件顶层绑定),从已填槽位构建。\n\
              \x20   #[allow(non_snake_case, dead_code)]\n\
-             \x20   pub(super) fn module(__st: &__State) -> SourceResult<Module> {{\n\
+             \x20   pub(super) fn module(__st: &std::sync::Arc<__State>) -> SourceResult<Module> {{\n\
              \x20       let _ = __st;\n\
              \x20       let mut scope = Scope::new();\n{file_defines}        Ok(Module::new(\"{}\", scope).with_content(rt::read_content(&__st.{body_slot})?))\n    }}",
             plan.path,
@@ -781,7 +799,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{{ITEMS}}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{{ITEMS}}"
     );
     PackageParts {
         header,

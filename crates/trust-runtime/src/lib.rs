@@ -10,8 +10,8 @@ use typst::World;
 use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
-    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Selector, Str,
-    Transformation, Value, ops,
+    Arg, Args, Array, Closure, ClosureNode, Content, Context, Func, IntoValue, Module, Scope,
+    Selector, Str, Transformation, Value, ops,
 };
 use typst::syntax::{Span, Spanned, SyntaxKind, ast};
 
@@ -47,6 +47,14 @@ pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
     slot.get()
         .cloned()
         .ok_or_else(|| state_error("模块槽未初始化(求值序错误)"))
+}
+
+/// 读存为内容(body)的槽。
+pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> {
+    match read(slot)? {
+        Value::Content(content) => Ok(content),
+        _ => Err(state_error("模块 body 槽不是内容(生成器 bug)")),
+    }
 }
 
 /// 填一个顶层绑定槽;同一槽二次填充即生成器 bug,明确报错。

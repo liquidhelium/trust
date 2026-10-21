@@ -6,7 +6,7 @@ use typst::diag::{At, SourceResult, bail};
 use ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{
-    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
+    Args, CastInfo, Content, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
     NativeParamInfo, Scope, Value, ops,
 };
 use typst::syntax::Span;
@@ -41,7 +41,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
     let _ = context;
     { let v = Value::Func(Func::from(&D_V0_add)); rt::fill(&__st.V0_add, v.clone())?; scope.define("add", v); }
-    Ok(Module::new("function", scope))
+    Ok(Module::new("function", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])))
 }
 
 #[allow(non_snake_case, dead_code, unused_variables)]

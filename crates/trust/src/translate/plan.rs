@@ -23,6 +23,8 @@ pub(super) struct ImportEdge {
     pub(super) external: bool,
     /// 模块值表达式 import(`deps.oxifmt`):根绑定名 + 字段链。
     pub(super) module_access: Option<(String, Vec<String>)>,
+    /// `#include` 边:参与依赖图,不产生名字绑定。
+    pub(super) is_include: bool,
 }
 
 pub(super) enum ImportItems {

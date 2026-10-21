@@ -167,6 +167,31 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         items,
                         external,
                         module_access,
+                        is_include: false,
+                    });
+                }
+                ast::Expr::ModuleInclude(include) => {
+                    // include 边:进依赖图(环检测/拓扑),名字不绑定。
+                    let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
+                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
+                        continue;
+                    };
+                    let raw = path_expr.get().to_string();
+                    let target = normalize_import(path, &raw);
+                    if !input.files.contains_key(&target) {
+                        cx.diag(
+                            expr.span(),
+                            format!("include \"{raw}\" 解析到 {target},不在文件集"),
+                        );
+                        continue;
+                    }
+                    imports.push(ImportEdge {
+                        span: expr.span(),
+                        target,
+                        items: ImportItems::Bare,
+                        external: false,
+                        module_access: None,
+                        is_include: true,
                     });
                 }
                 ast::Expr::LetBinding(lets) => {
@@ -183,13 +208,9 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         tops.push((name.clone(), format!("V{id}_{}", sanitize(&name))));
                     }
                 }
-                other => {
-                    let kind = other.to_untyped().kind();
-                    cx.diag(
-                        other.span(),
-                        format!("模块顶层暂只支持 `#let`/`#import`,遇到 {kind:?}"),
-                    );
-                }
+                // 其余顶层表达式(文本/嵌入/set/show)是模块 body
+                // 内容,由第二遍收集折叠;此处无需处理。
+                _ => {}
             }
         }
         plans.push(FilePlan {
@@ -248,6 +269,9 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &plan.imports {
+            if edge.is_include {
+                continue;
+            }
             // 外部包:槽位 + 装配期运行时导入(未翻译依赖走解释器)。
             if edge.external {
                 let spec = edge.target.clone();
@@ -408,13 +432,48 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
             }
         }
 
-        // 本文件顶层绑定(追加在 import 之后:遮蔽语义),按源序填槽。
+        // 本文件顶层绑定与内容(按源序):绑定填槽,内容折叠进 body。
         let mut binding_code = String::new();
         let mut file_fns = String::new();
         let mut own: Vec<(String, String)> = Vec::new();
+        let mut content_items: Vec<super::expr::ContentItem> = Vec::new();
         let mut own_seen_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for expr in plan.markup.exprs() {
+            // 内容项:顶层文本/嵌入表达式/set/show/include。
+            match expr {
+                ast::Expr::LetBinding(_) | ast::Expr::ModuleImport(_) => {
+                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    content_items.push(super::expr::ContentItem::Part(expr));
+                }
+                ast::Expr::ModuleInclude(include) => {
+                    let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
+                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
+                        continue;
+                    };
+                    let raw = path_expr.get().to_string();
+                    let target = normalize_import(&plan.path, &raw);
+                    let Some(target_mod) = package_mods.get(&target) else {
+                        continue;
+                    };
+                    content_items.push(super::expr::ContentItem::Include(format!(
+                        "BODY_{target_mod}"
+                    )));
+                    continue;
+                }
+                ast::Expr::SetRule(set) => {
+                    content_items.push(super::expr::ContentItem::Set(set));
+                    continue;
+                }
+                ast::Expr::ShowRule(show) => {
+                    content_items.push(super::expr::ContentItem::Show(show));
+                    continue;
+                }
+                other => {
+                    content_items.push(super::expr::ContentItem::Part(other));
+                    continue;
+                }
+            }
             let ast::Expr::LetBinding(lets) = expr else {
                 continue;
             };
@@ -527,6 +586,20 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
         for (_, slot) in &plan.tops {
             state_fields.push(slot.clone());
         }
+        // 模块 body:顶层内容按源序折叠(规则包装后续内容),入槽。
+        let body_slot = format!("BODY_{}", plan.mod_name);
+        state_fields.push(body_slot.clone());
+        let mut body_env = env.clone();
+        for (seen, seen_slot) in &own {
+            body_env
+                .module
+                .push((seen.clone(), Ref::Slot(seen_slot.clone())));
+        }
+        let body = cx.content_seq(&content_items, &body_env);
+        let _ = writeln!(
+            binding_code,
+            "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
+        );
 
         // 文件 mod 块:file_span 锚点 + 函数体 + eval(填槽)+ module(导出面)。
         let mut file_mod = format!(
@@ -546,7 +619,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
              \x20   #[allow(non_snake_case, dead_code)]\n\
              \x20   pub(super) fn module(__st: &__State) -> SourceResult<Module> {{\n\
              \x20       let _ = __st;\n\
-             \x20       let mut scope = Scope::new();\n{file_defines}        Ok(Module::new(\"{}\", scope))\n    }}",
+             \x20       let mut scope = Scope::new();\n{file_defines}        Ok(Module::new(\"{}\", scope).with_content(rt::read_content(&__st.{body_slot})?))\n    }}",
             plan.path,
             module_stem(&plan.path)
         );
@@ -581,6 +654,11 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
         String::new()
     };
 
+    let entry_mod = plans
+        .iter()
+        .find(|p| p.path == entry)
+        .map(|p| p.mod_name.clone())
+        .expect("entry in plans");
     let mut fields = String::new();
     for slot in &state_fields {
         let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
@@ -593,7 +671,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
          use typst::diag::{{At, SourceResult, bail}};\n\
          use ecow::eco_vec;\n\
          use typst::engine::Engine;\n\
-         use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
+         use typst::foundations::{{\n    Args, CastInfo, Content, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\n\
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
@@ -602,7 +680,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n{eval_calls}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope))\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n{eval_calls}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{items}"
     )
 }
 

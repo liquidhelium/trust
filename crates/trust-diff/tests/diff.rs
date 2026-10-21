@@ -130,6 +130,7 @@ fn cases(fixture: &str) -> Vec<&'static str> {
         "sysinputs" => vec!["m.who", "m.shout(\"hi\")"],
         "set_show" => vec!["m.styled", "m.cond(true)", "m.cond(false)", "m.shown"],
         "context" => vec!["m.ctx-size", "m.ctx-call"],
+        "pkg_include" => vec!["m.greeting", "m.after"],
         _ => vec![],
     }
 }
@@ -198,6 +199,13 @@ fn differential(fixture: &str) {
     // rust:生成物(module_init = 模块求值的镜像,per-build 槽板)。
     let mut rust_world = InjectWorld::new("", vec![]);
     let rust_module = rust_world.init_native_module("m", gen_module_init(fixture));
+    // 模块体对拍(顶层内容与 include)。
+    let (gb, rb) = (
+        format!("{:?}", golden.content()),
+        format!("{:?}", rust_module.clone().content()),
+    );
+    assert_eq!(gb, rb, "模块 body 不一致(输入 {fixture})");
+
     let mut rust_scope = Scope::new();
     rust_scope.define("m", rust_module.clone());
 
@@ -242,6 +250,7 @@ fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
         "sysinputs" => trust_diff::gen_modules::sysinputs::module_init,
         "set_show" => trust_diff::gen_modules::set_show::module_init,
         "context" => trust_diff::gen_modules::context::module_init,
+        "pkg_include" => trust_diff::gen_modules::pkg_include::module_init,
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -267,7 +276,8 @@ diff_test!(
     destructuring,
     sysinputs,
     set_show,
-    context
+    context,
+    pkg_include
 );
 
 #[test]
@@ -298,6 +308,7 @@ fn all_fixtures_covered() {
         "sysinputs",
         "set_show",
         "context",
+        "pkg_include",
     ];
     for name in declared.keys() {
         assert!(

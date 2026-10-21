@@ -6,7 +6,7 @@ use typst::diag::{At, SourceResult, bail};
 use ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{
-    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
+    Args, CastInfo, Content, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
     NativeParamInfo, Scope, Value, ops,
 };
 use typst::syntax::Span;
@@ -49,7 +49,7 @@ V1_base = v.clone();
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
     { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
-    Ok(Module::new("rich", scope))
+    Ok(Module::new("rich", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None), rt::embed(Value::None), rt::embed(Value::None)])))
 }
 
 #[allow(non_snake_case, dead_code, unused_variables)]

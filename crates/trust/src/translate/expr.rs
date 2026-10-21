@@ -12,6 +12,17 @@ use super::captures::collect_idents;
 use super::ctx::{Ctx, Env};
 use super::naming::escape;
 
+/// 内容流的一项:普通表达式 / set 规则 / show 规则 / include。
+/// 顶层内容与 content 块共用同一条折叠管线。
+#[derive(Clone)]
+pub(super) enum ContentItem<'a> {
+    Part(ast::Expr<'a>),
+    Set(ast::SetRule<'a>),
+    Show(ast::ShowRule<'a>),
+    /// 包模式:目标文件 body 槽名。
+    Include(String),
+}
+
 impl Ctx {
     /// 表达式直译:返回类型为 `Value` 的 Rust 表达式(可含 `?`)。
     pub(super) fn expr(&mut self, expr: ast::Expr, env: &Env) -> String {
@@ -33,8 +44,49 @@ impl Ctx {
                 // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
                 // 嵌入表达式 + set/show 规则,构造方式对照
                 // typst-eval/src/markup.rs(规则包装后续全部内容)。
-                let exprs: Vec<ast::Expr> = block.body().exprs().collect();
-                format!("Value::Content({})", self.content_seq(&exprs, env))
+                let items: Vec<ContentItem> = block
+                    .body()
+                    .exprs()
+                    .map(|expr| match expr {
+                        ast::Expr::SetRule(set) => ContentItem::Set(set),
+                        ast::Expr::ShowRule(show) => ContentItem::Show(show),
+                        other => ContentItem::Part(other),
+                    })
+                    .collect();
+                format!("Value::Content({})", self.content_seq(&items, env))
+            }
+            ast::Expr::ModuleInclude(include) => {
+                // `#include "x.typ"`(包模式):目标模块的 body 内容
+                // (对照 `Eval for ast::ModuleInclude` -> Content)。
+                match include.source() {
+                    ast::Expr::Str(path) => {
+                        let raw = path.get().to_string();
+                        let (Some(file), Some(files), Some(mods)) = (
+                            self.current_file.clone(),
+                            self.package_files.clone(),
+                            self.package_mods.clone(),
+                        ) else {
+                            self.diag(path.span(), "include 仅在包模式支持".into());
+                            return "Value::None".into();
+                        };
+                        let target = super::paths::normalize_import(&file, &raw);
+                        let mod_name = mods.get(&target).cloned();
+                        match (files.contains_key(&target), mod_name) {
+                            (true, Some(mod_name)) => {
+                                self.used_state = true;
+                                format!("Value::Content(rt::read_content(&__st.BODY_{mod_name})?)")
+                            }
+                            _ => {
+                                self.diag(path.span(), format!("include \"{raw}\" 不在包文件集"));
+                                "Value::None".into()
+                            }
+                        }
+                    }
+                    other => {
+                        self.diag(other.span(), "include 源暂只支持字符串路径".into());
+                        "Value::None".into()
+                    }
+                }
             }
             ast::Expr::Contextual(ctx) => {
                 // `#context expr`:构造推迟求值的闭包(对照 `Eval for
@@ -377,15 +429,15 @@ impl Ctx {
 
     /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
     /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
-    fn content_seq(&mut self, exprs: &[ast::Expr], env: &Env) -> String {
-        for (i, expr) in exprs.iter().enumerate() {
-            match expr {
-                ast::Expr::SetRule(set) => {
-                    let mut parts: Vec<String> = exprs[..i]
+    pub(super) fn content_seq(&mut self, items: &[ContentItem], env: &Env) -> String {
+        for (i, item) in items.iter().enumerate() {
+            match item {
+                ContentItem::Set(set) => {
+                    let mut parts: Vec<String> = items[..i]
                         .iter()
-                        .map(|e| self.content_part(*e, env))
+                        .map(|e| self.content_part(e, env))
                         .collect();
-                    let tail = self.content_seq(&exprs[i + 1..], env);
+                    let tail = self.content_seq(&items[i + 1..], env);
                     let args = self.gen_args(set.args(), env);
                     let target = self.expr(set.target(), env);
                     // 条件为假时规则为空样式(对照 `Ok(Styles::new())`)。
@@ -399,12 +451,12 @@ impl Ctx {
                     parts.push(format!("rt::styled_with_map({tail}, {styles})"));
                     return self.content_join(parts);
                 }
-                ast::Expr::ShowRule(show) => {
-                    let mut parts: Vec<String> = exprs[..i]
+                ContentItem::Show(show) => {
+                    let mut parts: Vec<String> = items[..i]
                         .iter()
-                        .map(|e| self.content_part(*e, env))
+                        .map(|e| self.content_part(e, env))
                         .collect();
-                    let tail = self.content_seq(&exprs[i + 1..], env);
+                    let tail = self.content_seq(&items[i + 1..], env);
                     let sel_arg = match show.selector() {
                         Some(sel) => format!("Some({})", self.expr(sel, env)),
                         None => "None".to_string(),
@@ -432,21 +484,36 @@ impl Ctx {
                 _ => {}
             }
         }
-        let parts: Vec<String> = exprs.iter().map(|e| self.content_part(*e, env)).collect();
+        let parts: Vec<String> = items.iter().map(|e| self.content_part(e, env)).collect();
         self.content_join(parts)
     }
 
     /// content 的单个部分(表达式产出 Content 构造代码)。
-    fn content_part(&mut self, expr: ast::Expr, env: &Env) -> String {
-        match expr {
-            ast::Expr::Text(t) => format!("rt::text({:?})", t.get().as_str()),
-            ast::Expr::Space(_) => "rt::space()".into(),
-            ast::Expr::Linebreak(_) => "rt::linebreak()".into(),
-            ast::Expr::Parbreak(_) => "rt::parbreak()".into(),
-            ast::Expr::Escape(e) => format!("rt::text({:?})", e.get().to_string()),
-            other => {
-                let value = self.expr(other, env);
+    fn content_part(&mut self, item: &ContentItem, env: &Env) -> String {
+        match item {
+            ContentItem::Include(body_slot) => {
+                self.used_state = true;
+                format!("rt::read_content(&__st.{body_slot})?")
+            }
+            ContentItem::Part(ast::Expr::Text(t)) => {
+                format!("rt::text({:?})", t.get().as_str())
+            }
+            ContentItem::Part(ast::Expr::Space(_)) => "rt::space()".into(),
+            ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
+            ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),
+            ContentItem::Part(ast::Expr::Escape(e)) => {
+                format!("rt::text({:?})", e.get().to_string())
+            }
+            // 语句类表达式(let/import)求值为 none,并入空 display 槽
+            // (对照 eval_markup 的 `seq.push(value.display())`)。
+            ContentItem::Part(ast::Expr::LetBinding(_))
+            | ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
+            ContentItem::Part(other) => {
+                let value = self.expr(*other, env);
                 format!("rt::embed({value})")
+            }
+            ContentItem::Set(_) | ContentItem::Show(_) => {
+                unreachable!("rules handled by content_seq")
             }
         }
     }

@@ -3,11 +3,11 @@
 //! 生成形态(per-build 槽板,见 `_things/DESIGN-per-build.md`):
 //! - `__State`:每个顶层绑定一个写一次槽(`OnceLock<Value>`),
 //!   每构建一份实例,按源序在 `module_init` 中求值填充;
-//! - `__STATES`:构建键(World 身份)→ 状态实例的注册表;
 //! - `module_init(engine, context) -> Module`:模块求值的镜像,
-//!   宿主每次构建调用一次;
+//!   宿主每次构建调用一次;顶层内容(含 set/show 规则)按源序
+//!   折叠进模块 body(`Module::with_content`);
 //! - 函数:体内引用模块槽时编译为 `rt::read(&__st.槽名)?`,
-//!   函数体带 `__st` 序言(`__STATES.require(engine)`)。
+//!   函数体带 `__st` 序言(`rt::state_require(engine)`)。
 
 use std::fmt::Write as _;
 
@@ -55,77 +55,110 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         package_mods: None,
         used_state: false,
     };
-    // 第一遍:收集顶层绑定(名字 → 槽),函数绑定取其闭包节点。
+    // 第一遍:收集顶层绑定与内容项(交错保序:求值按源序)。
+    #[derive(Clone)]
+    enum Seq<'a> {
+        Binding(usize),
+        Content(super::expr::ContentItem<'a>),
+    }
     let mut tops: Vec<TopBinding> = Vec::new();
+    let mut seq: Vec<Seq> = Vec::new();
     for expr in markup.exprs() {
+        if let ast::Expr::LetBinding(_) = expr {
+            let before = tops.len();
+            collect_top(expr, &mut tops, &mut cx);
+            if tops.len() > before {
+                seq.push(Seq::Binding(tops.len() - 1));
+                // 对照 eval_markup:let 求值后同样并入一个 display 槽
+                // (None.display() 为空内容)。
+                seq.push(Seq::Content(super::expr::ContentItem::Part(expr)));
+            }
+            continue;
+        }
+        // 其余顶层表达式(含 Space/Parbreak)都是模块 body 内容。
         match expr {
-            ast::Expr::Space(_) | ast::Expr::Parbreak(_) => {}
-            ast::Expr::LetBinding(lets) => match lets.kind() {
-                ast::LetBindingKind::Closure(name) => {
-                    let Some(ast::Expr::Closure(closure)) = lets.init() else {
-                        cx.diag(lets.span(), "闭包绑定缺少闭包初始化".into());
-                        continue;
-                    };
-                    let id = cx.fresh_id();
-                    let slot = format!("V{id}_{}", sanitize(name.as_str()));
-                    tops.push(TopBinding {
-                        names: vec![(name.as_str().to_string(), slot)],
-                        kind: TopKind::Fn { closure },
-                    });
-                }
-                ast::LetBindingKind::Normal(pattern) => {
-                    let Some(init) = lets.init() else {
-                        if let Some(name) = pattern.bindings().first() {
-                            cx.diag(
-                                lets.span(),
-                                format!("顶层 `#let {}` 缺少初始化", name.as_str()),
-                            );
-                        }
-                        continue;
-                    };
-                    // 每个模式名字开一个槽(解构绑定多名)。
-                    let names: Vec<(String, String)> = pattern
-                        .bindings()
-                        .iter()
-                        .map(|ident| {
-                            let id = cx.fresh_id();
-                            (
-                                ident.as_str().to_string(),
-                                format!("V{id}_{}", sanitize(ident.as_str())),
-                            )
-                        })
-                        .collect();
-                    if names.is_empty() {
-                        cx.diag(lets.span(), "顶层绑定没有名字".into());
-                        continue;
+            ast::Expr::SetRule(set) => seq.push(Seq::Content(super::expr::ContentItem::Set(set))),
+            ast::Expr::ShowRule(show) => {
+                seq.push(Seq::Content(super::expr::ContentItem::Show(show)))
+            }
+            other => seq.push(Seq::Content(super::expr::ContentItem::Part(other))),
+        }
+    }
+    let _ = &mut seq;
+    fn collect_top<'a>(
+        expr: ast::Expr<'a>,
+        tops: &mut Vec<TopBinding<'a>>,
+        cx: &mut super::ctx::Ctx,
+    ) {
+        let ast::Expr::LetBinding(lets) = expr else {
+            return;
+        };
+        match lets.kind() {
+            ast::LetBindingKind::Closure(name) => {
+                let Some(ast::Expr::Closure(closure)) = lets.init() else {
+                    cx.diag(lets.span(), "闭包绑定缺少闭包初始化".into());
+                    return;
+                };
+                let id = cx.fresh_id();
+                let slot = format!("V{id}_{}", sanitize(name.as_str()));
+                tops.push(TopBinding {
+                    names: vec![(name.as_str().to_string(), slot)],
+                    kind: TopKind::Fn { closure },
+                });
+            }
+            ast::LetBindingKind::Normal(pattern) => {
+                let Some(init) = lets.init() else {
+                    if let Some(name) = pattern.bindings().first() {
+                        cx.diag(
+                            lets.span(),
+                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                        );
                     }
-                    tops.push(TopBinding {
-                        names,
-                        kind: TopKind::Value {
-                            init,
-                            pattern: Some(pattern),
-                        },
-                    });
+                    return;
+                };
+                // 每个模式名字开一个槽(解构绑定多名)。
+                let names: Vec<(String, String)> = pattern
+                    .bindings()
+                    .iter()
+                    .map(|ident| {
+                        let id = cx.fresh_id();
+                        (
+                            ident.as_str().to_string(),
+                            format!("V{id}_{}", sanitize(ident.as_str())),
+                        )
+                    })
+                    .collect();
+                if names.is_empty() {
+                    cx.diag(lets.span(), "顶层绑定没有名字".into());
+                    return;
                 }
-            },
-            other => {
-                let kind = other.to_untyped().kind();
-                cx.diag(
-                    other.span(),
-                    format!(
-                        "模块顶层暂只支持 `#let` 绑定,遇到 {kind:?}(标记内容/导入等属高级语义)"
-                    ),
-                );
+                tops.push(TopBinding {
+                    names,
+                    kind: TopKind::Value {
+                        init,
+                        pattern: Some(pattern),
+                    },
+                });
             }
         }
     }
 
-    // 第二遍:按源序生成求值语句(init 在绑定生效前求值,同名引用
-    // 解析到外层,由下方值分支自行处理)。
+    // 第二遍:按源序生成求值语句与模块 body。
     let mut init_code = String::new();
     let mut fields = String::new();
     let mut items = String::new();
-    for (i, top) in tops.iter().enumerate() {
+    let mut content_items: Vec<super::expr::ContentItem> = Vec::new();
+    let mut seen_tops: Vec<usize> = Vec::new();
+    for step in &seq {
+        let Seq::Binding(i) = step else {
+            if let Seq::Content(item) = step {
+                content_items.push(item.clone());
+            }
+            continue;
+        };
+        seen_tops.push(*i);
+        let i = *i;
+        let top = &tops[i];
         // 函数体可见自身(递归)与此前全部绑定;值 init 不含本绑定。
         let slots_of = |range: std::ops::RangeInclusive<usize>| {
             range
@@ -212,6 +245,24 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
+    // 模块 body:顶层内容按源序折叠(规则包装后续内容)。
+    let all_bound = |n: usize| -> Vec<(String, Ref)> {
+        (0..n)
+            .flat_map(|j| {
+                tops[j]
+                    .names
+                    .iter()
+                    .map(|(name, slot)| (name.clone(), Ref::Slot(slot.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let body_env = Env {
+        locals: Vec::new(),
+        module: all_bound(tops.len()),
+    };
+    let body = cx.content_seq(&content_items, &body_env);
+
     if !cx.diags.is_empty() {
         return Err(cx.diags);
     }
@@ -223,7 +274,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use typst::diag::{{At, SourceResult, bail}};\n\
          use ecow::eco_vec;\n\
          use typst::engine::Engine;\n\
-         use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
+         use typst::foundations::{{\n    Args, CastInfo, Content, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\n\
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
@@ -236,6 +287,6 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope))\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}))\n}}\n{items}"
     ))
 }

@@ -5,7 +5,7 @@
 
 use typst_syntax::ast::{self, AstNode};
 
-use super::ctx::{Ctx, Env, Mode, bind_local};
+use super::ctx::{Ctx, Env, bind_local};
 use super::naming::escape;
 
 impl Ctx {
@@ -14,7 +14,6 @@ impl Ctx {
         pattern: ast::Pattern,
         value: String,
         env: &mut Env,
-        mode: Mode,
         assign: bool,
     ) -> String {
         match pattern {
@@ -35,9 +34,7 @@ impl Ctx {
                 }
             }
             ast::Pattern::Placeholder(_) => format!("let _ = {value};\n"),
-            ast::Pattern::Parenthesized(p) => {
-                self.destructure(p.pattern(), value, env, mode, assign)
-            }
+            ast::Pattern::Parenthesized(p) => self.destructure(p.pattern(), value, env, assign),
             ast::Pattern::Destructuring(d) => {
                 let id = self.fresh_id();
                 let tmp = format!("__d{id}");
@@ -62,7 +59,7 @@ impl Ctx {
                     match item {
                         ast::DestructuringItem::Pattern(p) => {
                             let v = format!("rt::d_at(&{arr_ref}, {i}, SPAN)?");
-                            arr.push_str(&self.destructure(p, v, env, mode, true));
+                            arr.push_str(&self.destructure(p, v, env, true));
                             i += 1;
                         }
                         ast::DestructuringItem::Spread(spread) => {
@@ -76,7 +73,6 @@ impl Ctx {
                                         ast::Pattern::Normal(expr),
                                         v,
                                         env,
-                                        mode,
                                         true,
                                     ));
                                 }
@@ -111,7 +107,6 @@ impl Ctx {
                                 ast::Pattern::Normal(ast::Expr::Ident(ident)),
                                 v,
                                 env,
-                                mode,
                                 true,
                             ));
                         }
@@ -119,7 +114,7 @@ impl Ctx {
                             let key = named.name().as_str().to_string();
                             used.push(key.clone());
                             let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));
-                            dict.push_str(&self.destructure(named.pattern(), v, env, mode, true));
+                            dict.push_str(&self.destructure(named.pattern(), v, env, true));
                         }
                         ast::DestructuringItem::Spread(spread) => {
                             if let Some(expr) = spread.sink_expr() {
@@ -147,7 +142,6 @@ impl Ctx {
                         ast::Pattern::Normal(expr),
                         format!("Value::Dict({sink_tmp})"),
                         env,
-                        mode,
                         true,
                     ));
                 }
@@ -171,7 +165,7 @@ impl Ctx {
                     let mut index = "None".to_string();
                     for arg in call.args().items() {
                         if let ast::Arg::Pos(expr) = arg {
-                            index = format!("Some({})", self.expr(expr, env, mode));
+                            index = format!("Some({})", self.expr(expr, env));
                             break;
                         }
                     }

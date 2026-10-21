@@ -29,19 +29,23 @@ fn file_span() -> Span {
     })
 }
 
-/// 构建该模块(名字与导出面照抄源文件)。
-pub fn module() -> Module {
-    let mut scope = Scope::new();
-    scope.define("scale", rt::slot(&V0_scale));
-    scope.define("base", rt::slot(&V1_base));
-    scope.define("wrap", rt::slot(&V2_wrap));
-    Module::new("rich", scope)
+/// 本模块的求值状态:每个顶层绑定一个写一次槽(每构建一份)。
+#[derive(Default)]
+struct __State {
+    V0_scale: std::sync::OnceLock<Value>,
+    V1_base: std::sync::OnceLock<Value>,
+    V2_wrap: std::sync::OnceLock<Value>,
 }
-/// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。
-#[allow(non_snake_case, unused_variables)]
-pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {
-    let _ = (engine, context);
-    Ok(())
+
+/// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
+pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {
+    let mut scope = Scope::new();
+    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
+    let _ = context;
+    { let v = Value::Func(Func::from(&D_V0_scale)); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
+    { let v = Value::Int(10); rt::fill(&__st.V1_base, v.clone())?; scope.define("base", v); }
+    { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
+    Ok(Module::new("rich", scope))
 }
 
 #[allow(non_snake_case, dead_code, unused_variables)]
@@ -77,20 +81,6 @@ static D_V0_scale: NativeFuncData = NativeFuncData {
     returns: LazyLock::new(&rt::any_cast_info),
 };
 
-#[allow(non_snake_case, dead_code)]
-fn V0_scale_init() -> Value {
-    Value::Func(Func::from(&D_V0_scale))
-}
-#[allow(non_snake_case, dead_code)]
-static V0_scale: rt::Slot = LazyLock::new(&V0_scale_init);
-
-#[allow(non_snake_case, dead_code)]
-fn V1_base_init() -> Value {
-    Value::Int(10)
-}
-#[allow(non_snake_case, dead_code)]
-static V1_base: rt::Slot = LazyLock::new(&V1_base_init);
-
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
@@ -120,10 +110,3 @@ static D_V2_wrap: NativeFuncData = NativeFuncData {
     params: LazyLock::new(&f_v2_wrap_params),
     returns: LazyLock::new(&rt::any_cast_info),
 };
-
-#[allow(non_snake_case, dead_code)]
-fn V2_wrap_init() -> Value {
-    Value::Func(Func::from(&D_V2_wrap))
-}
-#[allow(non_snake_case, dead_code)]
-static V2_wrap: rt::Slot = LazyLock::new(&V2_wrap_init);

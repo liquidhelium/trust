@@ -1,14 +1,20 @@
 //! 单文件驱动:一个 typst 模块源文件 → 一个 Rust 模块源文件。
 //!
-//! 两遍扫描:先收集顶层绑定(名字 → 槽)并预判每个顶层值是否需要
-//! 引擎(决定槽形态),再逐绑定生成函数/槽与模块装配代码。
+//! 生成形态(per-build 槽板,见 `_things/DESIGN-per-build.md`):
+//! - `__State`:每个顶层绑定一个写一次槽(`OnceLock<Value>`),
+//!   每构建一份实例,按源序在 `module_init` 中求值填充;
+//! - `__STATES`:构建键(World 身份)→ 状态实例的注册表;
+//! - `module_init(engine, context) -> Module`:模块求值的镜像,
+//!   宿主每次构建调用一次;
+//! - 函数:体内引用模块槽时编译为 `rt::read(&__st.槽名)?`,
+//!   函数体带 `__st` 序言(`__STATES.require(engine)`)。
 
 use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
 use super::Diag;
-use super::ctx::{Ctx, Env, Mode, Ref};
+use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, uppercase};
 
@@ -42,6 +48,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         current_file: None,
         package_files: None,
         package_mods: None,
+        used_state: false,
     };
     // 第一遍:收集顶层绑定(名字 → 槽),函数绑定取其闭包节点。
     let mut tops: Vec<TopBinding> = Vec::new();
@@ -96,112 +103,41 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
-    // 预判每个顶层值是否需要引擎(决定槽形态;两次生成,翻译纯函数)。
-    let engine_flags: Vec<bool> = tops
-        .iter()
-        .map(|top| match &top.kind {
-            TopKind::Value { init } => {
-                let env = Env {
-                    locals: Vec::new(),
-                    module: Vec::new(),
-                };
-                let before = cx.diags.len();
-                let _ = cx.expr(*init, &env, Mode::ModuleInit);
-                let needs = cx.diags.len() > before;
-                cx.diags.truncate(before);
-                needs
-            }
-            _ => false,
-        })
-        .collect();
-
+    // 第二遍:按源序生成求值语句(init 在绑定生效前求值,同名引用
+    // 解析到外层,由下方值分支自行处理)。
+    let mut init_code = String::new();
+    let mut fields = String::new();
     let mut items = String::new();
-    let mut defines = String::new();
-    let mut engine_defines = String::new();
-    let mut engine_fills = String::new();
     for (i, top) in tops.iter().enumerate() {
-        // 函数体可见自身(递归)与此前全部绑定;值 init 在绑定生效前求值,
-        // 同名引用解析到外层,由下方值分支自行处理。
-        let mut env = Env {
+        // 函数体可见自身(递归)与此前全部绑定;值 init 不含本绑定。
+        let slot_of = |j: usize| (tops[j].name.clone(), Ref::Slot(tops[j].rust.clone()));
+        let env = Env {
             locals: Vec::new(),
-            module: tops[..=i]
-                .iter()
-                .enumerate()
-                .map(|(j, t)| {
-                    let r = if engine_flags[j] {
-                        Ref::Engine(t.rust.clone())
-                    } else {
-                        Ref::Slot(t.rust.clone())
-                    };
-                    (t.name.clone(), r)
-                })
-                .collect(),
+            module: (0..=i).map(slot_of).collect(),
         };
         let init_env = Env {
             locals: Vec::new(),
-            module: tops[..i]
-                .iter()
-                .enumerate()
-                .map(|(j, t)| {
-                    let r = if engine_flags[j] {
-                        Ref::Engine(t.rust.clone())
-                    } else {
-                        Ref::Slot(t.rust.clone())
-                    };
-                    (t.name.clone(), r)
-                })
-                .collect(),
+            module: (0..i).map(slot_of).collect(),
         };
-        let _ = &mut env;
+        let slot = &top.rust;
+        let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
         match &top.kind {
             TopKind::Value { init } => {
-                let id = &top.rust;
-                if engine_flags[i] {
-                    // 引擎值:惰性 OnceLock,首访从函数体/宿主 module_init 强制。
-                    let expr = cx.expr(*init, &init_env, Mode::FnBody);
-                    let _ = writeln!(
-                        items,
-                        "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({expr})\n}}\n\
-                         #[allow(non_snake_case, dead_code)]\nstatic {id}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
-                         #[allow(non_snake_case, dead_code)]\nfn {id}_get() -> SourceResult<Value> {{\n    {id}.get().cloned().ok_or_else(|| eco_vec![typst::diag::SourceDiagnostic::error(SPAN, typst::foundations::Str::from(\"引擎值未初始化:宿主未调用 module_init(装配期求值)\"))])\n}}"
-                    );
-                    let _ = writeln!(
-                        engine_fills,
-                        "    let _ = {id}.set({id}_init(engine, context)?);"
-                    );
-                    let _ = writeln!(
-                        engine_defines,
-                        "    scope.define(\"{}\", {id}_get()?);",
-                        escape(&top.name)
-                    );
-                } else {
-                    let expr = cx.expr(*init, &init_env, Mode::ModuleInit);
-                    let _ = writeln!(
-                        items,
-                        "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    {expr}\n}}\n\
-                         #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
-                    );
-                    let _ = writeln!(
-                        defines,
-                        "    scope.define(\"{}\", rt::slot(&{id}));",
-                        escape(&top.name)
-                    );
-                }
+                let expr = cx.expr(*init, &init_env);
+                let _ = writeln!(
+                    init_code,
+                    "    {{ let v = {expr}; rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
+                    escape(&top.name)
+                );
             }
             TopKind::Fn { closure } => {
                 let fun = format!("f_{}", lowercase(&top.rust));
                 let data = format!("D_{}", uppercase(&top.rust));
                 items.push_str(&cx.gen_function(&fun, *closure, &env));
                 items.push_str(&gen_func_data(&data, &fun, &top.name, *closure));
-                let id = &top.rust;
                 let _ = writeln!(
-                    items,
-                    "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    Value::Func(Func::from(&{data}))\n}}\n\
-                     #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
-                );
-                let _ = writeln!(
-                    defines,
-                    "    scope.define(\"{}\", rt::slot(&{id}));",
+                    init_code,
+                    "    {{ let v = Value::Func(Func::from(&{data})); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
                     escape(&top.name)
                 );
             }
@@ -217,21 +153,21 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
          use typst::diag::{{At, SourceResult, bail}};\n\
-use ecow::eco_vec;\n\
+         use ecow::eco_vec;\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\n\
-use typst::syntax::ast::Unit;\n\
+         use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          /// 生成的错误 span:detached(差分对拍只比较值)。\n\
          const SPAN: Span = Span::detached();\n\
          /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。\n\
          #[allow(non_snake_case, dead_code)]\n\
          fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\
-         /// 构建该模块(名字与导出面照抄源文件)。\n\
-         pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{defines}    Module::new(\"{module_name}\", scope)\n}}\n\
-         /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。\n\
-         #[allow(non_snake_case, unused_variables)]\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_fills}    let _ = (engine, context);\n{engine_defines}    Ok(())\n}}\n{items}"
+         /// 本模块的求值状态:每个顶层绑定一个写一次槽(每构建一份)。\n\
+         #[derive(Default)]\n\
+         struct __State {{\n{fields}}}\n\n\
+         /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。\n\
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope))\n}}\n{items}"
     ))
 }

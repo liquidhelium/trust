@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
-use super::ctx::{Ctx, Env, Mode, Ref, bind_local};
+use super::ctx::{Ctx, Env, bind_local};
 use super::naming::escape;
 use super::paths::{normalize_import, parse_module_access};
 
@@ -16,7 +16,6 @@ impl Ctx {
         &mut self,
         stmts: impl Iterator<Item = ast::Expr<'a>>,
         env: &Env,
-        mode: Mode,
     ) -> String {
         let mut out = String::from("{ let mut __out = Value::None;\n");
         let mut env = env.clone();
@@ -27,7 +26,7 @@ impl Ctx {
             }
             if let ast::Expr::LetBinding(lets) = stmt {
                 let init = match lets.init() {
-                    Some(init) => self.expr(init, &env, mode),
+                    Some(init) => self.expr(init, &env),
                     None => "Value::None".into(),
                 };
                 match lets.kind() {
@@ -36,7 +35,7 @@ impl Ctx {
                         let _ = writeln!(out, "    let mut {rust} = {init};");
                     }
                     ast::LetBindingKind::Normal(pattern) => {
-                        let stmts = self.destructure(pattern, init, &mut env, mode, false);
+                        let stmts = self.destructure(pattern, init, &mut env, false);
                         out.push_str("    ");
                         out.push_str(&stmts.replace('\n', "\n    "));
                     }
@@ -51,24 +50,10 @@ impl Ctx {
                         match parse_module_access(source) {
                             Some((root, fields)) => {
                                 let base = match env.module.iter().rev().find(|(n, _)| *n == root) {
-                                    Some((_, module_ref)) => match module_ref {
-                                        Ref::Slot(id) => format!("rt::slot(&{id})"),
-                                        Ref::Engine(id) => format!("{id}_get()?"),
-                                        Ref::Value(e) => e.clone(),
-                                        Ref::ModuleField { expr, name } => {
-                                            format!("rt::field(&({expr}), \"{name}\", SPAN)?")
-                                        }
-                                    },
-                                    None if mode == Mode::FnBody => {
+                                    Some((_, module_ref)) => self.ref_value(module_ref),
+                                    None => {
                                         // 全局模块(如 `import calc: abs`)。
                                         format!("rt::global(engine, \"{root}\", SPAN)?")
-                                    }
-                                    None => {
-                                        self.diag(
-                                            source.span(),
-                                            format!("import 的模块根 `{root}` 不可见"),
-                                        );
-                                        continue;
                                     }
                                 };
                                 let mut expr = base;
@@ -103,7 +88,9 @@ impl Ctx {
                         let target = normalize_import(&file, &raw);
                         match (files.contains_key(&target), mods.get(&target)) {
                             (true, Some(mod_name)) => {
-                                Some(format!("Value::Module({mod_name}::module())"))
+                                // 目标文件的模块作用域从槽板构建。
+                                self.used_state = true;
+                                Some(format!("Value::Module({mod_name}::module(&__st)?)"))
                             }
                             _ => {
                                 self.diag(
@@ -161,8 +148,8 @@ impl Ctx {
             }
             if let ast::Expr::DestructAssignment(assign_) = stmt {
                 // 解构赋值:目标须为已存在局部(对照 `Access` 语义)。
-                let value = self.expr(assign_.value(), &env, mode);
-                let stmts = self.destructure(assign_.pattern(), value, &mut env, mode, true);
+                let value = self.expr(assign_.value(), &env);
+                let stmts = self.destructure(assign_.pattern(), value, &mut env, true);
                 out.push_str("    ");
                 out.push_str(&stmts.replace('\n', "\n    "));
                 continue;
@@ -183,7 +170,7 @@ impl Ctx {
                     && let Some((_, rust)) =
                         env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
                 {
-                    let rhs = self.expr(binary.rhs(), &env, mode);
+                    let rhs = self.expr(binary.rhs(), &env);
                     let op = match binary.op() {
                         ast::BinOp::AddAssign => "add",
                         ast::BinOp::SubAssign => "sub",
@@ -202,7 +189,7 @@ impl Ctx {
                     let name = ident.as_str();
                     match env.locals.iter().rev().find(|(n, _)| n == name) {
                         Some((_, rust)) => {
-                            let value = self.expr(binary.rhs(), &env, mode);
+                            let value = self.expr(binary.rhs(), &env);
                             let _ = writeln!(out, "    {rust} = {value};");
                         }
                         None => {
@@ -219,7 +206,7 @@ impl Ctx {
                         .map(|f| format!("\"{}\"", escape(f)))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let value = self.expr(binary.rhs(), &env, mode);
+                    let value = self.expr(binary.rhs(), &env);
                     let _ = writeln!(
                         out,
                         "    {{ let __rhs = {value}; rt::field_assign_path(&mut {rust}, &[{path}], __rhs, SPAN)?; }}"
@@ -236,11 +223,11 @@ impl Ctx {
                     let mut index = "None".to_string();
                     for arg in call.args().items() {
                         if let ast::Arg::Pos(expr) = arg {
-                            index = format!("Some({})", self.expr(expr, &env, mode));
+                            index = format!("Some({})", self.expr(expr, &env));
                             break;
                         }
                     }
-                    let value = self.expr(binary.rhs(), &env, mode);
+                    let value = self.expr(binary.rhs(), &env);
                     let _ = writeln!(
                         out,
                         "    {{ let __rhs = {value}; rt::accessor_assign(&mut {rust}, \"{method}\", {index}, __rhs, SPAN)?; }}"
@@ -250,7 +237,7 @@ impl Ctx {
                 }
                 continue;
             }
-            let value = self.expr(stmt, &env, mode);
+            let value = self.expr(stmt, &env);
             last = Some(value);
         }
         match last {

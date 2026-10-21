@@ -24,7 +24,7 @@ use comemo::Track;
 use typst::diag::{FileError, FileResult, SourceResult};
 use typst::engine::{Route, Sink, Traced};
 use typst::foundations::{
-    Binding, Bytes, Context, Datetime, Duration, IntoValue, Module, Scope, StyleChain, Value,
+    Binding, Bytes, Context, Datetime, Dict, Duration, IntoValue, Module, Scope, StyleChain, Value,
 };
 use typst::introspection::EmptyIntrospector;
 use typst::syntax::{
@@ -38,9 +38,13 @@ use typst::{Library, LibraryExt, World};
 ///
 /// 评估专用(`font()` 恒空),足够支撑不落排版的求值测试;后续需要
 /// 排版对拍时再挂 FontBook。
-/// 模块引擎值初始化函数的签名。
+/// 模块求值入口的签名:宿主每次构建调用一次,返回该构建的模块。
+///
+/// 这是 typst 模块求值的镜像(`_things/DESIGN-per-build.md`):
+/// 生成物内部用 per-build 槽板存顶层绑定,构建标识取 World 身份,
+/// 因此一个 World 实例 = 一次构建。
 pub type ModuleInit =
-    fn(&mut typst::engine::Engine, comemo::Tracked<Context>, &mut Scope) -> SourceResult<()>;
+    fn(&mut typst::engine::Engine, comemo::Tracked<Context>) -> SourceResult<Module>;
 
 pub struct InjectWorld {
     library: LazyHash<Library>,
@@ -56,15 +60,26 @@ pub struct InjectWorld {
 }
 
 impl InjectWorld {
-    /// 新建:主文件文本 + 要注入全局作用域的模块列表 `(名字, 模块)`。
+    /// 新建:主文件文本 + 要注入全局作用域的模块列表 `(名字, 模块)`,
+    /// `sys.inputs` 为空。
     pub fn new(main_text: &str, modules: impl IntoIterator<Item = (&'static str, Module)>) -> Self {
+        Self::with_inputs(main_text, modules, Dict::new())
+    }
+
+    /// 新建并设定 `sys.inputs`(构造期烙进 Library,见
+    /// `_things/DESIGN-per-build.md`:inputs 即 Library 内容)。
+    pub fn with_inputs(
+        main_text: &str,
+        modules: impl IntoIterator<Item = (&'static str, Module)>,
+        inputs: Dict,
+    ) -> Self {
         let main = RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new("main.typ").expect("valid path"),
         )
         .intern();
 
-        let mut library = Library::builder().build();
+        let mut library = Library::builder().with_inputs(inputs).build();
         for (name, module) in modules {
             library.global.scope_mut().define(name, module);
         }
@@ -93,40 +108,34 @@ impl InjectWorld {
         }
     }
 
-    /// 注入原生模块并完成引擎值初始化:先注入模块(引擎值可引用模块内
-    /// 函数),再用临时 Engine 驱动 `module_init` 合并顶层引擎值,最后以
-    /// 更新后的模块重建 Library(重包 LazyHash 保持 comemo 哈希正确)。
-    pub fn init_native_module(
-        &mut self,
-        name: &'static str,
-        mut module: Module,
-        init: Option<ModuleInit>,
-    ) -> Module {
+    /// 注入原生模块:以本 World 搓临时 Engine 驱动 `module_init`
+    /// (模块求值的镜像,per-build 槽板按 World 身份注册),把返回的
+    /// 模块注入全局作用域并重建 Library(重包 LazyHash 保持 comemo
+    /// 哈希正确)。每次构建调用一次;重复调用幂等(同构建复用槽板)。
+    pub fn init_native_module(&mut self, name: &'static str, init: ModuleInit) -> Module {
+        let mut sink = Sink::new();
+        let world: &dyn World = self;
+        let traced = Traced::default();
+        let mut engine = typst::engine::Engine {
+            library: &self.library,
+            world: world.track(),
+            introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
+            traced: traced.track(),
+            sink: sink.track_mut(),
+            route: Route::default(),
+        };
+        let context = Context::none();
+        let module = init(&mut engine, context.track()).unwrap_or_else(|diags| {
+            panic!(
+                "module_init 模块求值失败: {:?}",
+                diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+            )
+        });
         self.inject_module(name, module.clone());
-        if let Some(init) = init {
-            let mut sink = Sink::new();
-            let world: &dyn World = self;
-            let traced = Traced::default();
-            let mut engine = typst::engine::Engine {
-                library: &self.library,
-                world: world.track(),
-                introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
-                traced: traced.track(),
-                sink: sink.track_mut(),
-                route: Route::default(),
-            };
-            let context = Context::none();
-            if let Err(diags) = init(&mut engine, context.track(), module.scope_mut()) {
-                panic!(
-                    "module_init 求值顶层引擎值失败: {:?}",
-                    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-                );
-            }
-            self.inject_module(name, module.clone());
-            module
-        } else {
-            module
-        }
+        // 注入重建了 Library(哈希变化):把装配期状态搬到注入后的
+        // 哈希下,后续函数调用按新哈希取状态。
+        trust_runtime::state_rebind_last_to(&self.library);
+        module
     }
 
     /// 以模块替换全局作用域中的同名定义并重建 Library。

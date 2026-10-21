@@ -67,6 +67,20 @@ pub(super) fn collect_idents(
                 bound.push(ident.as_str().to_string());
             }
         }
+        K::ModuleImport => {
+            // 对照 typst-eval 的 CapturesVisitor:源表达式照常遍历,
+            // 列表 import 的名字是内部绑定(调用期由体内 import 自身
+            // 绑定;bare/rename 不作处理,与原版一致)。
+            let Some(import) = node.cast::<ast::ModuleImport>() else {
+                return;
+            };
+            collect_idents(import.source().to_untyped(), bound, out);
+            if let Some(ast::Imports::Items(items)) = import.imports() {
+                for item in items.iter() {
+                    bound.push(item.bound_name().as_str().to_string());
+                }
+            }
+        }
         K::ForLoop => {
             let Some(for_loop) = node.cast::<ast::ForLoop>() else {
                 return;

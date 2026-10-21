@@ -2,8 +2,12 @@
 //!
 //! `Ctx` 贯穿翻译全程:诊断累积、宽松模式开关、临时 id 计数,以及包
 //! 模式的文件上下文。`Env` 是静态作用域的名字解析表(局部栈 + 可见
-//! 模块槽);`Ref` 是模块槽的引用形态;`Mode` 区分函数体(引擎在手)
-//! 与顶层值初始化(免引擎)。
+//! 模块槽);`Ref` 是模块槽的引用形态。
+//!
+//! 生成物里模块级绑定编译为 per-build 槽板字段(见
+//! `_things/DESIGN-per-build.md`),所有引用都形如
+//! `rt::read(&__st.槽名)?`;`used_state` 追踪当前函数是否发出过此类
+//! 引用,决定函数体是否需要 `__st` 序言。
 
 use super::Diag;
 use super::naming::fresh_rust_ident;
@@ -19,18 +23,17 @@ pub(super) struct Ctx {
     pub(super) package_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
     /// 包模式:文件路径 → 生成 mod 名(体内字符串 import 取模块值)。
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
+    /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
+    pub(super) used_state: bool,
 }
 
-/// 模块绑定的引用形态:普通槽(LazyLock)或引擎槽(OnceLock + getter)。
+/// 模块绑定的引用形态(统一指向 per-build 槽板字段)。
 #[derive(Clone)]
 pub(super) enum Ref {
+    /// 顶层绑定槽(每构建写一次)。
     Slot(String),
-    Engine(String),
     /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`)。
-    ModuleField {
-        expr: String,
-        name: String,
-    },
+    ModuleField { expr: String, name: String },
     /// 直接以表达式求值的绑定(模块值本身或其字段)。
     Value(String),
 }
@@ -40,14 +43,6 @@ pub(super) enum Ref {
 pub(super) struct Env {
     pub(super) locals: Vec<(String, String)>,
     pub(super) module: Vec<(String, Ref)>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum Mode {
-    /// 函数体:引擎在手,全部构造可用。
-    FnBody,
-    /// 顶层值初始化:免引擎,涉及调用/标准库引用即报错。
-    ModuleInit,
 }
 
 impl Ctx {
@@ -64,6 +59,18 @@ impl Ctx {
             message,
             file,
         });
+    }
+
+    /// 把模块槽引用编译为表达式(标记当前函数用到 `__st`)。
+    pub(super) fn ref_value(&mut self, module_ref: &Ref) -> String {
+        self.used_state = true;
+        match module_ref {
+            Ref::Slot(id) => format!("rt::read(&__st.{id})?"),
+            Ref::ModuleField { expr, name } => {
+                format!("rt::field(&({expr}), \"{name}\", SPAN)?")
+            }
+            Ref::Value(expr) => expr.clone(),
+        }
     }
 }
 

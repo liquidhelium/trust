@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self};
 
-use super::ctx::{Ctx, Env, Mode, bind_local};
+use super::ctx::{Ctx, Env, bind_local};
 use super::naming::escape;
 
 impl Ctx {
@@ -15,6 +15,8 @@ impl Ctx {
     pub(super) fn gen_function(&mut self, fun: &str, closure: ast::Closure, env: &Env) -> String {
         let mut body = String::new();
         let mut fn_env = env.clone();
+        // 是否需要 `__st`(函数体/默认值引用了模块槽)在生成中追踪。
+        self.used_state = false;
 
         for param in closure.params().children() {
             match param {
@@ -31,18 +33,12 @@ impl Ctx {
                 ast::Param::Pos(pattern) => {
                     // 解构参数(对照 eval_closure:"pattern parameter")。
                     let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
-                    body.push_str(&self.destructure(
-                        pattern,
-                        value,
-                        &mut fn_env,
-                        Mode::FnBody,
-                        false,
-                    ));
+                    body.push_str(&self.destructure(pattern, value, &mut fn_env, false));
                 }
                 ast::Param::Named(named) => {
                     let name = named.name().as_str().to_string();
                     // 默认值在定义环境求值:不可引用本参数,可引用先前参数。
-                    let default = self.expr(named.expr(), &fn_env, Mode::FnBody);
+                    let default = self.expr(named.expr(), &fn_env);
                     let rust = bind_local(&mut fn_env, &name);
                     // 惰性默认值:未提供时在调用点求值(语义边界见 mod.rs)。
                     let _ = writeln!(
@@ -68,11 +64,16 @@ impl Ctx {
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
 
-        let value = self.expr(closure.body(), &fn_env, Mode::FnBody);
+        let value = self.expr(closure.body(), &fn_env);
         let _ = writeln!(body, "    Ok({value})");
 
+        let prologue = if self.used_state {
+            "    let __st = rt::state_require::<__State>(engine)?;\n"
+        } else {
+            ""
+        };
         format!(
-            "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{body}}}\n"
+            "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{body}}}\n"
         )
     }
 }

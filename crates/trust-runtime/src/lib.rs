@@ -15,22 +15,109 @@ use typst::foundations::{
 };
 use typst::syntax::{Span, Spanned, SyntaxKind, ast};
 
-/// 模块级值槽:由生成代码以 `LazyLock::new(&init_fn)` 构造。
-pub type Slot = std::sync::LazyLock<Value, &'static (dyn Fn() -> Value + Send + Sync)>;
+use ecow::{EcoVec, eco_vec};
+use typst::diag::SourceDiagnostic;
 
-/// 读取(必要时强制初始化)一个值槽。
-pub fn slot(slot: &Slot) -> Value {
-    slot.clone_inner()
+/// 每构建状态(per-build 槽板)的存储与槽原语。
+///
+/// 见 `_things/DESIGN-per-build.md`:typst 运行时 = 有限命名槽 + 每次
+/// 求值写一次 + 按值快照;这里提供对应的 Rust 形态——写一次单元
+/// (`OnceLock<Value>`)与按构建键控的状态注册表。
+///
+/// **构建键 = `engine.library` 的内容哈希**(`LazyHash` 缓存,便宜,
+/// 与 comemo 同一失效纪律)。宿主注入模块会重建 Library(哈希变化),
+/// 因此协议是:`module_init` 在注入前的哈希下注册状态,宿主注入后
+/// 调 [`state_rebind_last_to`] 把最近创建的状态搬到注入后的哈希下
+/// (`init_native_module` 已内置)。
+///
+/// 义务与限制:一个 Library 内容 = 一次构建;注册表条目不自动回收。
+pub fn build_key(engine: &Engine) -> u128 {
+    typst::utils::hash128(engine.library)
 }
 
-// 让 Clone 语义显式一点:LazyLock 解引用到 Value。
-trait SlotExt {
-    fn clone_inner(&self) -> Value;
+fn state_error(message: &str) -> EcoVec<SourceDiagnostic> {
+    eco_vec![SourceDiagnostic::error(
+        Span::detached(),
+        typst::foundations::Str::from(message),
+    )]
 }
-impl SlotExt for Slot {
-    fn clone_inner(&self) -> Value {
-        (**self).clone()
+
+/// 读一个顶层绑定槽(写一次单元)。
+pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
+    slot.get()
+        .cloned()
+        .ok_or_else(|| state_error("模块槽未初始化(求值序错误)"))
+}
+
+/// 填一个顶层绑定槽;同一槽二次填充即生成器 bug,明确报错。
+pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
+    slot.set(value)
+        .map_err(|_| state_error("模块槽重复填充(生成器 bug)"))
+}
+
+type AnyState = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+
+/// 每构建状态的全局注册表:(library 哈希, 状态类型) → 状态实例。
+static STATES: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(u128, std::any::TypeId), AnyState>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+thread_local! {
+    /// 最近一次 `state_get_or_insert` 创建/复用的状态(供宿主注入后
+    /// 重绑定;同线程同步协议,见 `state_rebind_last_to`)。
+    static LAST_STATE: std::cell::RefCell<Option<(u128, std::any::TypeId, AnyState)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 取本构建的类型化状态;不存在则以 `init` 创建(幂等:同构建复用,
+/// 对照 typst 同编译内模块只求值一次)。
+pub fn state_get_or_insert<T: std::any::Any + Send + Sync>(
+    engine: &Engine,
+    init: impl FnOnce() -> T,
+) -> std::sync::Arc<T> {
+    let key = build_key(engine);
+    let type_id = std::any::TypeId::of::<T>();
+    let found = STATES.read().unwrap().get(&(key, type_id)).cloned();
+    let arc: AnyState = match found {
+        Some(found) => found,
+        None => {
+            let fresh: AnyState = std::sync::Arc::new(init());
+            STATES
+                .write()
+                .unwrap()
+                .entry((key, type_id))
+                .or_insert_with(|| fresh.clone())
+                .clone()
+        }
+    };
+    LAST_STATE.with(|slot| *slot.borrow_mut() = Some((key, type_id, arc.clone())));
+    std::sync::Arc::downcast::<T>(arc).expect("state entry type mismatch")
+}
+
+/// 取本构建的类型化状态;未注册(`module_init` 从未在此构建运行)明确报错。
+pub fn state_require<T: std::any::Any + Send + Sync>(
+    engine: &Engine,
+) -> SourceResult<std::sync::Arc<T>> {
+    let key = build_key(engine);
+    let type_id = std::any::TypeId::of::<T>();
+    let found = STATES.read().unwrap().get(&(key, type_id)).cloned();
+    match found {
+        Some(arc) => Ok(std::sync::Arc::downcast::<T>(arc).expect("state entry type mismatch")),
+        None => Err(state_error(
+            "模块状态未注册:宿主未调用 module_init(装配期求值)",
+        )),
     }
+}
+
+/// 宿主在把模块注入 Library 之后调用:把最近创建的状态搬到注入后的
+/// library 哈希下(注入前的哈希条目保留,供装配期内的嵌套调用)。
+pub fn state_rebind_last_to(library: &typst::utils::LazyHash<typst::Library>) {
+    let to = typst::utils::hash128(library);
+    let Some((from, type_id, arc)) = LAST_STATE.with(|slot| slot.borrow_mut().take()) else {
+        return;
+    };
+    let _ = from;
+    STATES.write().unwrap().insert((to, type_id), arc);
 }
 
 /// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`,
@@ -40,6 +127,17 @@ pub fn global(engine: &Engine, name: &str, span: Span) -> SourceResult<Value> {
         Some(binding) => Ok(binding.read().clone()),
         None => bail!(span, "unknown variable: {name}"),
     }
+}
+
+/// 全局查找,不存在返回 `None`(对照 typst 捕获语义:创建期不可见的
+/// 名字不捕获,由闭包体内自己的 import 在调用期绑定)。
+pub fn global_opt(engine: &Engine, name: &str) -> SourceResult<Option<Value>> {
+    Ok(engine
+        .library
+        .global
+        .scope()
+        .get(name)
+        .map(|binding| binding.read().clone()))
 }
 
 /// 字段访问 `target.name`(对照 `ast::FieldAccess` 求值:`Value::field`)。

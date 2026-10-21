@@ -2044,6 +2044,7 @@ name = "trust-world"
 version = "0.1.0"
 dependencies = [
  "comemo",
+ "trust-runtime",
  "typst",
  "typst-eval",
  "typst-syntax",

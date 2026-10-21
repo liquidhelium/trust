@@ -1,7 +1,8 @@
 //! 性能对照:解释器(golden)与生成物执行同一段纯计算,
 //! 证明 L0 直译层已消除解释器每调用常数(nuitka 路线的核心收益)。
 //!
-//! comemo 会按参数 memoize,因此每轮计时使用递增参数避开缓存:
+//! comemo 会按参数 memoize,因此每轮计时使用递增参数避开缓存;
+//! 模块装配(module_init / eval_main)在计时区外各做一次:
 //!
 //! `cargo test -p trust-diff --release --test bench -- --nocapture --ignored`
 
@@ -12,7 +13,7 @@ use typst::foundations::{Module, Scope};
 
 const BODY: &str = include_str!("../fixtures/bench.typ");
 
-/// 一轮负载(带偏移避免缓存命中):返回 (调用表达式, 期望值)。
+/// 一轮负载(带偏移避免缓存命中):返回调用表达式。
 fn round(calls: &[&str], offset: i64) -> Vec<String> {
     calls
         .iter()
@@ -20,43 +21,43 @@ fn round(calls: &[&str], offset: i64) -> Vec<String> {
         .collect()
 }
 
-fn run_interpreted(calls: &[String]) -> Vec<String> {
+/// 装配好的执行侧:World + `m` 模块作用域。
+struct Side {
+    world: InjectWorld,
+    scope: Scope,
+}
+
+fn setup_interpreted() -> Side {
     let world = InjectWorld::new(BODY, vec![]);
     let module: Module = world.eval_main().expect("golden eval");
     let mut scope = Scope::new();
     scope.define("m", module.clone());
-    calls
-        .iter()
-        .map(|call| {
-            format!(
-                "{:?}",
-                world.eval_code(call, scope.clone()).expect("golden run")
-            )
-        })
-        .collect()
+    Side { world, scope }
 }
 
-fn run_compiled(calls: &[String]) -> Vec<String> {
-    let module = trust_diff::gen_modules::bench::module();
-    let world = InjectWorld::new("", vec![]);
+fn setup_compiled() -> Side {
+    let mut world = InjectWorld::new("", vec![]);
+    let module = world.init_native_module("m", trust_diff::gen_modules::bench::module_init);
     let mut scope = Scope::new();
     scope.define("m", module.clone());
+    Side { world, scope }
+}
+
+fn run(side: &Side, calls: &[String]) -> Vec<String> {
     calls
         .iter()
         .map(|call| {
             format!(
                 "{:?}",
-                world.eval_code(call, scope.clone()).expect("rust run")
+                side.world.eval_code(call, side.scope.clone()).expect("run")
             )
         })
         .collect()
 }
 
 #[test]
-#[ignore = "基准:显式运行"]
+#[ignore = "性能对照,显式运行"]
 fn interpreter_vs_compiled() {
-    // 模板里的 N 由每轮偏移替换;先对拍正确性。
-    // make-fib(N)(..):工厂每轮新参数 → 新闭包实例 → 两侧都无 memoize 红利。
     let templates = [
         "m.fib-mod(12000 + N)",
         "m.sum-nums(20000 + N)",
@@ -65,8 +66,10 @@ fn interpreter_vs_compiled() {
         "m.map-heavy(2000 + N)",
     ];
 
+    let golden = setup_interpreted();
+    let compiled = setup_compiled();
     let first = round(&templates, 0);
-    let (g, r) = (run_interpreted(&first), run_compiled(&first));
+    let (g, r) = (run(&golden, &first), run(&compiled, &first));
     assert_eq!(g, r, "基准负载差分失败:\n{g:?}\n{r:?}");
 
     let mut interp_total = 0u128;
@@ -78,11 +81,11 @@ fn interpreter_vs_compiled() {
             let calls = round(std::slice::from_ref(template), offset);
 
             let start = Instant::now();
-            run_interpreted(&calls);
+            run(&golden, &calls);
             interp_one += start.elapsed().as_millis();
 
             let start = Instant::now();
-            run_compiled(&calls);
+            run(&compiled, &calls);
             comp_one += start.elapsed().as_millis();
         }
         interp_total += interp_one;

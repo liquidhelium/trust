@@ -29,17 +29,19 @@ fn file_span() -> Span {
     })
 }
 
-/// 构建该模块(名字与导出面照抄源文件)。
-pub fn module() -> Module {
-    let mut scope = Scope::new();
-    scope.define("pick", rt::slot(&V0_pick));
-    Module::new("control", scope)
+/// 本模块的求值状态:每个顶层绑定一个写一次槽(每构建一份)。
+#[derive(Default)]
+struct __State {
+    V0_pick: std::sync::OnceLock<Value>,
 }
-/// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。
-#[allow(non_snake_case, unused_variables)]
-pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {
-    let _ = (engine, context);
-    Ok(())
+
+/// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
+pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {
+    let mut scope = Scope::new();
+    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
+    let _ = context;
+    { let v = Value::Func(Func::from(&D_V0_pick)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
+    Ok(Module::new("control", scope))
 }
 
 #[allow(non_snake_case, dead_code, unused_variables)]
@@ -87,10 +89,3 @@ static D_V0_pick: NativeFuncData = NativeFuncData {
     params: LazyLock::new(&f_v0_pick_params),
     returns: LazyLock::new(&rt::any_cast_info),
 };
-
-#[allow(non_snake_case, dead_code)]
-fn V0_pick_init() -> Value {
-    Value::Func(Func::from(&D_V0_pick))
-}
-#[allow(non_snake_case, dead_code)]
-static V0_pick: rt::Slot = LazyLock::new(&V0_pick_init);

@@ -127,6 +127,7 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.pad(\"x\")",
             "m.dec(3.14159)",
         ],
+        "sysinputs" => vec!["m.who", "m.shout(\"hi\")"],
         _ => vec![],
     }
 }
@@ -192,12 +193,9 @@ fn differential(fixture: &str) {
     let mut golden_scope = Scope::new();
     golden_scope.define("m", golden.clone());
 
-    // rust:生成物(顶层引擎值经 module_init 协议求值合并)。
-    let mut rust_module = gen_module(fixture);
+    // rust:生成物(module_init = 模块求值的镜像,per-build 槽板)。
     let mut rust_world = InjectWorld::new("", vec![]);
-    if let Some(init) = gen_module_init(fixture) {
-        rust_module = rust_world.init_native_module("m", rust_module, Some(init));
-    }
+    let rust_module = rust_world.init_native_module("m", gen_module_init(fixture));
     let mut rust_scope = Scope::new();
     rust_scope.define("m", rust_module.clone());
 
@@ -227,25 +225,19 @@ fn golden_scope_clone(scope: &Scope) -> Scope {
     scope.clone()
 }
 
-fn gen_module_init(fixture: &str) -> Option<trust_world::ModuleInit> {
+fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
     match fixture {
-        "toplevel" => Some(trust_diff::gen_modules::toplevel::module_init),
-        _ => None,
-    }
-}
-
-fn gen_module(fixture: &str) -> Module {
-    match fixture {
-        "arith" => trust_diff::gen_modules::arith::module(),
-        "control" => trust_diff::gen_modules::control::module(),
-        "collections" => trust_diff::gen_modules::collections::module(),
-        "closure" => trust_diff::gen_modules::closure::module(),
-        "stdlib" => trust_diff::gen_modules::stdlib::module(),
-        "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module(),
-        "bench" => trust_diff::gen_modules::bench::module(),
-        "content" => trust_diff::gen_modules::content::module(),
-        "toplevel" => trust_diff::gen_modules::toplevel::module(),
-        "destructuring" => trust_diff::gen_modules::destructuring::module(),
+        "arith" => trust_diff::gen_modules::arith::module_init,
+        "control" => trust_diff::gen_modules::control::module_init,
+        "collections" => trust_diff::gen_modules::collections::module_init,
+        "closure" => trust_diff::gen_modules::closure::module_init,
+        "stdlib" => trust_diff::gen_modules::stdlib::module_init,
+        "pkg_shapes" => trust_diff::gen_modules::pkg_shapes::module_init,
+        "bench" => trust_diff::gen_modules::bench::module_init,
+        "content" => trust_diff::gen_modules::content::module_init,
+        "toplevel" => trust_diff::gen_modules::toplevel::module_init,
+        "destructuring" => trust_diff::gen_modules::destructuring::module_init,
+        "sysinputs" => trust_diff::gen_modules::sysinputs::module_init,
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -268,7 +260,8 @@ diff_test!(
     pkg_shapes,
     content,
     toplevel,
-    destructuring
+    destructuring,
+    sysinputs
 );
 
 #[test]
@@ -296,6 +289,7 @@ fn all_fixtures_covered() {
         "content",
         "toplevel",
         "destructuring",
+        "sysinputs",
     ];
     for name in declared.keys() {
         assert!(

@@ -10,3 +10,4 @@ typst = "0.15.1"
 typst-eval = "0.15.1"
 typst-syntax = "0.15.1"
 comemo = "0.5.1"
+trust-runtime = { path = "../trust-runtime" }

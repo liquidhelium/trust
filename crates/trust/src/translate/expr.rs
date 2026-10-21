@@ -9,31 +9,14 @@ use std::fmt::Write as _;
 use typst_syntax::ast::{self, AstNode};
 
 use super::captures::collect_idents;
-use super::ctx::{Ctx, Env, Mode, Ref};
+use super::ctx::{Ctx, Env};
 use super::naming::escape;
 
 impl Ctx {
     /// 表达式直译:返回类型为 `Value` 的 Rust 表达式(可含 `?`)。
-    pub(super) fn expr(&mut self, expr: ast::Expr, env: &Env, mode: Mode) -> String {
-        // 顶层值上下文(engine-free init 返回 Value)不能使用 `?`:
-        // 可失败运算(算术/比较/迭代/join)一律判为需要引擎。
-        if mode == Mode::ModuleInit
-            && matches!(
-                expr,
-                ast::Expr::Unary(_)
-                    | ast::Expr::Binary(_)
-                    | ast::Expr::ForLoop(_)
-                    | ast::Expr::WhileLoop(_)
-            )
-        {
-            self.diag(
-                expr.span(),
-                "顶层值中的可失败运算需要引擎(请包进函数)".into(),
-            );
-            return "Value::None".into();
-        }
+    pub(super) fn expr(&mut self, expr: ast::Expr, env: &Env) -> String {
         match expr {
-            ast::Expr::Ident(ident) => self.ident(ident, env, mode),
+            ast::Expr::Ident(ident) => self.ident(ident, env),
             ast::Expr::None(_) => "Value::None".into(),
             ast::Expr::Auto(_) => "Value::Auto".into(),
             ast::Expr::Bool(b) => format!("Value::Bool({})", b.get()),
@@ -44,8 +27,8 @@ impl Ctx {
                 format!("Value::numeric(({value:?}, Unit::{unit:?}))")
             }
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
-            ast::Expr::Parenthesized(p) => self.expr(p.expr(), env, mode),
-            ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env, mode),
+            ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
+            ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
             ast::Expr::ContentBlock(block) => {
                 // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
                 // 嵌入表达式,构造方式对照 typst-eval/src/markup.rs。
@@ -62,7 +45,7 @@ impl Ctx {
                             parts.push(format!("rt::text({:?})", e.get().to_string()));
                         }
                         other => {
-                            let value = self.expr(other, env, mode);
+                            let value = self.expr(other, env);
                             parts.push(format!("rt::embed({value})"));
                         }
                     }
@@ -81,11 +64,11 @@ impl Ctx {
                 for item in array.items() {
                     match item {
                         ast::ArrayItem::Pos(expr) => {
-                            let value = self.expr(expr, env, mode);
+                            let value = self.expr(expr, env);
                             let _ = write!(out, " __a.push({value});");
                         }
                         ast::ArrayItem::Spread(spread) => {
-                            let value = self.expr(spread.expr(), env, mode);
+                            let value = self.expr(spread.expr(), env);
                             let _ = write!(out, " rt::array_spread(&mut __a, {value}, SPAN)?;");
                         }
                     }
@@ -99,7 +82,7 @@ impl Ctx {
                     match item {
                         ast::DictItem::Named(named) => {
                             let key = named.name().as_str();
-                            let value = self.expr(named.expr(), env, mode);
+                            let value = self.expr(named.expr(), env);
                             let _ = write!(
                                 out,
                                 " rt::dict_put(&mut __d, \"{}\", {value});",
@@ -111,11 +94,11 @@ impl Ctx {
                                 unreachable!("keyed pair key is a string")
                             };
                             let key = key.get();
-                            let value = self.expr(keyed.expr(), env, mode);
+                            let value = self.expr(keyed.expr(), env);
                             let _ = write!(out, " rt::dict_put(&mut __d, {key:?}, {value});");
                         }
                         ast::DictItem::Spread(spread) => {
-                            let value = self.expr(spread.expr(), env, mode);
+                            let value = self.expr(spread.expr(), env);
                             let _ = write!(out, " rt::dict_spread(&mut __d, {value}, SPAN)?;");
                         }
                     }
@@ -124,7 +107,7 @@ impl Ctx {
                 out
             }
             ast::Expr::Unary(unary) => {
-                let inner = self.expr(unary.expr(), env, mode);
+                let inner = self.expr(unary.expr(), env);
                 let op = match unary.op() {
                     ast::UnOp::Pos => "pos",
                     ast::UnOp::Neg => "neg",
@@ -132,26 +115,26 @@ impl Ctx {
                 };
                 format!("ops::{op}({inner}).at(SPAN)?")
             }
-            ast::Expr::Binary(binary) => self.binary(binary, env, mode),
+            ast::Expr::Binary(binary) => self.binary(binary, env),
             ast::Expr::FieldAccess(access) => {
-                let target = self.expr(access.target(), env, mode);
+                let target = self.expr(access.target(), env);
                 let field = access.field().as_str();
                 format!("rt::field(&({target}), \"{}\", SPAN)?", escape(field))
             }
-            ast::Expr::FuncCall(call) => self.func_call(call, env, mode),
-            ast::Expr::Closure(closure) => self.closure_expr(closure, env, mode),
+            ast::Expr::FuncCall(call) => self.func_call(call, env),
+            ast::Expr::Closure(closure) => self.closure_expr(closure, env),
             ast::Expr::Conditional(cond) => {
-                let condition = self.expr(cond.condition(), env, mode);
-                let then = self.expr(cond.if_body(), env, mode);
+                let condition = self.expr(cond.condition(), env);
+                let then = self.expr(cond.if_body(), env);
                 let otherwise = match cond.else_body() {
-                    Some(e) => self.expr(e, env, mode),
+                    Some(e) => self.expr(e, env),
                     None => "Value::None".into(),
                 };
                 format!("if rt::boolean({condition}, SPAN)? {{ {then} }} else {{ {otherwise} }}")
             }
             ast::Expr::WhileLoop(while_loop) => {
-                let condition = self.expr(while_loop.condition(), env, mode);
-                let body = self.expr(while_loop.body(), env, mode);
+                let condition = self.expr(while_loop.condition(), env);
+                let body = self.expr(while_loop.body(), env);
                 format!(
                     "{{ let mut __out = Value::None;\n  \
                      while rt::boolean({condition}, SPAN)? {{\n  \
@@ -163,7 +146,7 @@ impl Ctx {
             }
             ast::Expr::FuncReturn(func_return) => {
                 let value = match func_return.body() {
-                    Some(expr) => self.expr(expr, env, mode),
+                    Some(expr) => self.expr(expr, env),
                     None => "Value::None".into(),
                 };
                 format!("return Ok({value})")
@@ -171,16 +154,16 @@ impl Ctx {
             ast::Expr::LoopBreak(_) => "{ break; Value::None }".into(),
             ast::Expr::LoopContinue(_) => "{ continue; Value::None }".into(),
             ast::Expr::ForLoop(for_loop) => {
-                let iterable = self.expr(for_loop.iterable(), env, mode);
+                let iterable = self.expr(for_loop.iterable(), env);
                 let id = self.fresh_id();
                 let binder = format!("__it{id}");
                 // 模式解构在循环体首展开(单一标识符直接绑定)。
                 let mut body_env = env.clone();
                 let pattern_code = {
                     let inner = format!("{{ {binder}.clone() }}");
-                    self.destructure(for_loop.pattern(), inner, &mut body_env, mode, false)
+                    self.destructure(for_loop.pattern(), inner, &mut body_env, false)
                 };
-                let body = self.expr(for_loop.body(), &body_env, mode);
+                let body = self.expr(for_loop.body(), &body_env);
                 format!(
                     "{{ let mut __out = Value::None;\n  \
                      for {binder} in rt::iter_values(&({iterable}), SPAN)? {{\n  \
@@ -204,39 +187,24 @@ impl Ctx {
         }
     }
 
-    fn ident(&mut self, ident: ast::Ident, env: &Env, mode: Mode) -> String {
+    fn ident(&mut self, ident: ast::Ident, env: &Env) -> String {
         let name = ident.as_str();
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return format!("{rust}.clone()");
         }
         if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
-            return match module_ref {
-                Ref::Slot(id) => format!("rt::slot(&{id})"),
-                Ref::Engine(id) => format!("{id}_get()?"),
-                Ref::ModuleField { expr, name } => {
-                    format!("rt::field(&({expr}), \"{name}\", SPAN)?")
-                }
-                Ref::Value(expr) => expr.clone(),
-            };
+            return self.ref_value(module_ref);
         }
-        if mode == Mode::ModuleInit {
-            self.diag(
-                ident.span(),
-                format!("顶层值引用标准库 `{name}`,需要引擎(暂不支持,请包进函数)"),
-            );
-            "Value::None".into()
-        } else {
-            format!("rt::global(engine, \"{}\", file_span())?", escape(name))
-        }
+        format!("rt::global(engine, \"{}\", file_span())?", escape(name))
     }
 
-    fn binary(&mut self, binary: ast::Binary, env: &Env, mode: Mode) -> String {
+    fn binary(&mut self, binary: ast::Binary, env: &Env) -> String {
         use ast::BinOp::*;
         let op = binary.op();
         // and/or 短路(对照 typst-eval/src/ops.rs)。
         if matches!(op, And | Or) {
-            let lhs = self.expr(binary.lhs(), env, mode);
-            let rhs = self.expr(binary.rhs(), env, mode);
+            let lhs = self.expr(binary.lhs(), env);
+            let rhs = self.expr(binary.rhs(), env);
             let (test, fuse, rest) = match op {
                 And => ("__l == Value::Bool(false)", "Value::Bool(false)", "and"),
                 Or => ("__l == Value::Bool(true)", "Value::Bool(true)", "or"),
@@ -246,8 +214,8 @@ impl Ctx {
                 "{{ let __l = {lhs}; if {test} {{ {fuse} }} else {{ ops::{rest}(__l, {rhs}).at(SPAN)? }} }}"
             );
         }
-        let lhs = self.expr(binary.lhs(), env, mode);
-        let rhs = self.expr(binary.rhs(), env, mode);
+        let lhs = self.expr(binary.lhs(), env);
+        let rhs = self.expr(binary.rhs(), env);
         match op {
             Add => format!("ops::add({lhs}, {rhs}).at(SPAN)?"),
             Sub => format!("ops::sub({lhs}, {rhs}).at(SPAN)?"),
@@ -279,9 +247,9 @@ impl Ctx {
         }
     }
 
-    fn func_call(&mut self, call: ast::FuncCall, env: &Env, mode: Mode) -> String {
+    fn func_call(&mut self, call: ast::FuncCall, env: &Env) -> String {
         // 参数按源序求值(对照 `Eval for ast::Args`)。
-        let args = self.gen_args(call.args(), env, mode);
+        let args = self.gen_args(call.args(), env);
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
@@ -301,39 +269,32 @@ impl Ctx {
                 );
                 return "Value::None".into();
             }
-            let target = self.expr(access.target(), env, mode);
+            let target = self.expr(access.target(), env);
             return format!(
                 "{{ let __target = {target}; let __call_args = {args}; rt::method(&__target, \"{}\", engine, context, SPAN, __call_args)? }}",
                 escape(field)
             );
         }
-        if mode == Mode::ModuleInit {
-            self.diag(
-                call.span(),
-                "顶层值中的函数调用需要引擎(暂不支持,请包进函数)".into(),
-            );
-            return "Value::None".into();
-        }
-        let callee = self.expr(call.callee(), env, mode);
+        let callee = self.expr(call.callee(), env);
         format!(
             "{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, SPAN, __call_args)? }}"
         )
     }
 
     /// 调用点参数:按源序构造 `Args`。
-    fn gen_args(&mut self, args: ast::Args, env: &Env, mode: Mode) -> String {
+    fn gen_args(&mut self, args: ast::Args, env: &Env) -> String {
         let mut out = String::from(
             "{ let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>());",
         );
         for arg in args.items() {
             match arg {
                 ast::Arg::Pos(expr) => {
-                    let value = self.expr(expr, env, mode);
+                    let value = self.expr(expr, env);
                     let _ = write!(out, " __call_args_v.push(__fs, {value});");
                 }
                 ast::Arg::Named(named) => {
                     let name = named.name().as_str();
-                    let value = self.expr(named.expr(), env, mode);
+                    let value = self.expr(named.expr(), env);
                     let _ = write!(
                         out,
                         " __call_args_v.items.push(rt::named_arg(__fs, \"{}\", {value}));",
@@ -341,7 +302,7 @@ impl Ctx {
                     );
                 }
                 ast::Arg::Spread(spread) => {
-                    let value = self.expr(spread.expr(), env, mode);
+                    let value = self.expr(spread.expr(), env);
                     let _ = write!(out, " rt::spread_args(&mut __call_args_v, __fs, {value})?;");
                 }
             }
@@ -353,7 +314,7 @@ impl Ctx {
     /// 闭包:保留源码片段交由 typst-eval 解释(保真路径);
     /// 默认值创建期求值;捕获 = 子树标识符 ∩ 外层可解析名字
     /// (保守过捕,解释器按参数/局部遮蔽覆盖,语义不变)。
-    fn closure_expr(&mut self, closure: ast::Closure, env: &Env, mode: Mode) -> String {
+    fn closure_expr(&mut self, closure: ast::Closure, env: &Env) -> String {
         // 命名闭包(`#let f(x) = ..` 或局部 `let f(x) = ..`)的节点文本
         // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码;名字保留
         // 以支持递归自引用。
@@ -366,13 +327,17 @@ impl Ctx {
         let mut defaults = Vec::new();
         for param in closure.params().children() {
             if let ast::Param::Named(named) = param {
-                let value = self.expr(named.expr(), env, mode);
+                let value = self.expr(named.expr(), env);
                 defaults.push(value);
             }
         }
         let mut names: Vec<String> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let mut captured = Vec::new();
+        // 全局名创建期物化;创建期不可见的(如通配 import 引入的名字)
+        // 不捕获,由闭包体内自己的 import 在调用期绑定(对照 typst
+        // CapturesVisitor 的 `Err(_) => return`)。
+        let mut captured_globals = Vec::new();
         let mut seen = HashSet::new();
         for name in names {
             if !seen.insert(name.clone()) {
@@ -382,27 +347,10 @@ impl Ctx {
                 captured.push(format!("(\"{}\", {rust}.clone())", escape(&name)));
             } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| *n == name)
             {
-                match module_ref {
-                    Ref::Slot(id) => {
-                        captured.push(format!("(\"{}\", rt::slot(&{id}))", escape(&name)))
-                    }
-                    Ref::Engine(id) => {
-                        captured.push(format!("(\"{}\", {id}_get()?)", escape(&name)))
-                    }
-                    Ref::ModuleField { expr, name: field } => captured.push(format!(
-                        "(\"{}\", rt::field(&({expr}), \"{field}\", SPAN)?)",
-                        escape(&name)
-                    )),
-                    Ref::Value(expr) => captured.push(format!("(\"{}\", {expr})", escape(&name))),
-                }
-            } else if mode == Mode::FnBody {
-                // 全局名:typst 闭包求值不带库基座(Scopes::new(None)),
-                // 全局引用须在创建期物化进 captured(对照 CapturesVisitor)。
-                captured.push(format!(
-                    "(\"{}\", rt::global(engine, \"{}\", SPAN)?)",
-                    escape(&name),
-                    escape(&name)
-                ));
+                let value = self.ref_value(module_ref);
+                captured.push(format!("(\"{}\", {value})", escape(&name)));
+            } else {
+                captured_globals.push(name.clone());
             }
         }
         let defaults = if defaults.is_empty() {
@@ -410,11 +358,31 @@ impl Ctx {
         } else {
             format!("vec![{}]", defaults.join(", "))
         };
-        let captured = if captured.is_empty() {
-            "&[]".into()
+        if captured_globals.is_empty() {
+            let captured = if captured.is_empty() {
+                "&[]".into()
+            } else {
+                format!("&[{}]", captured.join(", "))
+            };
+            format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}))")
         } else {
-            format!("&[{}]", captured.join(", "))
-        };
-        format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}))")
+            let init = if captured.is_empty() {
+                "Vec::new()".to_string()
+            } else {
+                format!("vec![{}]", captured.join(", "))
+            };
+            let mut pushes = String::new();
+            for name in &captured_globals {
+                let _ = write!(
+                    pushes,
+                    " if let Some(v) = rt::global_opt(engine, \"{}\")? {{ __caps.push((\"{}\", v)); }}",
+                    escape(name),
+                    escape(name)
+                );
+            }
+            format!(
+                "{{ let mut __caps: Vec<(&'static str, Value)> = {init};{pushes} Value::Func(rt::closure({src_text:?}, {defaults}, &__caps)) }}"
+            )
+        }
     }
 }

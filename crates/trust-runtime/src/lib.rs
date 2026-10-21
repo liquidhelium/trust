@@ -185,15 +185,21 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
         .map(|(_, src)| src.clone())
 }
 
-/// 解释片段(`closure`/`context_closure`)的虚拟源:包装成 markup 合法
-/// 形态(`#let … = …`)并登记进 [`CLOSURE_SOURCES`],片段节点的 span 从此
-/// 携带 FileId。**按片段文本缓存 parse 结果**——闭包值在每次求值期
-/// 重建(如循环体内的谓词),同文本片段共享一棵 AST,免去重复 parse
-/// (这是闭包密集负载的主要回归源)。
-fn virtual_closure_source(src: &str) -> typst::syntax::Source {
+/// 解释片段(`closure`/`native_closure`)的定位缓存:文本 → (闭包
+/// 节点, 位置参数数)。对照原生闭包创建——`Eval for ast::Closure` 的
+/// node 是源文件 AST 子树引用(SyntaxNode 内部 Arc),创建期零 parse
+/// 零查找;片段首次定位(parse + 找 Closure 节点)后,后续创建只
+/// clone 节点引用,与原生同款"AST 定位一次、值可廉价重建"。
+/// 闭包值在求值期反复重建(如循环体内谓词),这里省下的 parse 与
+/// 树遍历正是闭包密集负载的回归源。片段同时登记进
+/// [`CLOSURE_SOURCES`](虚拟文件,span 可定位到片段行)。
+fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     static CACHE: std::sync::LazyLock<
-        std::sync::RwLock<std::collections::HashMap<String, typst::syntax::Source>>,
+        std::sync::RwLock<std::collections::HashMap<String, (typst_syntax::SyntaxNode, usize)>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    // markup 合法形态:命名绑定直接嵌入;其余(裸闭包/context 体)包
+    // 一层括号——markup 的 `#let x = expr` init 在**行尾**截止,裸闭包
+    // 体跨行会被截断成空体,括号强制 code 上下文才能跨行。
     let trimmed = src.trim_start();
     let text = if trimmed.starts_with("let ") {
         format!("#{trimmed}")
@@ -212,27 +218,12 @@ fn virtual_closure_source(src: &str) -> typst::syntax::Source {
     .intern();
     let source = typst::syntax::Source::new(id, text.clone());
     CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
-    CACHE.write().unwrap().insert(text, source.clone());
-    source
-}
-
-pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value)]) -> Func {
-    let source = virtual_closure_source(src);
-    let root = source.root();
-    let text = source.text().to_string();
-    // 源片段可能是裸闭包 `(x) => ..`(Code 下直接是 Closure)或命名
-    // 绑定形态 `f(x) = ..`(LetBinding 包着 Closure),统一取首个
-    // Closure 节点;命名形态下闭包名保留,递归自引用可用。
-    let node = find_closure_node(root)
+    // 源片段可能是裸闭包 `(x) => ..` 或命名绑定 `f(x) = ..`(LetBinding
+    // 包着 Closure),统一取首个 Closure 节点;命名形态名字保留,
+    // 递归自引用可用。
+    let node = find_closure_node(source.root())
         .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
         .clone();
-    if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() {
-        eprintln!(
-            "[closure] 闭包节点 span: {:?} (detached={})",
-            node.span(),
-            node.span().is_detached()
-        );
-    }
     let num_pos_params = node
         .cast::<ast::Closure>()
         .expect("closure node casts")
@@ -240,24 +231,24 @@ pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value
         .children()
         .filter(|p| matches!(p, ast::Param::Pos(_)))
         .count();
-    let closure_span = node.span();
-    if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() {
-        eprintln!(
-            "[closure+ span={:?}] {}",
-            closure_span,
-            text[..text.len().min(100)].replace('\n', "\\n")
-        );
-    }
+    CACHE
+        .write()
+        .unwrap()
+        .insert(text, (node.clone(), num_pos_params));
+    (node, num_pos_params)
+}
+
+pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value)]) -> Func {
+    let (node, num_pos_params) = cached_closure_node(src);
     let mut scope = Scope::new();
     for (name, value) in captured {
-        if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some()
-            && (src.contains("ctx => {") || src.contains("key =>"))
-        {
+        if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() && src.contains("ctx => {") {
             let brief = format!("{value:?}");
             eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
         }
         scope.define(name, value.clone());
     }
+    let closure_span = node.span();
     Func::from(Closure {
         node: ClosureNode::Closure(node),
         defaults,
@@ -862,18 +853,7 @@ pub fn native_closure(
         "let {}{params_src} = __trust_impl(__trust_state, {arg_list})",
         data.name
     );
-    let source = virtual_closure_source(&src);
-    let root = source.root();
-    let node = find_closure_node(root)
-        .unwrap_or_else(|| panic!("native closure stub parses: {src}"))
-        .clone();
-    let num_pos_params = node
-        .cast::<ast::Closure>()
-        .expect("closure node casts")
-        .params()
-        .children()
-        .filter(|p| matches!(p, ast::Param::Pos(_)))
-        .count();
+    let (node, num_pos_params) = cached_closure_node(&src);
     let mut scope = Scope::new();
     scope.define("__trust_impl", Func::from(data));
     scope.define(
@@ -1086,15 +1066,36 @@ pub fn styled_with_recipe(
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
 pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
-    // 与 `closure` 同款:片段挂虚拟文件(markup 包装成 let 绑定),
-    // context 体解释执行的错误 span 可定位到片段行。
-    let source = virtual_closure_source(body_src);
-    let root = source.root();
-    // 取根下的首个表达式节点(闭包节点存的是表达式,非根)。
-    let node = root
-        .children()
-        .find(|child| child.cast::<ast::Expr>().is_some())
-        .expect("context body parses to an expression");
+    // 与 `closure` 同款定位缓存;Context 形态取根下首个表达式节点
+    // (context 体是表达式,非闭包节点)。
+    static CACHE: std::sync::LazyLock<
+        std::sync::RwLock<std::collections::HashMap<String, typst_syntax::SyntaxNode>>,
+    > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    let trimmed = body_src.trim_start();
+    let text = format!("#let __trust_closure = ({trimmed})");
+    let node = if let Some(hit) = CACHE.read().unwrap().get(&text) {
+        hit.clone()
+    } else {
+        // 首次:parse 片段(挂虚拟文件供 span 定位),取根下首个
+        // 表达式节点(context 体是表达式,非闭包节点)。
+        let n = CLOSURE_SOURCES.read().unwrap().len();
+        let id = typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Project,
+            typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
+                .expect("valid closure path"),
+        )
+        .intern();
+        let source = typst::syntax::Source::new(id, text.clone());
+        CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
+        let node = source
+            .root()
+            .children()
+            .find(|child| child.cast::<ast::Expr>().is_some())
+            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"))
+            .clone();
+        CACHE.write().unwrap().insert(text, node.clone());
+        node
+    };
     let mut scope = Scope::new();
     for (name, value) in captured {
         scope.define(name, value.clone());

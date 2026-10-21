@@ -96,7 +96,9 @@ impl Ctx {
                             (true, Some(mod_name)) => {
                                 // 目标文件的模块作用域从槽板构建。
                                 self.used_state = true;
-                                Some(format!("Value::Module({mod_name}::module(&__st)?)"))
+                                Some(format!(
+                                    "Value::Module({mod_name}::module(&__st, engine, context)?)"
+                                ))
                             }
                             _ => {
                                 self.diag(

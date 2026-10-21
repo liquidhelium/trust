@@ -355,7 +355,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 };
                 let mut expr = base;
                 for field in fields {
-                    expr = format!("rt::field(&({expr}), \"{}\", SPAN)?", escape(field));
+                    expr = format!(
+                        "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                        escape(field)
+                    );
                 }
                 match &edge.items {
                     ImportItems::Bare => {

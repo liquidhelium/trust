@@ -1199,17 +1199,24 @@ pub fn styled_with_recipe(
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
 pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
-    // 与 `closure` 同款定位缓存(**原始片段文本**为键,命中零格式化);
-    // Context 形态取根下首个表达式节点(context 体是表达式,非闭包节点)。
+    // 定位缓存(**原始片段文本**为键,命中零格式化)。context 体是
+    // **表达式**(代码块或单一表达式),用 `parse_code` 取 Code 根下
+    // 的首个表达式——不能用 `#let` 包装源(其根下首个可 cast 节点是
+    // LetBinding 本身:求值会执行体,但返回值是 let 的 none,
+    // ContextElem 显示 none = 空内容,cetz 画布因此整体消失)。
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, typst_syntax::SyntaxNode>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
     let node = if let Some(hit) = CACHE.read().unwrap().get(body_src) {
         hit.clone()
     } else {
-        // 首次:parse 片段(挂虚拟文件供 span 定位),取根下首个
-        // 表达式节点(context 体是表达式,非闭包节点)。
-        let text = format!("#let __trust_closure = ({})", body_src.trim_start());
+        let text = body_src.to_string();
+        let root = typst_syntax::parse_code(&text);
+        let node = root
+            .children()
+            .find(|child| child.cast::<ast::Expr>().is_some())
+            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"))
+            .clone();
         let n = CLOSURE_SOURCES.read().unwrap().len();
         let id = typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Project,
@@ -1217,14 +1224,7 @@ pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Fu
                 .expect("valid closure path"),
         )
         .intern();
-        let source = typst::syntax::Source::new(id, text.clone());
         CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
-        let node = source
-            .root()
-            .children()
-            .find(|child| child.cast::<ast::Expr>().is_some())
-            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"))
-            .clone();
         CACHE
             .write()
             .unwrap()

@@ -183,6 +183,44 @@ impl InjectWorld {
         path.exists().then_some(path)
     }
 
+    /// 按翻译期顺序预 intern 包源树(生成物 S 常量 span 的 FileId
+    /// 编号 = 翻译进程 interner 序号;宿主进程须以同序 intern,span
+    /// 解码才能对上真实文件——如 plugin 的相对路径解析依赖实参值
+    /// span 的 FileId)。翻译 CLI 只保留 entry 所在源树并以 BTreeMap
+    /// (路径字典序)迭代、此前零 intern;宿主在创建任何 World 之前
+    /// 对**同一源树目录**调用本函数即可对齐(传包根的 `src/`,勿传
+    /// 包根——gallery/tests 等不入翻译集)。幂等。
+    pub fn preintern_package_files(src_dir: &std::path::Path) {
+        let mut rels: Vec<String> = Vec::new();
+        let mut stack = vec![src_dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                    rels.push(
+                        path.strip_prefix(src_dir.parent().unwrap_or(src_dir))
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        rels.sort();
+        for rel in &rels {
+            RootedPath::new(
+                VirtualRoot::Project,
+                VirtualPath::new(rel.as_str()).unwrap_or_else(|_| panic!("invalid path {rel}")),
+            )
+            .intern();
+        }
+    }
+
     /// 追加一个相对主文件的源文件(多文件包形态)。
     pub fn add_source(&mut self, path: &str, text: &str) {
         let id = RootedPath::new(

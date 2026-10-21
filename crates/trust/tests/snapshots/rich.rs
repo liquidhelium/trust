@@ -3,6 +3,7 @@
 use std::sync::LazyLock;
 use comemo::Tracked;
 use typst::diag::{At, SourceResult, bail};
+use ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{
     Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
@@ -14,6 +15,19 @@ use trust_runtime as rt;
 
 /// 生成的错误 span:detached(差分对拍只比较值)。
 const SPAN: Span = Span::detached();
+/// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
+#[allow(non_snake_case, dead_code)]
+fn file_span() -> Span {
+    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        let id = typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Project,
+            typst::syntax::VirtualPath::new("main.typ").expect("path"),
+        )
+        .intern();
+        typst::syntax::Source::new(id, String::new()).root().span()
+    })
+}
 
 /// 构建该模块(名字与导出面照抄源文件)。
 pub fn module() -> Module {
@@ -26,7 +40,7 @@ pub fn module() -> Module {
 /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。
 #[allow(non_snake_case, unused_variables)]
 pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {
-    let _ = engine;
+    let _ = (engine, context);
     Ok(())
 }
 
@@ -83,7 +97,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut f = rt::param_pos(__args, "f", span)?;
     let mut rest = Value::Args(__args.take());
     rt::finish(__args, span)?;
-    Ok({ let __callee = f.clone(); let __call_args = { let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, SPAN, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, SPAN, __call_args)? })
+    Ok({ let __callee = f.clone(); let __call_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, __fs, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, SPAN, __call_args)? })
 }
 
 #[allow(non_snake_case, dead_code)]

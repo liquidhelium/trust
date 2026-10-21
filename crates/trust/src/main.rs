@@ -119,8 +119,11 @@ fn main() {
             let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("pkg");
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, name);
+                for d in &diags {
+                    eprintln!("降级 {:?}: {}", d.span, d.message);
+                }
                 std::fs::write(output, &code).expect("write");
-                println!("已生成 {output}({} 字节,降级 {} 处)", code.len(), diags.len());
+                println!("已生成 {output}({} 字节,降级 {} 处,清单见上方与文件头注释)", code.len(), diags.len());
             } else {
                 match trust::translate_package(&pkg, name) {
                     Ok(code) => {

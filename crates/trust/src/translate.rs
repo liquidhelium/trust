@@ -19,11 +19,12 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
-/// 翻译诊断:语法 span + 消息。
+/// 翻译诊断:语法 span + 消息 + 所属文件(包模式)。
 #[derive(Debug, Clone)]
 pub struct Diag {
     pub span: typst_syntax::Span,
     pub message: String,
+    pub file: Option<String>,
 }
 
 /// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
@@ -40,7 +41,7 @@ pub fn translate_package_lenient(
 pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let root = typst_syntax::parse(src);
     let Some(markup) = root.cast::<ast::Markup>() else {
-        return Err(vec![Diag { span: typst_syntax::Span::detached(), message: "源文件未能解析为 markup 模块".into() }]);
+        return Err(vec![Diag { span: typst_syntax::Span::detached(), message: "源文件未能解析为 markup 模块".into(), file: None }]);
     };
 
     let mut cx = Ctx { diags: Vec::new(), lenient: false, next_id: 0, current_file: None, package_files: None, package_mods: None };
@@ -111,6 +112,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut items = String::new();
     let mut defines = String::new();
     let mut engine_defines = String::new();
+    let mut engine_fills = String::new();
     for (i, top) in tops.iter().enumerate() {
         // 函数体可见自身(递归)与此前全部绑定;值 init 在绑定生效前求值,
         // 同名引用解析到外层,由下方值分支自行处理。
@@ -147,11 +149,12 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         items,
                         "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({expr})\n}}\n\
                          #[allow(non_snake_case, dead_code)]\nstatic {id}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
-                         #[allow(non_snake_case, dead_code)]\nfn {id}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {id}.get() {{ return Ok(v.clone()); }}\n    let v = {id}_init(engine, context)?;\n    let _ = {id}.set(v.clone());\n    Ok(v)\n}}"
+                         #[allow(non_snake_case, dead_code)]\nfn {id}_get() -> SourceResult<Value> {{\n    {id}.get().cloned().ok_or_else(|| eco_vec![typst::diag::SourceDiagnostic::error(SPAN, typst::foundations::Str::from(\"引擎值未初始化:宿主未调用 module_init(装配期求值)\"))])\n}}"
                     );
+                    let _ = writeln!(engine_fills, "    let _ = {id}.set({id}_init(engine, context)?);");
                     let _ = writeln!(
                         engine_defines,
-                        "    scope.define(\"{}\", {id}_get(engine, context)?);",
+                        "    scope.define(\"{}\", {id}_get()?);",
                         escape(&top.name)
                     );
                 } else {
@@ -192,18 +195,22 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         "// 由 trust 从 `{module_name}` 生成,勿手改。\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
-         use typst::diag::{{At, SourceResult, bail}};\n\
+         use typst::diag::{{At, SourceResult, bail}};
+use ecow::eco_vec;\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          /// 生成的错误 span:detached(差分对拍只比较值)。\n\
-         const SPAN: Span = Span::detached();\n\n\
+         const SPAN: Span = Span::detached();\n\
+         /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。\n\
+         #[allow(non_snake_case, dead_code)]\n\
+         fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\
          /// 构建该模块(名字与导出面照抄源文件)。\n\
          pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{defines}    Module::new(\"{module_name}\", scope)\n}}\n\
          /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。\n\
          #[allow(non_snake_case, unused_variables)]\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_defines}    let _ = engine;\n    Ok(())\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_fills}    let _ = (engine, context);\n{engine_defines}    Ok(())\n}}\n{items}"
     ))
 }
 
@@ -265,7 +272,8 @@ impl Ctx {
     }
 
     fn diag(&mut self, span: typst_syntax::Span, message: String) {
-        self.diags.push(Diag { span, message });
+        let file = self.current_file.clone();
+        self.diags.push(Diag { span, message, file });
     }
 
     /// 生成一个函数:参数解构 + 体直译。
@@ -498,8 +506,13 @@ impl Ctx {
             }
             other => {
                 let kind = other.to_untyped().kind();
-                self.diag(other.span(), format!("表达式 {kind:?} 暂不支持(v1 语言子集)"));
-                "Value::None".into()
+                let message = format!("表达式 {kind:?} 暂不支持(v1 语言子集)");
+                self.diag(other.span(), message.clone());
+                format!(
+                    "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
+                    message.replace('\n', " "),
+                    message
+                )
             }
         }
     }
@@ -512,7 +525,7 @@ impl Ctx {
         if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
             return match module_ref {
                 Ref::Slot(id) => format!("rt::slot(&{id})"),
-                Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                Ref::Engine(id) => format!("{id}_get()?"),
                 Ref::ModuleField { expr, name } => {
                     format!("rt::field(&({expr}), \"{name}\", SPAN)?")
                 }
@@ -526,7 +539,7 @@ impl Ctx {
             );
             "Value::None".into()
         } else {
-            format!("rt::global(engine, \"{}\", SPAN)?", escape(name))
+            format!("rt::global(engine, \"{}\", file_span())?", escape(name))
         }
     }
 
@@ -569,8 +582,12 @@ impl Ctx {
             In => format!("ops::in_({lhs}, {rhs}).at(SPAN)?"),
             NotIn => format!("ops::not_in({lhs}, {rhs}).at(SPAN)?"),
             other => {
-                self.diag(binary.span(), format!("二元运算 {other:?} 暂不支持"));
-                "Value::None".into()
+                let message = format!("二元运算 {other:?} 暂不支持");
+                self.diag(binary.span(), message.clone());
+                format!(
+                    "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
+                    message, message
+                )
             }
         }
     }
@@ -613,25 +630,25 @@ impl Ctx {
 
     /// 调用点参数:按源序构造 `Args`。
     fn gen_args(&mut self, args: ast::Args, env: &Env, mode: Mode) -> String {
-        let mut out = String::from("{ let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>());");
+        let mut out = String::from("{ let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>());");
         for arg in args.items() {
             match arg {
                 ast::Arg::Pos(expr) => {
                     let value = self.expr(expr, env, mode);
-                    let _ = write!(out, " __call_args_v.push(SPAN, {value});");
+                    let _ = write!(out, " __call_args_v.push(__fs, {value});");
                 }
                 ast::Arg::Named(named) => {
                     let name = named.name().as_str();
                     let value = self.expr(named.expr(), env, mode);
                     let _ = write!(
                         out,
-                        " __call_args_v.items.push(rt::named_arg(SPAN, \"{}\", {value}));",
+                        " __call_args_v.items.push(rt::named_arg(__fs, \"{}\", {value}));",
                         escape(name)
                     );
                 }
                 ast::Arg::Spread(spread) => {
                     let value = self.expr(spread.expr(), env, mode);
-                    let _ = write!(out, " rt::spread_args(&mut __call_args_v, SPAN, {value})?;");
+                    let _ = write!(out, " rt::spread_args(&mut __call_args_v, __fs, {value})?;");
                 }
             }
         }
@@ -675,10 +692,7 @@ impl Ctx {
                         captured.push(format!("(\"{}\", rt::slot(&{id}))", escape(&name)))
                     }
                     Ref::Engine(id) => {
-                        captured.push(format!(
-                            "(\"{}\", {id}_get(engine, context)?)",
-                            escape(&name)
-                        ))
+                        captured.push(format!("(\"{}\", {id}_get()?)", escape(&name)))
                     }
                     Ref::ModuleField { expr, name: field } => {
                         captured.push(format!(
@@ -927,7 +941,7 @@ fn destructure(
                                 let base = match env.module.iter().rev().find(|(n, _)| *n == root) {
                                     Some((_, module_ref)) => match module_ref {
                                         Ref::Slot(id) => format!("rt::slot(&{id})"),
-                                        Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                                        Ref::Engine(id) => format!("{id}_get()?"),
                                         Ref::Value(e) => e.clone(),
                                         Ref::ModuleField { expr, name } => {
                                             format!("rt::field(&({expr}), \"{name}\", SPAN)?")
@@ -1194,13 +1208,9 @@ fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<String>, out:
             if let Some(init) = lets.init() {
                 collect_idents(init.to_untyped(), bound, out);
             }
-            let mut pushed = 0;
+            // 语句级 let 的绑定持续到所在块结束(弹出交给块边界处理)。
             for ident in lets.kind().bindings() {
                 bound.push(ident.as_str().to_string());
-                pushed += 1;
-            }
-            for _ in 0..pushed {
-                bound.pop();
             }
         }
         K::ForLoop => {
@@ -1227,6 +1237,14 @@ fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<String>, out:
         K::Keyed => {
             let Some(keyed) = node.cast::<ast::Keyed>() else { return };
             collect_idents(keyed.expr().to_untyped(), bound, out);
+        }
+        K::CodeBlock | K::ContentBlock => {
+            // 块作用域:离开时恢复绑定集。
+            let mark = bound.len();
+            for child in node.children() {
+                collect_idents(child, bound, out);
+            }
+            bound.truncate(mark);
         }
         K::Ident => {
             let name = node.full_text().to_string();
@@ -1374,6 +1392,7 @@ fn translate_package_inner(
         cx.diags.push(Diag {
             span: typst_syntax::Span::detached(),
             message: format!("入口文件 {entry} 不在文件集中"),
+            file: None,
         });
         return String::new();
     }
@@ -1439,6 +1458,10 @@ fn translate_package_inner(
                     };
                     let target = if module_access.is_some() {
                         String::new()
+                    } else if external {
+                        // 外部包:target 即原始 spec(勿路径归一,否则
+                        // rt::import_external 解析失败)。
+                        raw.clone()
                     } else {
                         normalize_import(path, &raw)
                     };
@@ -1533,6 +1556,7 @@ fn translate_package_inner(
             cx.diags.push(Diag {
                 span: typst_syntax::Span::detached(),
                 message: "包内 import 成环(typst 运行时同样会报循环求值)".into(),
+                file: None,
             });
             return String::new();
         }
@@ -1681,6 +1705,8 @@ fn translate_package_inner(
     let mut items = String::new();
     let mut top_defines = String::new();
     let mut engine_init_defines = String::new();
+    let mut package_engine_fills: Vec<String> = Vec::new();
+    let mut external_fills: Vec<String> = Vec::new();
     for plan in &plans {
         cx.current_file = Some(plan.path.clone());
         let is_entry = plan.path == entry;
@@ -1689,6 +1715,11 @@ fn translate_package_inner(
         let mut file_defines = String::new();
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // import 段生成的前置项(外部包槽等),并入本文件 mod。
+        let mut file_prelude = format!(
+            "\n#[allow(non_snake_case, dead_code)]\nfn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n",
+            plan.path
+        );
         for edge in &plan.imports {
             // 外部包:引擎槽 + 运行时导入(未翻译依赖走解释器)。
             if edge.external {
@@ -1698,11 +1729,15 @@ fn translate_package_inner(
                     _ => spec_name(&spec),
                 };
                 let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
-                let _ = writeln!(
-                    items,
-                    "\n#[allow(non_snake_case, dead_code)]\npub(super) fn {slot}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {slot}.get() {{ return Ok(v.clone()); }}\n    let v = Value::Module(rt::import_external(engine, \"{spec}\")?);\n    let _ = {slot}.set(v.clone());\n    Ok(v)\n}}\n\
-                     #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();"
-                );
+                file_prelude.push_str(&format!(
+                    "\n#[allow(non_snake_case, dead_code)]\npub(crate) fn {slot}_init(engine: &mut Engine, _context: Tracked<Context>) -> SourceResult<()> {{\n    let v = Value::Module(rt::import_external(engine, \"{spec}\")?);\n    let _ = {slot}.set(v);\n    Ok(())\n}}\n\
+                     #[allow(non_snake_case, dead_code)]\npub(crate) static {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
+                     #[allow(non_snake_case, dead_code)]\npub(crate) fn {slot}_get() -> SourceResult<Value> {{\n    {slot}.get().cloned().ok_or_else(|| eco_vec![typst::diag::SourceDiagnostic::error(SPAN, typst::foundations::Str::from(\"外部包未初始化:宿主未调用 module_init(装配期导入)\"))])\n}}\n"
+                ));
+                external_fills.push(format!(
+                    "    let _ = {plan_mod}::{slot}_init(engine, context)?;",
+                    plan_mod = plan.mod_name
+                ));
                 match &edge.items {
                     ImportItems::Bare | ImportItems::Rename(_) => {
                         env.module.push((name.clone(), Ref::Engine(slot.clone())));
@@ -1714,7 +1749,7 @@ fn translate_package_inner(
                             env.module.push((
                                 as_name,
                                 Ref::ModuleField {
-                                    expr: format!("{slot}_get(engine, context)?"),
+                                    expr: format!("{slot}_get()?"),
                                     name: item.clone(),
                                 },
                             ));
@@ -1731,7 +1766,7 @@ fn translate_package_inner(
                 let base = match env.module.iter().rev().find(|(n, _)| n == root) {
                     Some((_, module_ref)) => match module_ref {
                         Ref::Slot(id) => format!("rt::slot(&{id})"),
-                        Ref::Engine(id) => format!("{id}_get(engine, context)?"),
+                        Ref::Engine(id) => format!("{id}_get()?"),
                         Ref::Value(e) => e.clone(),
                         Ref::ModuleField { expr, name } => {
                             format!("rt::field(&({expr}), \"{name}\", SPAN)?")
@@ -1838,7 +1873,7 @@ fn translate_package_inner(
                         if engine_slots.contains(qualified) {
                             let _ = writeln!(
                                 engine_init_defines,
-                                "    scope.define(\"{}\", {qualified}_get(engine, context)?);",
+                                "    scope.define(\"{}\", {qualified}_get()?);",
                                 escape(&as_name)
                             );
                         } else {
@@ -1864,7 +1899,7 @@ fn translate_package_inner(
                         if engine_slots.contains(qualified) {
                             let _ = writeln!(
                                 engine_init_defines,
-                                "    scope.define(\"{}\", {qualified}_get(engine, context)?);",
+                                "    scope.define(\"{}\", {qualified}_get()?);",
                                 escape(name)
                             );
                         } else {
@@ -1880,7 +1915,7 @@ fn translate_package_inner(
         }
 
         // 本文件顶层绑定(追加在 import 之后:遮蔽语义)。
-        let mut file_items = String::new();
+        let mut file_items = file_prelude;
         let mut own: Vec<(String, String)> = Vec::new();
         let mut own_engine: Vec<String> = Vec::new();
         let mut own_seen_counts: std::collections::HashMap<String, usize> =
@@ -1915,7 +1950,7 @@ fn translate_package_inner(
                     let _ = writeln!(
                         file_items,
                         "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init() -> Value {{\n    Value::Func(Func::from(&{data}))\n}}\n\
-                         #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: rt::Slot = LazyLock::new(&{slot}_init);"
+                         #[allow(non_snake_case, dead_code)]\npub(crate) static {slot}: rt::Slot = LazyLock::new(&{slot}_init);"
                     );
                     own.push((name.as_str().to_string(), slot.clone()));
                 }
@@ -1950,9 +1985,13 @@ fn translate_package_inner(
                         // 引擎值(拓扑预扫描已定):本文件惰性槽。
                         let value = cx.expr(init_expr, &env2, Mode::FnBody);
                         file_items.push_str(&format!(
-                            "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({value})\n}}\n\
-                             #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
-                             #[allow(non_snake_case, dead_code)]\npub(super) fn {slot}_get(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    if let Some(v) = {slot}.get() {{ return Ok(v.clone()); }}\n    let v = {slot}_init(engine, context)?;\n    let _ = {slot}.set(v.clone());\n    Ok(v)\n}}\n"
+                            "\n#[allow(non_snake_case, dead_code)]\npub(crate) fn {slot}_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Value> {{\n    Ok({value})\n}}\n\
+                             #[allow(non_snake_case, dead_code)]\npub(crate) static {slot}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
+                             #[allow(non_snake_case, dead_code)]\npub(crate) fn {slot}_get() -> SourceResult<Value> {{\n    {slot}.get().cloned().ok_or_else(|| eco_vec![typst::diag::SourceDiagnostic::error(SPAN, typst::foundations::Str::from(\"引擎值未初始化:宿主未调用 module_init(装配期求值)\"))])\n}}\n"
+                        ));
+                        package_engine_fills.push(format!(
+                            "    let _ = {mod_name}::{slot}.set({mod_name}::{slot}_init(engine, context)?);",
+                            mod_name = plan.mod_name
                         ));
                         own_engine.push(slot.clone());
                         own.push((name.as_str().to_string(), slot.clone()));
@@ -1961,7 +2000,7 @@ fn translate_package_inner(
                     let value = cx.expr(init_expr, &env2, Mode::ModuleInit);
                     file_items.push_str(&format!(
                         "\n#[allow(non_snake_case, dead_code)]\nfn {slot}_init() -> Value {{\n    {value}\n}}\n\
-                         #[allow(non_snake_case, dead_code)]\npub(super) static {slot}: rt::Slot = LazyLock::new(&{slot}_init);\n"
+                         #[allow(non_snake_case, dead_code)]\npub(crate) static {slot}: rt::Slot = LazyLock::new(&{slot}_init);\n"
                     ));
                     own.push((name.as_str().to_string(), slot.clone()));
                 }
@@ -1973,7 +2012,7 @@ fn translate_package_inner(
                 if is_entry {
                     let _ = writeln!(
                         engine_init_defines,
-                        "    scope.define(\"{}\", {slot}_get(engine, context)?);",
+                        "    scope.define(\"{}\", {slot}_get()?);",
                         escape(name)
                     );
                 }
@@ -2003,11 +2042,30 @@ fn translate_package_inner(
         );
     }
 
+    let mut package_fills = String::new();
+    for fill in external_fills.iter().chain(package_engine_fills.iter()) {
+        package_fills.push_str(fill);
+        package_fills.push('\n');
+    }
+    let degraded_header = if cx.lenient && !cx.diags.is_empty() {
+        let mut header = String::from("// 降级清单(宽松模式,功能缺失点,运行时将发 warning):\n");
+        for d in &cx.diags {
+            header.push_str(&format!(
+                "// - [{}] {}\n",
+                d.file.as_deref().unwrap_or("?"),
+                d.message.replace('\n', " ")
+            ));
+        }
+        header
+    } else {
+        String::new()
+    };
     format!(
-        "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n\n\
+        "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n{degraded_header}\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
-         use typst::diag::{{At, SourceResult, bail}};\n\
+         use typst::diag::{{At, SourceResult, bail}};
+use ecow::eco_vec;\n\
          use typst::engine::Engine;\n\
          use typst::foundations::{{\n    Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,\n    NativeParamInfo, Scope, Value, ops,\n}};\n\
          use typst::syntax::Span;\nuse typst::syntax::ast::Unit;\n\
@@ -2017,7 +2075,7 @@ fn translate_package_inner(
          pub fn module() -> Module {{\n    let mut scope = Scope::new();\n{top_defines}    Module::new(\"{module_name}\", scope)\n}}\n\
          /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。\n\
          #[allow(non_snake_case, unused_variables)]\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{engine_init_defines}    let _ = engine;\n    Ok(())\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {{\n{package_fills}    let _ = (engine, context);\n{engine_init_defines}    Ok(())\n}}\n{items}"
     )
 }
 

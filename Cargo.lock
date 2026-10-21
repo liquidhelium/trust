@@ -2018,6 +2018,7 @@ name = "trust-diff"
 version = "0.1.0"
 dependencies = [
  "comemo",
+ "ecow",
  "trust",
  "trust-runtime",
  "trust-world",

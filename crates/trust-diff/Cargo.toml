@@ -14,3 +14,4 @@ trust-world = { path = "../trust-world" }
 typst = "0.15.1"
 typst-syntax = "0.15.1"
 comemo = "0.5.1"
+ecow = "0.2"

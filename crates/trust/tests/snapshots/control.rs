@@ -3,6 +3,7 @@
 use std::sync::LazyLock;
 use comemo::Tracked;
 use typst::diag::{At, SourceResult, bail};
+use ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{
     Args, CastInfo, Context, Dict, Func, IntoValue, Module, NativeFuncData, NativeFuncPtr,
@@ -14,6 +15,19 @@ use trust_runtime as rt;
 
 /// 生成的错误 span:detached(差分对拍只比较值)。
 const SPAN: Span = Span::detached();
+/// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
+#[allow(non_snake_case, dead_code)]
+fn file_span() -> Span {
+    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        let id = typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Project,
+            typst::syntax::VirtualPath::new("main.typ").expect("path"),
+        )
+        .intern();
+        typst::syntax::Source::new(id, String::new()).root().span()
+    })
+}
 
 /// 构建该模块(名字与导出面照抄源文件)。
 pub fn module() -> Module {
@@ -24,7 +38,7 @@ pub fn module() -> Module {
 /// 引擎值补注册:宿主在具备引擎时调用,把顶层引擎值合并进模块作用域。
 #[allow(non_snake_case, unused_variables)]
 pub fn module_init(engine: &mut Engine, context: Tracked<Context>, scope: &mut Scope) -> SourceResult<()> {
-    let _ = engine;
+    let _ = (engine, context);
     Ok(())
 }
 
@@ -43,7 +57,7 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let _ = __out;
     if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(SPAN)?, std::cmp::Ordering::Greater)), SPAN)? { { let mut __out = Value::None;
     let _ = __out;
-    { let __mut_args = { let mut __call_args_v = Args::new(SPAN, std::iter::empty::<Value>()); __call_args_v.push(SPAN, x.clone()); __call_args_v }; rt::method_mut(&mut out, "push", __mut_args, SPAN)? }
+    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(&mut out, "push", __mut_args, SPAN)? }
 } } else { Value::None }
 };
       __out = rt::join(__out, __v, SPAN)?;

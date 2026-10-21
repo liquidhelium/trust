@@ -115,8 +115,12 @@ impl InjectWorld {
                 route: Route::default(),
             };
             let context = Context::none();
-            init(&mut engine, context.track(), module.scope_mut())
-                .expect("module_init 求值顶层引擎值失败");
+            if let Err(diags) = init(&mut engine, context.track(), module.scope_mut()) {
+                panic!(
+                    "module_init 求值顶层引擎值失败: {:?}",
+                    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+                );
+            }
             self.inject_module(name, module.clone());
             module
         } else {

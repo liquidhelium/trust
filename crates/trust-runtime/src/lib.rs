@@ -617,3 +617,14 @@ pub fn field_assign_path(
     }
     Ok(())
 }
+
+/// 显式降级占位:发出 warning 并返回 none(不静默降级原则——
+/// 生成物在此处功能缺失,必须让使用者看见)。
+pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
+    let diagnostic = typst::diag::SourceDiagnostic::warning(
+        Span::detached(),
+        typst::foundations::Str::from(format!("trust 降级: {message}")),
+    );
+    engine.sink.warn(diagnostic);
+    Ok(Value::None)
+}

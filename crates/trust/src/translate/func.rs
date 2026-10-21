@@ -1,0 +1,114 @@
+//! 函数体与 `NativeFuncData` 静态的生成。
+//!
+//! `gen_function` 编译参数解构 + 体直译;`gen_func_data` 手写函数的
+//! `NativeFuncData` 描述(参数表按闭包 AST 推导)。
+
+use std::fmt::Write as _;
+
+use typst_syntax::ast::{self};
+
+use super::ctx::{bind_local, Ctx, Env, Mode};
+use super::naming::escape;
+
+impl Ctx {
+    /// 生成一个函数:参数解构 + 体直译。
+    pub(super) fn gen_function(&mut self, fun: &str, closure: ast::Closure, env: &Env) -> String {
+        let mut body = String::new();
+        let mut fn_env = env.clone();
+
+        for param in closure.params().children() {
+            match param {
+                ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
+                    let name = ident.as_str().to_string();
+                    let rust = bind_local(&mut fn_env, &name);
+                    let _ =
+                        writeln!(body, "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;", escape(&name));
+                }
+                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
+                ast::Param::Pos(pattern) => {
+                    // 解构参数(对照 eval_closure:"pattern parameter")。
+                    let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
+                    body.push_str(&self.destructure(pattern, value, &mut fn_env, Mode::FnBody, false));
+                }
+                ast::Param::Named(named) => {
+                    let name = named.name().as_str().to_string();
+                    // 默认值在定义环境求值:不可引用本参数,可引用先前参数。
+                    let default = self.expr(named.expr(), &fn_env, Mode::FnBody);
+                    let rust = bind_local(&mut fn_env, &name);
+                    // 惰性默认值:未提供时在调用点求值(语义边界见 mod.rs)。
+                    let _ = writeln!(
+                        body,
+                        "    let mut {rust} = match __args.named::<Value>(\"{}\")? {{\n\
+                         \x20       Some(value) => value,\n\
+                         \x20       None => {default},\n\
+                         \x20   }};",
+                        escape(&name)
+                    );
+                }
+                ast::Param::Spread(spread) => match spread.sink_ident() {
+                    Some(ident) => {
+                        let name = ident.as_str().to_string();
+                        let rust = bind_local(&mut fn_env, &name);
+                        let _ = writeln!(body, "    let mut {rust} = Value::Args(__args.take());");
+                    }
+                    None => {
+                        let _ = writeln!(body, "    let mut _sink = Value::Args(__args.take());");
+                    }
+                },
+            }
+        }
+        let _ = writeln!(body, "    rt::finish(__args, span)?;");
+
+        let value = self.expr(closure.body(), &fn_env, Mode::FnBody);
+        let _ = writeln!(body, "    Ok({value})");
+
+        format!(
+            "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{body}}}\n"
+        )
+    }
+}
+
+/// `NativeParamInfo` 字面量(元数据按闭包参数形态推导)。
+fn format_param(name: &str, named: bool, positional: bool, variadic: bool) -> String {
+    format!(
+        "NativeParamInfo {{ name: \"{}\", docs: \"\", def_site: None, input: CastInfo::Any, default: None, positional: {positional}, named: {named}, variadic: {variadic}, required: {}, settable: false }}",
+        escape(name),
+        positional && !variadic
+    )
+}
+
+/// 生成函数的 `NativeFuncData` 静态(手写字段,不经宏)。
+pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Closure) -> String {
+    let mut params = Vec::new();
+    for param in closure.params().children() {
+        match param {
+            ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
+                params.push(format_param(ident.as_str(), false, true, false));
+            }
+            ast::Param::Pos(_) => params.push(format_param("_", false, true, false)),
+            ast::Param::Named(named) => {
+                params.push(format_param(named.name().as_str(), true, true, false))
+            }
+            ast::Param::Spread(_) => params.push(format_param("args", false, true, true)),
+        }
+    }
+    let list = if params.is_empty() {
+        "Vec::new()".into()
+    } else {
+        format!("vec![\n        {},\n    ]", params.join(",\n        "))
+    };
+    format!(
+        "\n#[allow(non_snake_case, dead_code)]\nfn {fun}_params() -> Vec<NativeParamInfo> {{\n    {list}\n}}\n\
+         #[allow(non_snake_case, dead_code)]\nstatic {data}: NativeFuncData = NativeFuncData {{\n    \
+         function: NativeFuncPtr(&{fun}),\n    \
+         name: \"{name}\",\n    \
+         title: \"{name}\",\n    \
+         docs: \"\",\n    \
+         def_site: None,\n    \
+         keywords: &[],\n    \
+         contextual: false,\n    \
+         scope: LazyLock::new(&rt::empty_scope),\n    \
+         params: LazyLock::new(&{fun}_params),\n    \
+         returns: LazyLock::new(&rt::any_cast_info),\n}};\n"
+    )
+}

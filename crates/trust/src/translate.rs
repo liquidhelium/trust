@@ -1401,7 +1401,8 @@ fn translate_package_inner(
         Wildcard,
     }
 
-    let mut cx = Ctx { diags: Vec::new(), lenient: false, next_id: 0, current_file: None, package_files: None, package_mods: None };
+    // 注意:此处直接使用形参 cx(此前误建局部同名 Ctx 遮蔽形参,
+    // 导致包模式的诊断从未传回壳层,严格性失效)。
     let mut plans: Vec<FilePlan> = Vec::new();
     let mut roots: Vec<(String, typst_syntax::SyntaxNode)> = Vec::new();
     for (path, src) in input.files.iter() {

@@ -5,6 +5,8 @@
 
 use typst_syntax::ast;
 
+use super::naming::sanitize;
+
 /// 一个源文件的翻译计划:mod 名、顶层绑定(名字 → 槽)与 import 边。
 pub(super) struct FilePlan<'a> {
     pub(super) path: String,
@@ -100,20 +102,86 @@ pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
     order
 }
 
-/// 顶层绑定查找表:路径 → (名字 → 槽名)。
+/// 顶层绑定查找表:路径 → (名字 → 槽名)。对照 typst 模块导出面:
+/// 全部顶层绑定,**含 import 引入的名字(转出名)**——下游的具名与
+/// 通配 import 从这里展开(如 `shapes.typ` 经 `import "grouping.typ": *`
+/// 拿到 grouping 转出的 `intersection`)。
+///
+/// 按拓扑序增量并入:被依赖者的导出面先定型,list/wildcard 引用的
+/// 目标槽随之递归可达。bare/rename 的 IMPORT 槽名与 `package.rs`
+/// 的生成规则逐字一致(同出现序、同 dedup)。已有名字(本地绑定或
+/// 先前的 import)优先,后到不覆盖。外部包与模块值 import 引入的
+/// 名字无槽形态,暂不转出(见 KNOWN-ISSUES)。
 pub(super) fn build_export_table(
     plans: &[FilePlan],
+    order: &[usize],
 ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
-    plans
-        .iter()
-        .map(|plan| {
-            (
-                plan.path.clone(),
-                plan.tops
-                    .iter()
-                    .map(|(name, slot)| (name.clone(), slot.clone()))
-                    .collect(),
-            )
-        })
-        .collect()
+    let mut table: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
+        plans
+            .iter()
+            .map(|plan| {
+                (
+                    plan.path.clone(),
+                    plan.tops
+                        .iter()
+                        .map(|(name, slot)| (name.clone(), slot.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+    for &idx in order {
+        let plan = &plans[idx];
+        let mut exports = table[&plan.path].clone();
+        // 与 package.rs 同款:同 target 的重复 import 复用首个槽名。
+        let mut import_slots: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for edge in &plan.imports {
+            if edge.is_include || edge.external || edge.module_access.is_some() {
+                continue;
+            }
+            match &edge.items {
+                ImportItems::Bare | ImportItems::Rename(_) => {
+                    let bound = match &edge.items {
+                        ImportItems::Rename(name) => name.clone(),
+                        _ => module_stem(&edge.target),
+                    };
+                    let slot = match import_slots.get(&edge.target) {
+                        Some(slot) => slot.clone(),
+                        None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&bound)),
+                    };
+                    import_slots
+                        .entry(edge.target.clone())
+                        .or_insert_with(|| slot.clone());
+                    exports.entry(bound).or_insert(slot);
+                }
+                ImportItems::List(items) => {
+                    let target_exports = &table[&edge.target];
+                    for (original, rename) in items {
+                        if let Some(slot) = target_exports.get(original) {
+                            let as_name = rename.clone().unwrap_or_else(|| original.clone());
+                            exports.entry(as_name).or_insert_with(|| slot.clone());
+                        }
+                    }
+                }
+                ImportItems::Wildcard => {
+                    for (name, slot) in &table[&edge.target] {
+                        exports.entry(name.clone()).or_insert_with(|| slot.clone());
+                    }
+                }
+            }
+        }
+        table.insert(plan.path.clone(), exports);
+    }
+    table
+}
+
+/// 文件路径的模块名(bare import 的名字 = 文件 stem)。
+pub(super) fn module_stem(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .unwrap_or("m")
+        .split('.')
+        .next()
+        .unwrap_or("m")
+        .to_string()
 }

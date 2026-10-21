@@ -70,10 +70,21 @@ pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> 
     }
 }
 
-/// 填一个顶层绑定槽;同一槽二次填充即生成器 bug,明确报错。
+/// 填一个顶层绑定槽。首填成功即定;重入(如 `module_init` 因模块缓存
+/// 驱逐而重新求值)时同值幂等跳过,不同值仍是生成器 bug,明确报错。
 pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
-    slot.set(value)
-        .map_err(|_| state_error("模块槽重复填充(生成器 bug)"))
+    match slot.get() {
+        Some(existing) => {
+            if *existing == value {
+                Ok(())
+            } else {
+                Err(state_error("模块槽重复填充为不同值(生成器 bug)"))
+            }
+        }
+        None => slot
+            .set(value)
+            .map_err(|_| state_error("模块槽并发填充冲突")),
+    }
 }
 
 type AnyState = std::sync::Arc<dyn std::any::Any + Send + Sync>;
@@ -132,33 +143,40 @@ pub fn state_require<T: std::any::Any + Send + Sync>(
 
 /// 宿主在把模块注入 Library 之后调用:把最近创建的状态搬到注入后的
 /// library 哈希下(注入前的哈希条目保留,供装配期内的嵌套调用)。
-pub fn state_rebind_last_to(library: &typst::utils::LazyHash<typst::Library>) {
+///
+/// `from` 为本次驱动的注入前 library 哈希(守卫):模块求值缓存命中时
+/// 不重新执行 `module_init`,最近状态可能残留自其他构建,不匹配即跳过。
+pub fn state_rebind_last_to(library: &typst::utils::LazyHash<typst::Library>, from: u128) {
     let to = typst::utils::hash128(library);
-    let Some((from, type_id, arc)) = LAST_STATE.with(|slot| slot.borrow_mut().take()) else {
+    let Some((from_seen, type_id, arc)) = LAST_STATE.with(|slot| slot.borrow_mut().take()) else {
         return;
     };
-    let _ = from;
+    if from_seen != from {
+        return;
+    }
     STATES.write().unwrap().insert((to, type_id), arc);
 }
 
-/// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`,
-/// 未命中时报同款 `unknown variable`)。
+/// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`:
+/// 局部之外查 `library.global`,miss 且名字为 `std` 时特判指向
+/// `library.std`;未命中报同款 `unknown variable`)。
 pub fn global(engine: &Engine, name: &str, span: Span) -> SourceResult<Value> {
     match engine.library.global.scope().get(name) {
         Some(binding) => Ok(binding.read().clone()),
+        None if name == "std" => Ok(engine.library.std.read().clone()),
         None => bail!(span, "unknown variable: {name}"),
     }
 }
 
 /// 全局查找,不存在返回 `None`(对照 typst 捕获语义:创建期不可见的
-/// 名字不捕获,由闭包体内自己的 import 在调用期绑定)。
+/// 名字不捕获,由闭包体内自己的 import 在调用期绑定;`std` 特判
+/// 与 [`global`] 同款)。
 pub fn global_opt(engine: &Engine, name: &str) -> SourceResult<Option<Value>> {
-    Ok(engine
-        .library
-        .global
-        .scope()
-        .get(name)
-        .map(|binding| binding.read().clone()))
+    Ok(match engine.library.global.scope().get(name) {
+        Some(binding) => Some(binding.read().clone()),
+        None if name == "std" => Some(engine.library.std.read().clone()),
+        None => None,
+    })
 }
 
 /// 字段访问 `target.name`(对照 `ast::FieldAccess` 求值:`Value::field`)。
@@ -232,13 +250,54 @@ pub fn method(
 ///
 /// 闭包体由 typst-eval 解释执行——这是 v1 的保真路径;闭包参数的默认值
 /// 求值次数与原版一致(创建期)。
+/// 解释闭包的虚拟源登记:FileId → 片段源码(诊断定位用;宿主在
+/// 错误打印时经 [`closure_source`] 反查)。
+static CLOSURE_SOURCES: std::sync::RwLock<Vec<(typst::syntax::FileId, String)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// 查一个虚拟闭包文件的源码(不存在返回 `None`)。
+pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
+    CLOSURE_SOURCES
+        .read()
+        .unwrap()
+        .iter()
+        .find(|(fid, _)| *fid == id)
+        .map(|(_, src)| src.clone())
+}
+
+/// 解释片段(`closure`/`context_closure`)的虚拟源:登记进
+/// [`CLOSURE_SOURCES`] 并包装成 markup 合法形态(`#let … = …`),
+/// 片段节点的 span 从此携带 FileId,解释执行的错误可定位到片段行。
+fn virtual_closure_source(src: &str) -> typst::syntax::Source {
+    let n = CLOSURE_SOURCES.read().unwrap().len();
+    let id = typst::syntax::RootedPath::new(
+        typst::syntax::VirtualRoot::Project,
+        typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
+            .expect("valid closure path"),
+    )
+    .intern();
+    // 命名绑定形态直接嵌入;其余(裸闭包、context 体)包一层合成名
+    //(匿名形态本就无自引用,名字不可达)。
+    let trimmed = src.trim_start();
+    let text = if trimmed.starts_with("let ") {
+        format!("#{trimmed}")
+    } else {
+        format!("#let __trust_closure = {trimmed}")
+    };
+    let source = typst::syntax::Source::new(id, text.clone());
+    CLOSURE_SOURCES.write().unwrap().push((id, text));
+    source
+}
+
 pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value)]) -> Func {
-    let root = typst_syntax::parse_code(src);
+    let source = virtual_closure_source(src);
+    let root = source.root();
+    let text = source.text().to_string();
     // 源片段可能是裸闭包 `(x) => ..`(Code 下直接是 Closure)或命名
     // 绑定形态 `f(x) = ..`(LetBinding 包着 Closure),统一取首个
     // Closure 节点;命名形态下闭包名保留,递归自引用可用。
-    let node = find_closure_node(&root)
-        .expect("closure source parses to a closure")
+    let node = find_closure_node(root)
+        .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
         .clone();
     let num_pos_params = node
         .cast::<ast::Closure>()
@@ -892,8 +951,11 @@ pub fn styled_with_recipe(
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
 pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
-    let root = typst_syntax::parse_code(body_src);
-    // 取 Code 根下的首个表达式节点(闭包节点存的是表达式,非根)。
+    // 与 `closure` 同款:片段挂虚拟文件(markup 包装成 let 绑定),
+    // context 体解释执行的错误 span 可定位到片段行。
+    let source = virtual_closure_source(body_src);
+    let root = source.root();
+    // 取根下的首个表达式节点(闭包节点存的是表达式,非根)。
     let node = root
         .children()
         .find(|child| child.cast::<ast::Expr>().is_some())

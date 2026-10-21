@@ -23,6 +23,8 @@ impl Ctx {
         let mut fn_env = env.clone();
         // 是否需要 `__st`(函数体/默认值引用了模块槽)在生成中追踪。
         self.used_state = false;
+        // sink 参数延后解包(take 收剩余,须在显式参数之后)。
+        let mut sinks: Vec<Option<String>> = Vec::new();
 
         for param in closure.params().children() {
             match param {
@@ -57,17 +59,26 @@ impl Ctx {
                         escape(&name)
                     );
                 }
-                ast::Param::Spread(spread) => match spread.sink_ident() {
-                    Some(ident) => {
-                        let name = ident.as_str().to_string();
-                        let rust = bind_local(&mut fn_env, &name);
-                        let _ = writeln!(body, "    let mut {rust} = Value::Args(__args.take());");
-                    }
-                    None => {
-                        let _ = writeln!(body, "    let mut _sink = Value::Args(__args.take());");
-                    }
-                },
+                ast::Param::Spread(spread) => {
+                    // sink 收**剩余**参数(对照 typst 调用协议:显式参数
+                    // 先匹配,sink 最后取走剩余)——延后到其余参数解包完
+                    // 再 take,否则吞掉后续具名参数的传值。
+                    let sink = match spread.sink_ident() {
+                        Some(ident) => {
+                            let name = ident.as_str().to_string();
+                            let rust = bind_local(&mut fn_env, &name);
+                            Some(rust)
+                        }
+                        None => None,
+                    };
+                    sinks.push(sink);
+                }
             }
+        }
+        // sink 最后收剩余(typst 调用协议:显式参数先匹配)。
+        for sink in sinks {
+            let target = sink.as_deref().unwrap_or("_sink");
+            let _ = writeln!(body, "    let mut {target} = Value::Args(__args.take());");
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
 

@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use comemo::Track;
+use comemo::{Track, Tracked};
 use typst::diag::{FileError, FileResult, SourceResult};
 use typst::engine::{Route, Sink, Traced};
 use typst::foundations::{
@@ -49,6 +49,7 @@ pub type ModuleInit =
 pub struct InjectWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
+    fonts: Vec<Font>,
     main: FileId,
     sources: HashMap<FileId, Source>,
     files: HashMap<FileId, Bytes>,
@@ -57,6 +58,30 @@ pub struct InjectWorld {
     /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
     /// (如 wasm 插件等非源文件)。
     fs_root: Option<PathBuf>,
+}
+
+/// `module_init` 的驱动壳,comemo memoize 缓存(与 `typst_eval::eval`
+/// 的模块求值缓存同一机制):按 (world 读取约束, library 内容, init
+/// 函数) 缓存模块,依赖变化自动失效,驱逐后重新求值(`fill` 对同值
+/// 幂等,重入安全)。
+#[comemo::memoize]
+fn eval_native_module(
+    world: Tracked<'_, dyn World + '_>,
+    library: &LazyHash<Library>,
+    init: ModuleInit,
+) -> SourceResult<Module> {
+    let mut sink = Sink::new();
+    let traced = Traced::default();
+    let mut engine = typst::engine::Engine {
+        library,
+        world,
+        introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
+        traced: traced.track(),
+        sink: sink.track_mut(),
+        route: Route::default(),
+    };
+    let context = Context::none();
+    init(&mut engine, context.track())
 }
 
 impl InjectWorld {
@@ -100,6 +125,7 @@ impl InjectWorld {
         Self {
             library: LazyHash::new(library),
             book: LazyHash::new(FontBook::new()),
+            fonts: Vec::new(),
             main,
             sources: HashMap::from([(main, Source::new(main, main_text.to_string()))]),
             files: HashMap::new(),
@@ -108,33 +134,26 @@ impl InjectWorld {
         }
     }
 
-    /// 注入原生模块:以本 World 搓临时 Engine 驱动 `module_init`
-    /// (模块求值的镜像,per-build 槽板按 World 身份注册),把返回的
-    /// 模块注入全局作用域并重建 Library(重包 LazyHash 保持 comemo
-    /// 哈希正确)。每次构建调用一次;重复调用幂等(同构建复用槽板)。
+    /// 注入原生模块:驱动 `module_init`(模块求值的镜像,per-build 槽板
+    /// 按 library 内容注册),把返回的模块注入全局作用域并重建 Library
+    /// (重包 LazyHash 保持 comemo 哈希正确)。模块求值经 comemo memoize
+    /// 缓存(与 `typst_eval::eval` 同一机制):同 (world 读取约束,
+    /// library 内容, init 函数) 不二次求值,依赖变化自动失效。
     pub fn init_native_module(&mut self, name: &'static str, init: ModuleInit) -> Module {
-        let mut sink = Sink::new();
+        let from = typst::utils::hash128(&self.library);
         let world: &dyn World = self;
-        let traced = Traced::default();
-        let mut engine = typst::engine::Engine {
-            library: &self.library,
-            world: world.track(),
-            introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
-            traced: traced.track(),
-            sink: sink.track_mut(),
-            route: Route::default(),
-        };
-        let context = Context::none();
-        let module = init(&mut engine, context.track()).unwrap_or_else(|diags| {
-            panic!(
-                "module_init 模块求值失败: {:?}",
-                diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-            )
-        });
+        let module =
+            eval_native_module(world.track(), &self.library, init).unwrap_or_else(|diags| {
+                panic!(
+                    "module_init 模块求值失败: {:?}",
+                    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+                )
+            });
         self.inject_module(name, module.clone());
         // 注入重建了 Library(哈希变化):把装配期状态搬到注入后的
-        // 哈希下,后续函数调用按新哈希取状态。
-        trust_runtime::state_rebind_last_to(&self.library);
+        // 哈希下,后续函数调用按新哈希取状态(from 守卫:缓存命中时
+        // 最近状态可能残留自其他构建,不匹配即跳过)。
+        trust_runtime::state_rebind_last_to(&self.library, from);
         module
     }
 
@@ -212,6 +231,17 @@ impl InjectWorld {
         self.sources
             .insert(entry_id, Source::new(entry_id, entry_text.to_string()));
         Ok(())
+    }
+
+    /// 挂载字体(排版/渲染用):`font()` 与 `book()` 从此供给。
+    /// 评估专用场景无需调用;渲染对拍时挂 `typst-assets` 或系统字体。
+    pub fn set_fonts(&mut self, fonts: Vec<Font>) {
+        let mut book = FontBook::new();
+        for font in &fonts {
+            book.push(font.info().clone());
+        }
+        self.fonts = fonts;
+        self.book = LazyHash::new(book);
     }
 
     /// 以 typst-eval 求值主文件,得到模块(与 typst 编译器的模块求值
@@ -311,8 +341,8 @@ impl World for InjectWorld {
         Err(FileError::NotFound(PathBuf::from("not in this world")))
     }
 
-    fn font(&self, _index: usize) -> Option<Font> {
-        None
+    fn font(&self, index: usize) -> Option<Font> {
+        self.fonts.get(index).cloned()
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {

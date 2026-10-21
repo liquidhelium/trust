@@ -27,7 +27,8 @@ use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 use super::paths::{normalize_import, parse_module_access};
 use super::plan::{
-    FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, nth_slot, topo_order,
+    FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, module_stem, nth_slot,
+    topo_order,
 };
 
 /// 待翻译的多文件包。
@@ -264,9 +265,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     cx.package_files = Some(package_files.clone());
     cx.package_mods = Some(package_mods.clone());
 
-    // 拓扑序(被依赖者在前):求值顺序。
+    // 拓扑序(被依赖者在前):求值顺序。导出查找表按同序展开,
+    // 下游 list/wildcard import 可达上游的 import 转出名。
     let order = topo_order(&plans);
-    let export_table = build_export_table(&plans);
+    let export_table = build_export_table(&plans, &order);
 
     // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
     let mut top_defines = String::new();
@@ -918,16 +920,5 @@ fn spec_name(spec: &str) -> String {
         .split(':')
         .next()
         .unwrap_or("pkg")
-        .to_string()
-}
-
-/// 文件路径的模块名(bare import 的名字 = 文件 stem)。
-fn module_stem(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .unwrap_or("m")
-        .split('.')
-        .next()
-        .unwrap_or("m")
         .to_string()
 }

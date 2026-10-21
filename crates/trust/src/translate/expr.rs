@@ -12,6 +12,29 @@ use super::captures::collect_idents;
 use super::ctx::{Ctx, Env};
 use super::naming::escape;
 
+/// `ast::Unit` → Rust 变体名的显式映射(不依赖 Debug 输出形态,
+/// typst 改名即编译错,而非静默错值)。
+fn unit_variant(unit: ast::Unit) -> &'static str {
+    match unit {
+        ast::Unit::Pt => "Pt",
+        ast::Unit::Mm => "Mm",
+        ast::Unit::Cm => "Cm",
+        ast::Unit::In => "In",
+        ast::Unit::Rad => "Rad",
+        ast::Unit::Deg => "Deg",
+        ast::Unit::Em => "Em",
+        ast::Unit::Fr => "Fr",
+        ast::Unit::Percent => "Percent",
+    }
+}
+
+/// 内容项 + 生成该项时可见的绑定集(顶层内容按源序逐项可见性,
+/// 对照 typst 的 markup 顺序求值;content 块内均匀)。
+pub(super) struct TopItem<'a> {
+    pub item: ContentItem<'a>,
+    pub env: Env,
+}
+
 /// 内容流的一项:普通表达式 / set 规则 / show 规则 / include。
 /// 顶层内容与 content 块共用同一条折叠管线。
 #[derive(Clone)]
@@ -35,7 +58,7 @@ impl Ctx {
             ast::Expr::Float(f) => format!("Value::Float({:?})", f.get()),
             ast::Expr::Numeric(n) => {
                 let (value, unit) = n.get();
-                format!("Value::numeric(({value:?}, Unit::{unit:?}))")
+                format!("Value::numeric(({value:?}, Unit::{}))", unit_variant(unit))
             }
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
@@ -453,33 +476,49 @@ impl Ctx {
     /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
     /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
     pub(super) fn content_seq(&mut self, items: &[ContentItem], env: &Env) -> String {
-        for (i, item) in items.iter().enumerate() {
-            match item {
+        let tops: Vec<TopItem> = items
+            .iter()
+            .map(|item| TopItem {
+                item: item.clone(),
+                env: env.clone(),
+            })
+            .collect();
+        self.content_seq_top(&tops)
+    }
+
+    /// 顶层内容折叠:各项按自己的可见绑定集生成(规则包装后续项)。
+    pub(super) fn content_seq_top(&mut self, items: &[TopItem]) -> String {
+        for (i, top) in items.iter().enumerate() {
+            let env = &top.env;
+            match &top.item {
                 ContentItem::Set(set) => {
-                    let mut parts: Vec<String> = items[..i]
-                        .iter()
-                        .map(|e| self.content_part(e, env))
-                        .collect();
-                    let tail = self.content_seq(&items[i + 1..], env);
+                    let mut parts: Vec<String> =
+                        items[..i].iter().map(|e| self.content_part(e)).collect();
+                    let tail = self.content_seq_top(&items[i + 1..]);
                     let args = self.gen_args(set.args(), env);
                     let target = self.expr(set.target(), env);
                     // 条件为假时规则为空样式(对照 `Ok(Styles::new())`)。
                     let styles = match set.condition() {
-                        Some(cond) => format!(
-                            "if rt::boolean({}, SPAN)? {{ rt::set_rule(engine, {target}, {args}, SPAN)? }} else {{ rt::styles_empty() }}",
-                            self.expr(cond, env)
-                        ),
-                        None => format!("rt::set_rule(engine, {target}, {args}, SPAN)?"),
+                        Some(cond) => {
+                            let cond_at = self.span_of(cond.span());
+                            let rule_at = self.span_of(set.span());
+                            format!(
+                                "if rt::boolean({}, {cond_at})? {{ rt::set_rule(engine, {target}, {args}, {rule_at})? }} else {{ rt::styles_empty() }}",
+                                self.expr(cond, env)
+                            )
+                        }
+                        None => {
+                            let rule_at = self.span_of(set.span());
+                            format!("rt::set_rule(engine, {target}, {args}, {rule_at})?")
+                        }
                     };
                     parts.push(format!("rt::styled_with_map({tail}, {styles})"));
                     return self.content_join(parts);
                 }
                 ContentItem::Show(show) => {
-                    let mut parts: Vec<String> = items[..i]
-                        .iter()
-                        .map(|e| self.content_part(e, env))
-                        .collect();
-                    let tail = self.content_seq(&items[i + 1..], env);
+                    let mut parts: Vec<String> =
+                        items[..i].iter().map(|e| self.content_part(e)).collect();
+                    let tail = self.content_seq_top(&items[i + 1..]);
                     let sel_arg = match show.selector() {
                         Some(sel) => format!("Some({})", self.expr(sel, env)),
                         None => "None".to_string(),
@@ -488,13 +527,15 @@ impl Ctx {
                         ast::Expr::SetRule(set) => {
                             let args = self.gen_args(set.args(), env);
                             let target = self.expr(set.target(), env);
+                            let rule_at = self.span_of(set.span());
                             format!(
-                                "rt::show_rule_style({sel_arg}, rt::set_rule(engine, {target}, {args}, SPAN)?, SPAN)?"
+                                "rt::show_rule_style({sel_arg}, rt::set_rule(engine, {target}, {args}, {rule_at})?, {rule_at})?"
                             )
                         }
                         transform => {
+                            let at = self.span_of(show.span());
                             format!(
-                                "rt::show_rule({sel_arg}, {}, SPAN)?",
+                                "rt::show_rule({sel_arg}, {}, {at})?",
                                 self.expr(transform, env)
                             )
                         }
@@ -507,13 +548,15 @@ impl Ctx {
                 _ => {}
             }
         }
-        let parts: Vec<String> = items.iter().map(|e| self.content_part(e, env)).collect();
+        let parts: Vec<String> = items.iter().map(|e| self.content_part(e)).collect();
         self.content_join(parts)
     }
 
-    /// content 的单个部分(表达式产出 Content 构造代码)。
-    fn content_part(&mut self, item: &ContentItem, env: &Env) -> String {
-        match item {
+    /// content 的单个部分(表达式产出 Content 构造代码;env 取该项
+    /// 自身的可见绑定集)。
+    fn content_part(&mut self, top: &TopItem) -> String {
+        let env = &top.env;
+        match &top.item {
             ContentItem::Include(body_slot) => {
                 self.used_state = true;
                 format!("rt::read_content(&__st.{body_slot})?")
@@ -527,8 +570,6 @@ impl Ctx {
             ContentItem::Part(ast::Expr::Escape(e)) => {
                 format!("rt::text({:?})", e.get().to_string())
             }
-            // 语句类表达式(let/import)求值为 none,并入空 display 槽
-            // (对照 eval_markup 的 `seq.push(value.display())`)。
             ContentItem::Part(ast::Expr::LetBinding(_))
             | ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
             ContentItem::Part(other) => {
@@ -536,7 +577,7 @@ impl Ctx {
                 format!("rt::embed({value})")
             }
             ContentItem::Set(_) | ContentItem::Show(_) => {
-                unreachable!("rules handled by content_seq")
+                unreachable!("rules handled by content_seq_top")
             }
         }
     }

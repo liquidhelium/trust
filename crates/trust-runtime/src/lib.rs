@@ -49,6 +49,19 @@ pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
         .ok_or_else(|| state_error("模块槽未初始化(求值序错误)"))
 }
 
+/// 读创建期物化的全局名槽:有值读槽(对照 typst 创建期捕获),
+/// 无值回退调用期全局查找(对照创建期不可见名字的调用期解析)。
+pub fn read_or(
+    slot: &std::sync::OnceLock<Value>,
+    engine: &Engine,
+    name: &str,
+) -> SourceResult<Value> {
+    match slot.get() {
+        Some(value) => Ok(value.clone()),
+        None => global(engine, name, Span::detached()),
+    }
+}
+
 /// 读存为内容(body)的槽。
 pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> {
     match read(slot)? {
@@ -564,14 +577,12 @@ pub fn iter_values(value: &Value, span: Span) -> SourceResult<Box<dyn Iterator<I
 pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceResult<Value> {
     match array.at(i as i64, None) {
         Ok(value) => Ok(value),
-        Err(_) => {
-            Err(elements_mismatch_diagnostic(
-                array.len(),
-                i + 1,
-                false,
-                span,
-            ))
-        }
+        Err(_) => Err(elements_mismatch_diagnostic(
+            array.len(),
+            i + 1,
+            false,
+            span,
+        )),
     }
 }
 
@@ -587,14 +598,12 @@ pub fn d_rest(
         Some(sink_size) if i + sink_size <= array.len() => {
             Ok(array.as_slice()[i..i + sink_size].iter().cloned().collect())
         }
-        _ => {
-            Err(elements_mismatch_diagnostic(
-                array.len(),
-                total - 1,
-                true,
-                span,
-            ))
-        }
+        _ => Err(elements_mismatch_diagnostic(
+            array.len(),
+            total - 1,
+            true,
+            span,
+        )),
     }
 }
 

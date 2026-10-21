@@ -63,3 +63,13 @@ pub(super) fn uppercase(s: &str) -> String {
         None => String::new(),
     }
 }
+
+/// 结构体槽名(DEF/G/IMPORT 等标识符拼接)用的清洗:不产出 `r#`
+/// 前缀(拼接后非法),关键字转为 `_kw` 后缀。
+pub(super) fn sanitize_key(name: &str) -> String {
+    let mut out = sanitize(name);
+    if let Some(stripped) = out.strip_prefix("r#") {
+        out = format!("{stripped}_kw");
+    }
+    out
+}

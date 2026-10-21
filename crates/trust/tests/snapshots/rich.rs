@@ -42,9 +42,13 @@ fn file_span() -> Span {
 #[derive(Default)]
 struct __State {
     V0_scale: std::sync::OnceLock<Value>,
+    G_V0_scale_x: std::sync::OnceLock<Value>,
+    G_V0_scale_k: std::sync::OnceLock<Value>,
     DEF_V0_scale_k: std::sync::OnceLock<Value>,
     V1_base: std::sync::OnceLock<Value>,
     V2_wrap: std::sync::OnceLock<Value>,
+    G_V2_wrap_f: std::sync::OnceLock<Value>,
+    G_V2_wrap_rest: std::sync::OnceLock<Value>,
 }
 
 /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
@@ -52,6 +56,8 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
     let _ = context;
+    if let Some(v) = rt::global_opt(engine, "x")? { rt::fill(&__st.G_V0_scale_x, v)?; }
+    if let Some(v) = rt::global_opt(engine, "k")? { rt::fill(&__st.G_V0_scale_k, v)?; }
     { let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; }
     { let v = Value::Func(Func::from(&D_V0_scale)); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
@@ -59,6 +65,8 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
 V1_base = v.clone();
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
+    if let Some(v) = rt::global_opt(engine, "f")? { rt::fill(&__st.G_V2_wrap_f, v)?; }
+    if let Some(v) = rt::global_opt(engine, "rest")? { rt::fill(&__st.G_V2_wrap_rest, v)?; }
     { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
     Ok(Module::new("rich", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None), rt::embed(Value::None), rt::embed(Value::None)])))
 }

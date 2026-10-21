@@ -16,7 +16,7 @@ use typst_syntax::ast::{self, AstNode};
 use super::Diag;
 use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
-use super::naming::{escape, lowercase, sanitize, uppercase};
+use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 
 /// 顶层绑定:(名字, 槽) 对列表 + 形态(函数闭包节点或值 init;
 /// 解构绑定贡献多个名字)。
@@ -147,16 +147,28 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut init_code = String::new();
     let mut fields = String::new();
     let mut items = String::new();
-    let mut content_items: Vec<super::expr::ContentItem> = Vec::new();
-    let mut seen_tops: Vec<usize> = Vec::new();
+    let mut content_items: Vec<super::expr::TopItem> = Vec::new();
+    // 内容项可见的绑定集随源序增长(对照 typst 顺序求值:#17)。
+    let mut visible: Vec<(String, Ref)> = Vec::new();
     for step in &seq {
         let Seq::Binding(i) = step else {
             if let Seq::Content(item) = step {
-                content_items.push(item.clone());
+                content_items.push(super::expr::TopItem {
+                    item: item.clone(),
+                    env: Env {
+                        locals: Vec::new(),
+                        module: visible.clone(),
+                    },
+                });
             }
             continue;
         };
-        seen_tops.push(*i);
+        visible.extend(
+            tops[*i]
+                .names
+                .iter()
+                .map(|(name, slot)| (name.clone(), Ref::Slot(slot.clone()))),
+        );
         let i = *i;
         let top = &tops[i];
         // 函数体可见自身(递归)与此前全部绑定;值 init 不含本绑定。
@@ -234,14 +246,48 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let (name, slot) = &top.names[0];
                 let fun = format!("f_{}", lowercase(slot));
                 let data = format!("D_{}", uppercase(slot));
-                items.push_str(&cx.gen_function(&fun, slot, *closure, &env));
+                // 全局名创建期物化(对照 typst 闭包捕获:创建期可见即
+                // 捕获,不可见的名字留调用期解析)。
+                let mut g_env = env.clone();
+                let mut g_code = String::new();
+                let mut g_seen = std::collections::HashSet::new();
+                let mut names = Vec::new();
+                super::captures::collect_idents(
+                    closure.body().to_untyped(),
+                    &mut Vec::new(),
+                    &mut names,
+                );
+                for gname in names {
+                    if !g_seen.insert(gname.clone()) {
+                        continue;
+                    }
+                    if env.module.iter().any(|(n, _)| *n == gname) {
+                        continue;
+                    }
+                    let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
+                    let _ = writeln!(fields, "    {gslot}: std::sync::OnceLock<Value>,");
+                    let gname_escaped = escape(&gname);
+                    let _ = writeln!(
+                        g_code,
+                        "    if let Some(v) = rt::global_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                    );
+                    g_env.module.push((
+                        gname,
+                        Ref::GlobalFallback {
+                            slot: gslot.clone(),
+                            name: gname_escaped,
+                        },
+                    ));
+                }
+                init_code.push_str(&g_code);
+                items.push_str(&cx.gen_function(&fun, slot, *closure, &g_env));
                 items.push_str(&gen_func_data(&data, &fun, name, *closure));
                 // 默认值创建期物化(对照 typst:闭包创建时逐参数求值)。
                 let mut def_code = String::new();
                 for param in closure.params().children() {
                     if let ast::Param::Named(named) = param {
                         let pname = named.name().as_str();
-                        let def_slot = format!("DEF_{slot}_{}", sanitize(pname));
+                        let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
                         let _ = writeln!(fields, "    {def_slot}: std::sync::OnceLock<Value>,");
                         let value = cx.expr(named.expr(), &init_env);
                         let _ = writeln!(
@@ -260,23 +306,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
-    // 模块 body:顶层内容按源序折叠(规则包装后续内容)。
-    let all_bound = |n: usize| -> Vec<(String, Ref)> {
-        (0..n)
-            .flat_map(|j| {
-                tops[j]
-                    .names
-                    .iter()
-                    .map(|(name, slot)| (name.clone(), Ref::Slot(slot.clone())))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    };
-    let body_env = Env {
-        locals: Vec::new(),
-        module: all_bound(tops.len()),
-    };
-    let body = cx.content_seq(&content_items, &body_env);
+    // 模块 body:顶层内容按源序折叠(规则包装后续内容,逐项可见性)。
+    let body = cx.content_seq_top(&content_items);
 
     if !cx.diags.is_empty() {
         return Err(cx.diags);

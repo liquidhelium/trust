@@ -17,7 +17,7 @@ use typst_syntax::ast::{self, AstNode};
 use super::Diag;
 use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
-use super::naming::{escape, lowercase, sanitize, uppercase};
+use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 use super::paths::{normalize_import, parse_module_access};
 use super::plan::{
     FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, nth_slot, topo_order,
@@ -427,17 +427,28 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let mut binding_code = String::new();
         let mut file_fns = String::new();
         let mut own: Vec<(String, String)> = Vec::new();
-        let mut content_items: Vec<super::expr::ContentItem> = Vec::new();
+        let mut content_items: Vec<super::expr::TopItem> = Vec::new();
         let mut own_seen_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let content_env = |env: &Env, own: &[(String, String)]| {
+            let mut e = env.clone();
+            for (seen, seen_slot) in own {
+                e.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
+            }
+            e
+        };
         for expr in plan.markup.exprs() {
-            // 内容项:顶层文本/嵌入表达式/set/show/include。
+            // 内容项:顶层文本/嵌入表达式/set/show/include(逐项可见性)。
             match expr {
                 ast::Expr::LetBinding(_) | ast::Expr::ModuleImport(_) => {
                     // 对照 eval_markup:语句并入一个空 display 槽。
-                    content_items.push(super::expr::ContentItem::Part(expr));
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(expr),
+                        env: content_env(&env, &own),
+                    });
                 }
                 ast::Expr::ModuleInclude(include) => {
+                    let item_env = content_env(&env, &own);
                     let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
                         cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
                         continue;
@@ -447,21 +458,31 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     let Some(target_mod) = package_mods.get(&target) else {
                         continue;
                     };
-                    content_items.push(super::expr::ContentItem::Include(format!(
-                        "BODY_{target_mod}"
-                    )));
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Include(format!("BODY_{target_mod}")),
+                        env: item_env,
+                    });
                     continue;
                 }
                 ast::Expr::SetRule(set) => {
-                    content_items.push(super::expr::ContentItem::Set(set));
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Set(set),
+                        env: content_env(&env, &own),
+                    });
                     continue;
                 }
                 ast::Expr::ShowRule(show) => {
-                    content_items.push(super::expr::ContentItem::Show(show));
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Show(show),
+                        env: content_env(&env, &own),
+                    });
                     continue;
                 }
                 other => {
-                    content_items.push(super::expr::ContentItem::Part(other));
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(other),
+                        env: content_env(&env, &own),
+                    });
                     continue;
                 }
             }
@@ -488,14 +509,45 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
-                    file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &env2));
+                    // 全局名创建期物化(对照 typst 闭包捕获)。
+                    let mut g_env = env2.clone();
+                    let mut names = Vec::new();
+                    super::captures::collect_idents(
+                        closure.body().to_untyped(),
+                        &mut Vec::new(),
+                        &mut names,
+                    );
+                    let mut g_seen = std::collections::HashSet::new();
+                    for gname in names {
+                        if !g_seen.insert(gname.clone()) {
+                            continue;
+                        }
+                        if env2.module.iter().any(|(n, _)| *n == gname) {
+                            continue;
+                        }
+                        let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
+                        state_fields.push(gslot.clone());
+                        let gname_escaped = escape(&gname);
+                        let _ = writeln!(
+                            binding_code,
+                            "    if let Some(v) = rt::global_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                        );
+                        g_env.module.push((
+                            gname,
+                            Ref::GlobalFallback {
+                                slot: gslot,
+                                name: gname_escaped,
+                            },
+                        ));
+                    }
+                    file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &g_env));
                     file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
                     // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
                     // env2 = import + 此前绑定,不含本函数自身)。
                     for param in closure.params().children() {
                         if let ast::Param::Named(named) = param {
                             let pname = named.name().as_str();
-                            let def_slot = format!("DEF_{slot}_{}", sanitize(pname));
+                            let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
                             state_fields.push(def_slot.clone());
                             let value = cx.expr(named.expr(), &env2);
                             let _ = writeln!(
@@ -600,7 +652,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 .module
                 .push((seen.clone(), Ref::Slot(seen_slot.clone())));
         }
-        let body = cx.content_seq(&content_items, &body_env);
+        let body = cx.content_seq_top(&content_items);
         let _ = writeln!(
             binding_code,
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"

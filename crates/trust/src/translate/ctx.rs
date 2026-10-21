@@ -10,7 +10,7 @@
 //! 引用,决定函数体是否需要 `__st` 序言。
 
 use super::Diag;
-use super::naming::fresh_rust_ident;
+use super::naming::{escape, fresh_rust_ident};
 
 pub(super) struct Ctx {
     pub(super) diags: Vec<Diag>,
@@ -40,6 +40,9 @@ pub(super) enum Ref {
     ModuleField { expr: String, name: String },
     /// 直接以表达式求值的绑定(模块值本身或其字段)。
     Value(String),
+    /// 创建期物化的全局名:槽有值读槽(typst 创建期捕获),无值
+    /// 回退调用期全局查找(typst 创建期不可见名字的语义)。
+    GlobalFallback { slot: String, name: String },
 }
 
 /// 名字解析环境:局部栈 + 可见模块槽(静态作用域,按声明序累积)。
@@ -122,6 +125,10 @@ impl Ctx {
                 format!("rt::field(&({expr}), \"{name}\", SPAN)?")
             }
             Ref::Value(expr) => expr.clone(),
+            Ref::GlobalFallback { slot, name } => {
+                let name = escape(name);
+                format!("rt::read_or(&__st.{slot}, engine, \"{name}\")?")
+            }
         }
     }
 }

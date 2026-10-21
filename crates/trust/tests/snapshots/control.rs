@@ -46,6 +46,7 @@ fn file_span() -> Span {
 #[derive(Default)]
 struct __State {
     V0_pick: std::sync::OnceLock<Value>,
+    G_V0_pick_items: std::sync::OnceLock<Value>,
 }
 
 /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。
@@ -53,6 +54,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
     let _ = context;
+    if let Some(v) = rt::global_opt(engine, "items")? { rt::fill(&__st.G_V0_pick_items, v)?; }
     { let v = Value::Func(Func::from(&D_V0_pick)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
     Ok(Module::new("control", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])))
 }

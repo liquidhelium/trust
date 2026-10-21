@@ -31,31 +31,37 @@ impl Ctx {
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
             ast::Expr::ContentBlock(block) => {
                 // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
-                // 嵌入表达式,构造方式对照 typst-eval/src/markup.rs。
-                let mut parts = Vec::new();
-                for expr in block.body().exprs() {
-                    match expr {
-                        ast::Expr::Text(t) => {
-                            parts.push(format!("rt::text({:?})", t.get().as_str()));
-                        }
-                        ast::Expr::Space(_) => parts.push("rt::space()".into()),
-                        ast::Expr::Linebreak(_) => parts.push("rt::linebreak()".into()),
-                        ast::Expr::Parbreak(_) => parts.push("rt::parbreak()".into()),
-                        ast::Expr::Escape(e) => {
-                            parts.push(format!("rt::text({:?})", e.get().to_string()));
-                        }
-                        other => {
-                            let value = self.expr(other, env);
-                            parts.push(format!("rt::embed({value})"));
-                        }
-                    }
-                }
-                if parts.is_empty() {
-                    "Value::Content(Content::sequence(Vec::new()))".into()
+                // 嵌入表达式 + set/show 规则,构造方式对照
+                // typst-eval/src/markup.rs(规则包装后续全部内容)。
+                let exprs: Vec<ast::Expr> = block.body().exprs().collect();
+                format!("Value::Content({})", self.content_seq(&exprs, env))
+            }
+            ast::Expr::Contextual(ctx) => {
+                // `#context expr`:构造推迟求值的闭包(对照 `Eval for
+                // ast::Contextual`),realize/layout 期带 location/styles 求值。
+                let body = ctx.body().to_untyped().full_text().to_string();
+                let mut names: Vec<String> = Vec::new();
+                collect_idents(ctx.body().to_untyped(), &mut Vec::new(), &mut names);
+                let (captured, globals) = self.capture_entries(&names, env);
+                if captured.is_empty() && globals.is_empty() {
+                    format!("Value::Content(rt::context_body(rt::context_closure({body:?}, &[])))")
                 } else {
+                    // 块内构造、块内消费(&__caps 不逃出块)。
+                    let init = if captured.is_empty() {
+                        "Vec::new()".to_string()
+                    } else {
+                        format!("vec![{}]", captured.join(", "))
+                    };
+                    let mut pushes = String::new();
+                    for name in &globals {
+                        pushes.push_str(&format!(
+                            " if let Some(v) = rt::global_opt(engine, \"{}\")? {{ __caps.push((\"{}\", v)); }}",
+                            escape(name),
+                            escape(name)
+                        ));
+                    }
                     format!(
-                        "Value::Content(rt::content_sequence(vec![{}]))",
-                        parts.join(", ")
+                        "{{ let mut __caps: Vec<(&'static str, Value)> = {init};{pushes} Value::Content(rt::context_body(rt::context_closure({body:?}, &__caps))) }}"
                     )
                 }
             }
@@ -332,26 +338,10 @@ impl Ctx {
         }
         let mut names: Vec<String> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
-        let mut captured = Vec::new();
         // 全局名创建期物化;创建期不可见的(如通配 import 引入的名字)
         // 不捕获,由闭包体内自己的 import 在调用期绑定(对照 typst
         // CapturesVisitor 的 `Err(_) => return`)。
-        let mut captured_globals = Vec::new();
-        let mut seen = HashSet::new();
-        for name in names {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == name) {
-                captured.push(format!("(\"{}\", {rust}.clone())", escape(&name)));
-            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| *n == name)
-            {
-                let value = self.ref_value(module_ref);
-                captured.push(format!("(\"{}\", {value})", escape(&name)));
-            } else {
-                captured_globals.push(name.clone());
-            }
-        }
+        let (captured, captured_globals) = self.capture_entries(&names, env);
         let defaults = if defaults.is_empty() {
             "Vec::new()".into()
         } else {
@@ -383,5 +373,111 @@ impl Ctx {
                 "{{ let mut __caps: Vec<(&'static str, Value)> = {init};{pushes} Value::Func(rt::closure({src_text:?}, {defaults}, &__caps)) }}"
             )
         }
+    }
+
+    /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
+    /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
+    fn content_seq(&mut self, exprs: &[ast::Expr], env: &Env) -> String {
+        for (i, expr) in exprs.iter().enumerate() {
+            match expr {
+                ast::Expr::SetRule(set) => {
+                    let mut parts: Vec<String> = exprs[..i]
+                        .iter()
+                        .map(|e| self.content_part(*e, env))
+                        .collect();
+                    let tail = self.content_seq(&exprs[i + 1..], env);
+                    let args = self.gen_args(set.args(), env);
+                    let target = self.expr(set.target(), env);
+                    // 条件为假时规则为空样式(对照 `Ok(Styles::new())`)。
+                    let styles = match set.condition() {
+                        Some(cond) => format!(
+                            "if rt::boolean({}, SPAN)? {{ rt::set_rule(engine, {target}, {args}, SPAN)? }} else {{ rt::styles_empty() }}",
+                            self.expr(cond, env)
+                        ),
+                        None => format!("rt::set_rule(engine, {target}, {args}, SPAN)?"),
+                    };
+                    parts.push(format!("rt::styled_with_map({tail}, {styles})"));
+                    return self.content_join(parts);
+                }
+                ast::Expr::ShowRule(show) => {
+                    let mut parts: Vec<String> = exprs[..i]
+                        .iter()
+                        .map(|e| self.content_part(*e, env))
+                        .collect();
+                    let tail = self.content_seq(&exprs[i + 1..], env);
+                    let sel_arg = match show.selector() {
+                        Some(sel) => format!("Some({})", self.expr(sel, env)),
+                        None => "None".to_string(),
+                    };
+                    let recipe = match show.transform() {
+                        ast::Expr::SetRule(set) => {
+                            let args = self.gen_args(set.args(), env);
+                            let target = self.expr(set.target(), env);
+                            format!(
+                                "rt::show_rule_style({sel_arg}, rt::set_rule(engine, {target}, {args}, SPAN)?, SPAN)?"
+                            )
+                        }
+                        transform => {
+                            format!(
+                                "rt::show_rule({sel_arg}, {}, SPAN)?",
+                                self.expr(transform, env)
+                            )
+                        }
+                    };
+                    parts.push(format!(
+                        "{{ let __tail = {tail}; let __recipe = {recipe}; rt::styled_with_recipe(engine, context, __tail, __recipe)? }}"
+                    ));
+                    return self.content_join(parts);
+                }
+                _ => {}
+            }
+        }
+        let parts: Vec<String> = exprs.iter().map(|e| self.content_part(*e, env)).collect();
+        self.content_join(parts)
+    }
+
+    /// content 的单个部分(表达式产出 Content 构造代码)。
+    fn content_part(&mut self, expr: ast::Expr, env: &Env) -> String {
+        match expr {
+            ast::Expr::Text(t) => format!("rt::text({:?})", t.get().as_str()),
+            ast::Expr::Space(_) => "rt::space()".into(),
+            ast::Expr::Linebreak(_) => "rt::linebreak()".into(),
+            ast::Expr::Parbreak(_) => "rt::parbreak()".into(),
+            ast::Expr::Escape(e) => format!("rt::text({:?})", e.get().to_string()),
+            other => {
+                let value = self.expr(other, env);
+                format!("rt::embed({value})")
+            }
+        }
+    }
+
+    fn content_join(&mut self, parts: Vec<String>) -> String {
+        if parts.is_empty() {
+            "Content::sequence(Vec::new())".into()
+        } else {
+            format!("rt::content_sequence(vec![{}])", parts.join(", "))
+        }
+    }
+
+    /// 捕获列表构造(闭包与 context 共用):局部/模块槽直接物化,
+    /// 全局名存在才物化(创建期不可见的交给体内 import)。
+    fn capture_entries(&mut self, names: &[String], env: &Env) -> (Vec<String>, Vec<String>) {
+        let mut captured = Vec::new();
+        let mut globals = Vec::new();
+        let mut seen = HashSet::new();
+        for name in names {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
+                captured.push(format!("(\"{}\", {rust}.clone())", escape(name)));
+            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
+                let value = self.ref_value(module_ref);
+                captured.push(format!("(\"{}\", {value})", escape(name)));
+            } else {
+                globals.push(name.clone());
+            }
+        }
+        (captured, globals)
     }
 }

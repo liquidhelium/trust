@@ -128,6 +128,8 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.dec(3.14159)",
         ],
         "sysinputs" => vec!["m.who", "m.shout(\"hi\")"],
+        "set_show" => vec!["m.styled", "m.cond(true)", "m.cond(false)", "m.shown"],
+        "context" => vec!["m.ctx-size", "m.ctx-call"],
         _ => vec![],
     }
 }
@@ -238,6 +240,8 @@ fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
         "toplevel" => trust_diff::gen_modules::toplevel::module_init,
         "destructuring" => trust_diff::gen_modules::destructuring::module_init,
         "sysinputs" => trust_diff::gen_modules::sysinputs::module_init,
+        "set_show" => trust_diff::gen_modules::set_show::module_init,
+        "context" => trust_diff::gen_modules::context::module_init,
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -261,7 +265,9 @@ diff_test!(
     content,
     toplevel,
     destructuring,
-    sysinputs
+    sysinputs,
+    set_show,
+    context
 );
 
 #[test]
@@ -290,6 +296,8 @@ fn all_fixtures_covered() {
         "toplevel",
         "destructuring",
         "sysinputs",
+        "set_show",
+        "context",
     ];
     for name in declared.keys() {
         assert!(

@@ -10,12 +10,12 @@ use typst::World;
 use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
-    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Str, Value,
-    ops,
+    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Selector, Str,
+    Transformation, Value, ops,
 };
 use typst::syntax::{Span, Spanned, SyntaxKind, ast};
 
-use ecow::{EcoVec, eco_vec};
+use ecow::{EcoVec, eco_format, eco_vec};
 use typst::diag::SourceDiagnostic;
 
 /// 每构建状态(per-build 槽板)的存储与槽原语。
@@ -761,4 +761,111 @@ pub fn place_mut<'a>(
         };
     }
     Ok(current)
+}
+
+// 样式规则原语(对照 typst-eval/src/rules.rs):求值期**只构造**,
+// 不应用——set 规则构造 `Styles`,show 规则构造 `Recipe`,真正的
+// 变换发生在 typst 的 realize/layout(生成物与解释器共用)。
+
+/// `#set elem(..)`:构造样式表(对照 `Eval for ast::SetRule` 的
+/// `target.set(engine, args)`)。
+pub fn set_rule(
+    engine: &mut Engine,
+    target: Value,
+    args: Args,
+    span: Span,
+) -> SourceResult<typst::foundations::Styles> {
+    let func = target.cast::<Func>().at(span)?;
+    let element = func
+        .to_element()
+        .ok_or_else(|| eco_format!("only element functions can be used in set rules"))
+        .at(span)?;
+    Ok(element.set(engine, args)?.spanned(span).liftable())
+}
+
+/// 空样式表(set 规则条件为假时,对照 `Ok(Styles::new())`)。
+pub fn styles_empty() -> typst::foundations::Styles {
+    typst::foundations::Styles::new()
+}
+
+/// `#show selector?: transform`:构造规则(对照 `Eval for
+/// ast::ShowRule`;transform 为 content/函数值)。
+pub fn show_rule(
+    selector: Option<Value>,
+    transform: Value,
+    span: Span,
+) -> SourceResult<typst::foundations::Recipe> {
+    let selector = selector
+        .map(|value| value.cast::<Selector>().at(span))
+        .transpose()?;
+    let transform = transform.cast::<Transformation>().at(span)?;
+    Ok(typst::foundations::Recipe::new(selector, transform, span))
+}
+
+/// `#show selector?: set ..`:transform 是样式(对照
+/// `Transformation::Style(set.eval(..)?)`)。
+pub fn show_rule_style(
+    selector: Option<Value>,
+    styles: typst::foundations::Styles,
+    span: Span,
+) -> SourceResult<typst::foundations::Recipe> {
+    let selector = selector
+        .map(|value| value.cast::<Selector>().at(span))
+        .transpose()?;
+    Ok(typst::foundations::Recipe::new(
+        selector,
+        Transformation::Style(styles),
+        span,
+    ))
+}
+
+/// 把规则之后的尾部内容挂上样式(对照 `eval_markup` 的
+/// `tail.styled_with_map(styles)`)。
+pub fn styled_with_map(
+    tail: typst::foundations::Content,
+    styles: typst::foundations::Styles,
+) -> typst::foundations::Content {
+    tail.styled_with_map(styles)
+}
+
+/// 把规则之后的尾部内容挂上 show 规则(对照
+/// `tail.styled_with_recipe`;无 selector 的规则立即应用)。
+pub fn styled_with_recipe(
+    engine: &mut Engine,
+    context: Tracked<Context>,
+    tail: typst::foundations::Content,
+    recipe: typst::foundations::Recipe,
+) -> SourceResult<typst::foundations::Content> {
+    tail.styled_with_recipe(engine, context, recipe)
+}
+
+/// `#context expr`:构造推迟求值的闭包(对照 `Eval for
+/// ast::Contextual`,realize/layout 期带 location/styles 求值)。
+pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
+    let root = typst_syntax::parse_code(body_src);
+    // 取 Code 根下的首个表达式节点(闭包节点存的是表达式,非根)。
+    let node = root
+        .children()
+        .find(|child| child.cast::<ast::Expr>().is_some())
+        .expect("context body parses to an expression");
+    let mut scope = Scope::new();
+    for (name, value) in captured {
+        scope.define(name, value.clone());
+    }
+    Func::from(Closure {
+        node: ClosureNode::Context(node.clone()),
+        defaults: vec![],
+        captured: scope,
+        num_pos_params: 0,
+    })
+}
+
+/// context 闭包的载体元素(对照 `ContextElem::new(func).pack()`;
+/// ContextElem 经 `Packed` 包装后实现 IntoValue)。
+pub fn context_body(func: Func) -> typst::foundations::Content {
+    use typst::foundations::IntoValue;
+    match typst::foundations::ContextElem::new(func).into_value() {
+        typst::foundations::Value::Content(content) => content,
+        _ => unreachable!("ContextElem packs to content"),
+    }
 }

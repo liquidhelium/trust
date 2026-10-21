@@ -97,7 +97,8 @@ pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Clo
             }
             ast::Param::Pos(_) => params.push(format_param("_", false, true, false)),
             ast::Param::Named(named) => {
-                params.push(format_param(named.name().as_str(), true, true, false))
+                // 命名参数仅按名绑定(args.named),元数据保持一致(KNOWN-ISSUES #10)。
+                params.push(format_param(named.name().as_str(), true, false, false))
             }
             ast::Param::Spread(_) => params.push(format_param("args", false, true, true)),
         }

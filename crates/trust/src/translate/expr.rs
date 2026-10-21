@@ -253,19 +253,18 @@ impl Ctx {
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
-                // 可变方法:目标须为局部变量(typst 语义:就地修改)。
-                if let ast::Expr::Ident(ident) = access.target()
-                    && let Some((_, rust)) =
-                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
-                {
+                // 可变方法:目标 = 局部变量或字段/accessor 链
+                // (typst 语义:就地修改,对照 `call_method_mut`)。
+                if let Some((root, path)) = self.parse_place(access.target(), env) {
+                    let path_lit = super::block::place_path_lit(&path);
                     return format!(
-                        "{{ let __mut_args = {args}; rt::method_mut(&mut {rust}, \"{}\", __mut_args, SPAN)? }}",
+                        "{{ let __mut_args = {args}; rt::method_mut(rt::place_mut(&mut {root}, {path_lit}, SPAN)?, \"{}\", __mut_args, SPAN)? }}",
                         escape(field)
                     );
                 }
                 self.diag(
                     call.span(),
-                    "可变方法的目标不是局部变量(暂只支持直接局部变量)".into(),
+                    "可变方法的目标须为局部变量或字段/accessor 路径".into(),
                 );
                 return "Value::None".into();
             }

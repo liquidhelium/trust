@@ -18,16 +18,21 @@ use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, uppercase};
 
-/// 顶层绑定:名字 + 槽名 + 形态(函数闭包节点或值 init)。
+/// 顶层绑定:(名字, 槽) 对列表 + 形态(函数闭包节点或值 init;
+/// 解构绑定贡献多个名字)。
 struct TopBinding<'a> {
-    name: String,
-    rust: String,
+    names: Vec<(String, String)>,
     kind: TopKind<'a>,
 }
 
 enum TopKind<'a> {
-    Value { init: ast::Expr<'a> },
-    Fn { closure: ast::Closure<'a> },
+    Value {
+        init: ast::Expr<'a>,
+        pattern: Option<ast::Pattern<'a>>,
+    },
+    Fn {
+        closure: ast::Closure<'a>,
+    },
 }
 
 /// 把一个 typst 模块源文件翻译为 Rust 源码文本。
@@ -62,32 +67,44 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         continue;
                     };
                     let id = cx.fresh_id();
-                    let rust = format!("V{id}_{}", sanitize(name.as_str()));
+                    let slot = format!("V{id}_{}", sanitize(name.as_str()));
                     tops.push(TopBinding {
-                        name: name.as_str().to_string(),
-                        rust,
+                        names: vec![(name.as_str().to_string(), slot)],
                         kind: TopKind::Fn { closure },
                     });
                 }
                 ast::LetBindingKind::Normal(pattern) => {
-                    let names = pattern.bindings();
-                    let [name] = names.as_slice() else {
-                        cx.diag(lets.span(), "顶层解构绑定暂不支持".into());
-                        continue;
-                    };
                     let Some(init) = lets.init() else {
-                        cx.diag(
-                            lets.span(),
-                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
-                        );
+                        if let Some(name) = pattern.bindings().first() {
+                            cx.diag(
+                                lets.span(),
+                                format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                            );
+                        }
                         continue;
                     };
-                    let id = cx.fresh_id();
-                    let rust = format!("V{id}_{}", sanitize(name.as_str()));
+                    // 每个模式名字开一个槽(解构绑定多名)。
+                    let names: Vec<(String, String)> = pattern
+                        .bindings()
+                        .iter()
+                        .map(|ident| {
+                            let id = cx.fresh_id();
+                            (
+                                ident.as_str().to_string(),
+                                format!("V{id}_{}", sanitize(ident.as_str())),
+                            )
+                        })
+                        .collect();
+                    if names.is_empty() {
+                        cx.diag(lets.span(), "顶层绑定没有名字".into());
+                        continue;
+                    }
                     tops.push(TopBinding {
-                        name: name.as_str().to_string(),
-                        rust,
-                        kind: TopKind::Value { init },
+                        names,
+                        kind: TopKind::Value {
+                            init,
+                            pattern: Some(pattern),
+                        },
                     });
                 }
             },
@@ -110,35 +127,86 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut items = String::new();
     for (i, top) in tops.iter().enumerate() {
         // 函数体可见自身(递归)与此前全部绑定;值 init 不含本绑定。
-        let slot_of = |j: usize| (tops[j].name.clone(), Ref::Slot(tops[j].rust.clone()));
+        let slots_of = |range: std::ops::RangeInclusive<usize>| {
+            range
+                .flat_map(|j| {
+                    tops[j]
+                        .names
+                        .iter()
+                        .map(|(name, slot)| (name.clone(), Ref::Slot(slot.clone())))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
         let env = Env {
             locals: Vec::new(),
-            module: (0..=i).map(slot_of).collect(),
+            module: slots_of(0..=i),
         };
-        let init_env = Env {
-            locals: Vec::new(),
-            module: (0..i).map(slot_of).collect(),
+        let init_env = if i > 0 {
+            Env {
+                locals: Vec::new(),
+                module: slots_of(0..=i - 1),
+            }
+        } else {
+            Env {
+                locals: Vec::new(),
+                module: Vec::new(),
+            }
         };
-        let slot = &top.rust;
-        let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
+        for (_, slot) in &top.names {
+            let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
+        }
         match &top.kind {
-            TopKind::Value { init } => {
+            TopKind::Value {
+                init,
+                pattern: None,
+            } => {
+                let (name, slot) = &top.names[0];
                 let expr = cx.expr(*init, &init_env);
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = {expr}; rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
-                    escape(&top.name)
+                    escape(name)
+                );
+            }
+            TopKind::Value {
+                init,
+                pattern: Some(pattern),
+            } => {
+                // 顶层解构:槽名预绑为临时局部,destructure 写回这些
+                // 名字,再逐槽填充注册。
+                let expr = cx.expr(*init, &init_env);
+                let mut tmp_env = init_env.clone();
+                let mut decls = String::new();
+                for (name, slot) in &top.names {
+                    tmp_env.locals.push((name.clone(), slot.clone()));
+                    let _ = writeln!(decls, "        let mut {slot} = Value::None;");
+                }
+                let stmts = cx.destructure(*pattern, "v.clone()".to_string(), &mut tmp_env, false);
+                let mut fills = String::new();
+                for (name, slot) in &top.names {
+                    let _ = writeln!(
+                        fills,
+                        "        rt::fill(&__st.{slot}, {slot}.clone())?; scope.define(\"{}\", {slot}.clone());",
+                        escape(name)
+                    );
+                }
+                let _ = writeln!(
+                    init_code,
+                    "    {{ let v = {expr};
+{decls}{stmts}{fills}    }}"
                 );
             }
             TopKind::Fn { closure } => {
-                let fun = format!("f_{}", lowercase(&top.rust));
-                let data = format!("D_{}", uppercase(&top.rust));
+                let (name, slot) = &top.names[0];
+                let fun = format!("f_{}", lowercase(slot));
+                let data = format!("D_{}", uppercase(slot));
                 items.push_str(&cx.gen_function(&fun, *closure, &env));
-                items.push_str(&gen_func_data(&data, &fun, &top.name, *closure));
+                items.push_str(&gen_func_data(&data, &fun, name, *closure));
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = Value::Func(Func::from(&{data})); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
-                    escape(&top.name)
+                    escape(name)
                 );
             }
         }

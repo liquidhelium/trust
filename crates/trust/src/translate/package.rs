@@ -452,23 +452,29 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     own.push((name.as_str().to_string(), slot.clone()));
                 }
                 ast::LetBindingKind::Normal(pattern) => {
-                    let names = pattern.bindings();
-                    let [name] = names.as_slice() else {
-                        cx.diag(lets.span(), "顶层解构绑定暂不支持".into());
-                        continue;
-                    };
                     let Some(init_expr) = lets.init() else {
-                        cx.diag(
-                            lets.span(),
-                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
-                        );
+                        if let Some(name) = pattern.bindings().first() {
+                            cx.diag(
+                                lets.span(),
+                                format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                            );
+                        }
                         continue;
                     };
-                    let nth = own_seen_counts.get(name.as_str()).copied().unwrap_or(0);
-                    own_seen_counts.insert(name.as_str().to_string(), nth + 1);
-                    let Some(slot) = nth_slot(plan, name.as_str(), nth) else {
+                    // 每个模式名字配对本文件的下一个同名槽(解构多名)。
+                    let mut bound: Vec<(String, String)> = Vec::new();
+                    for ident in pattern.bindings().iter() {
+                        let name = ident.as_str();
+                        let nth = own_seen_counts.get(name).copied().unwrap_or(0);
+                        own_seen_counts.insert(name.to_string(), nth + 1);
+                        let Some(slot) = nth_slot(plan, name, nth) else {
+                            continue;
+                        };
+                        bound.push((name.to_string(), slot));
+                    }
+                    if bound.is_empty() {
                         continue;
-                    };
+                    }
                     let mut env2 = env.clone();
                     for (seen, seen_slot) in &own {
                         env2.module
@@ -476,17 +482,45 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     }
                     // init 在绑定生效前求值:同名引用解析到外层(如全局
                     // 类型),env2 不含本绑定。
-                    let value = cx.expr(init_expr, &env2);
-                    let _ = writeln!(
-                        binding_code,
-                        "    {{ let v = {value}; rt::fill(&__st.{slot}, v.clone())?; }}"
-                    );
-                    let _ = writeln!(
-                        file_defines,
-                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                        escape(name.as_str())
-                    );
-                    own.push((name.as_str().to_string(), slot.clone()));
+                    if let [(name, slot)] = bound.as_slice() {
+                        let value = cx.expr(init_expr, &env2);
+                        let _ = writeln!(
+                            binding_code,
+                            "    {{ let v = {value}; rt::fill(&__st.{slot}, v.clone())?; }}"
+                        );
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(name)
+                        );
+                    } else {
+                        // 顶层解构:槽名预绑为临时局部,destructure 写回
+                        // 这些名字,再逐槽填充注册。
+                        let value = cx.expr(init_expr, &env2);
+                        let mut tmp_env = env2.clone();
+                        let mut decls = String::new();
+                        for (name, slot) in &bound {
+                            tmp_env.locals.push((name.clone(), slot.clone()));
+                            let _ = writeln!(decls, "        let mut {slot} = Value::None;");
+                        }
+                        let stmts =
+                            cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, false);
+                        let mut fills = String::new();
+                        for (name, slot) in &bound {
+                            let _ =
+                                writeln!(fills, "        rt::fill(&__st.{slot}, {slot}.clone())?;");
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                escape(name)
+                            );
+                        }
+                        let _ = writeln!(
+                            binding_code,
+                            "    {{ let v = {value};\n{decls}{stmts}{fills}    }}"
+                        );
+                    }
+                    own.extend(bound);
                 }
             }
         }

@@ -43,7 +43,11 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
     let _ = context;
     { let v = Value::Func(Func::from(&D_V0_scale)); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
-    { let v = Value::Int(10); rt::fill(&__st.V1_base, v.clone())?; scope.define("base", v); }
+    { let v = Value::Int(10);
+        let mut V1_base = Value::None;
+V1_base = v.clone();
+        rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
+    }
     { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
     Ok(Module::new("rich", scope))
 }
@@ -64,7 +68,7 @@ fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args)
 fn f_v0_scale_params() -> Vec<NativeParamInfo> {
     vec![
         NativeParamInfo { name: "x", docs: "", def_site: None, input: CastInfo::Any, default: None, positional: true, named: false, variadic: false, required: true, settable: false },
-        NativeParamInfo { name: "k", docs: "", def_site: None, input: CastInfo::Any, default: None, positional: true, named: true, variadic: false, required: true, settable: false },
+        NativeParamInfo { name: "k", docs: "", def_site: None, input: CastInfo::Any, default: None, positional: false, named: true, variadic: false, required: false, settable: false },
     ]
 }
 #[allow(non_snake_case, dead_code)]

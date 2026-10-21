@@ -678,71 +678,6 @@ pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> 
 
 const SPAN0: Span = Span::detached();
 
-/// accessor 方法赋值(`a.at(i) = v` / `first` / `last`,对照
-/// typst-eval/src/methods.rs::call_method_access)。
-pub fn accessor_assign(
-    target: &mut Value,
-    method: &str,
-    index: Option<Value>,
-    value: Value,
-    span: Span,
-) -> SourceResult<()> {
-    match target {
-        Value::Array(array) if matches!(method, "first" | "last" | "at") => {
-            let slot: &mut Value = match method {
-                "first" => array.first_mut().at(span)?,
-                "last" => array.last_mut().at(span)?,
-                _ => {
-                    let i = index
-                        .unwrap_or_else(|| Value::None)
-                        .cast::<i64>()
-                        .at(span)?;
-                    array.at_mut(i).at(span)?
-                }
-            };
-            *slot = value;
-            Ok(())
-        }
-        Value::Dict(dict) if method == "at" => {
-            let key = index
-                .unwrap_or_else(|| Value::None)
-                .cast::<Str>()
-                .at(span)?;
-            {
-                let slot = dict.at_mut(&key).at(span)?;
-                *slot = value;
-            }
-            Ok(())
-        }
-        other => bail!(span, "type {} has no method `{}`", other.ty(), method),
-    }
-}
-
-/// 多层字段链赋值 `d.a.b = v`(逐层取可变字典,对照 `Access` 链语义)。
-pub fn field_assign_path(
-    target: &mut Value,
-    path: &[&str],
-    value: Value,
-    span: Span,
-) -> SourceResult<()> {
-    let mut current = target;
-    for (depth, key) in path.iter().enumerate() {
-        let last = depth + 1 == path.len();
-        match current {
-            Value::Dict(dict) if last => {
-                dict.insert((*key).into(), value);
-                return Ok(());
-            }
-            Value::Dict(dict) => {
-                let key = typst::foundations::Str::from(*key);
-                current = dict.at_mut(&key).at(span)?;
-            }
-            other => bail!(span, "cannot mutate field of {}", other.ty()),
-        }
-    }
-    Ok(())
-}
-
 /// 显式降级占位:发出 warning 并返回 none(不静默降级原则——
 /// 生成物在此处功能缺失,必须让使用者看见)。
 pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
@@ -752,4 +687,78 @@ pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
     );
     engine.sink.warn(diagnostic);
     Ok(Value::None)
+}
+
+/// 可变位置(赋值 / 可变方法的目标)的路径段,对照 typst-eval 的
+/// `access.rs`:字段访问与 accessor 方法(`first`/`last`/`at`)。
+///
+/// typst 语义(`call_method_access` / `access_dict`):
+/// - 字段段要求当前值是字典(`Dict::at_mut`);
+/// - `at` 段在数组上收整数下标、在字典上收字符串键;
+/// - `first`/`last` 仅数组。
+pub enum PlaceSeg {
+    /// 字典字段名(生成期转义后的字面量)。
+    Field(String),
+    /// `at` 的下标/键(生成代码求值出的 `Value`)。
+    At(Value),
+    First,
+    Last,
+}
+
+/// 沿路径段取可变引用(对照 `Expr::access`)。
+pub fn place_mut<'a>(
+    root: &'a mut Value,
+    path: &[PlaceSeg],
+    span: Span,
+) -> SourceResult<&'a mut Value> {
+    let mut current = root;
+    for seg in path {
+        current = match seg {
+            PlaceSeg::Field(name) => match current {
+                Value::Dict(dict) => dict.at_mut(name).at(span)?,
+                value => {
+                    let ty = value.ty();
+                    bail!(span, "cannot mutate fields on type {ty}")
+                }
+            },
+            PlaceSeg::At(key) => match current {
+                Value::Array(array) => {
+                    let index: i64 = key.clone().cast().at(span)?;
+                    array.at_mut(index).at(span)?
+                }
+                Value::Dict(dict) => {
+                    let key: typst::foundations::Str = key.clone().cast().at(span)?;
+                    dict.at_mut(&key).at(span)?
+                }
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("at").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `at`")
+                }
+            },
+            PlaceSeg::First => match current {
+                Value::Array(array) => array.first_mut().at(span)?,
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("first").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `first`")
+                }
+            },
+            PlaceSeg::Last => match current {
+                Value::Array(array) => array.last_mut().at(span)?,
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("last").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `last`")
+                }
+            },
+        };
+    }
+    Ok(current)
 }

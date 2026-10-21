@@ -164,76 +164,46 @@ impl Ctx {
                         | ast::BinOp::DivAssign
                 )
             {
-                // 复合赋值 `x += y` 等价 `x = x + y`(右侧读旧值)。
-                if binary.op() != ast::BinOp::Assign
-                    && let ast::Expr::Ident(ident) = binary.lhs()
-                    && let Some((_, rust)) =
-                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
-                {
+                // 目标:局部变量(空路径)或可变位置(字段/accessor 链),
+                // 对照 typst 的 `Expr::access`;复合赋值读旧值再写回。
+                if let Some((root, path)) = self.parse_place(binary.lhs(), &env) {
+                    let path_lit = place_path_lit(&path);
                     let rhs = self.expr(binary.rhs(), &env);
                     let op = match binary.op() {
-                        ast::BinOp::AddAssign => "add",
-                        ast::BinOp::SubAssign => "sub",
-                        ast::BinOp::MulAssign => "mul",
-                        ast::BinOp::DivAssign => "div",
+                        ast::BinOp::Assign => None,
+                        ast::BinOp::AddAssign => Some("add"),
+                        ast::BinOp::SubAssign => Some("sub"),
+                        ast::BinOp::MulAssign => Some("mul"),
+                        ast::BinOp::DivAssign => Some("div"),
                         _ => unreachable!(),
                     };
-                    let _ = writeln!(
-                        out,
-                        "    {{ let __rhs = {rhs}; {rust} = ops::{op}({rust}, __rhs).at(SPAN)?; }}"
-                    );
-                    continue;
-                }
-                // 局部重赋值 `x = e`(typst 局部可变;遮蔽链上最新槽)。
-                if let ast::Expr::Ident(ident) = binary.lhs() {
-                    let name = ident.as_str();
-                    match env.locals.iter().rev().find(|(n, _)| n == name) {
-                        Some((_, rust)) => {
-                            let value = self.expr(binary.rhs(), &env);
-                            let _ = writeln!(out, "    {rust} = {value};");
+                    match op {
+                        Some(op) => {
+                            let _ = writeln!(
+                                out,
+                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, SPAN)?; *__p = ops::{op}((*__p).clone(), __rhs).at(SPAN)?; }}"
+                            );
                         }
                         None => {
-                            self.diag(
-                                binary.span(),
-                                format!("赋值目标 `{name}` 不是局部变量(模块槽赋值暂不支持)"),
+                            let _ = writeln!(
+                                out,
+                                "    {{ let __rhs = {rhs}; *rt::place_mut(&mut {root}, {path_lit}, SPAN)? = __rhs; }}"
                             );
                         }
                     }
-                } else if let Some((rust, fields)) = field_chain_place(binary.lhs(), &env) {
-                    // 字段(链)赋值 `d.k = v` / `d.a.b = v`:就地修改局部字典。
-                    let path = fields
-                        .iter()
-                        .map(|f| format!("\"{}\"", escape(f)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let value = self.expr(binary.rhs(), &env);
-                    let _ = writeln!(
-                        out,
-                        "    {{ let __rhs = {value}; rt::field_assign_path(&mut {rust}, &[{path}], __rhs, SPAN)?; }}"
-                    );
-                } else if let ast::Expr::FuncCall(call) = binary.lhs()
-                    && let ast::Expr::FieldAccess(access) = call.callee()
-                    && let ast::Expr::Ident(ident) = access.target()
-                    && matches!(access.field().as_str(), "at" | "first" | "last")
-                    && let Some((_, rust)) =
-                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
-                {
-                    // accessor 赋值:`a.at(i) = v` / `a.first() = v`。
-                    let method = access.field().as_str();
-                    let mut index = "None".to_string();
-                    for arg in call.args().items() {
-                        if let ast::Arg::Pos(expr) = arg {
-                            index = format!("Some({})", self.expr(expr, &env));
-                            break;
-                        }
-                    }
-                    let value = self.expr(binary.rhs(), &env);
-                    let _ = writeln!(
-                        out,
-                        "    {{ let __rhs = {value}; rt::accessor_assign(&mut {rust}, \"{method}\", {index}, __rhs, SPAN)?; }}"
+                } else if let ast::Expr::Ident(ident) = binary.lhs() {
+                    self.diag(
+                        binary.span(),
+                        format!(
+                            "赋值目标 `{}` 不是局部变量(模块槽赋值暂不支持)",
+                            ident.as_str()
+                        ),
                     );
                 } else {
-                    self.diag(binary.span(), "字段链/复杂目标赋值暂不支持".into());
+                    self.diag(
+                        binary.span(),
+                        "赋值目标须为局部变量或字段/accessor 路径".into(),
+                    );
                 }
                 continue;
             }
@@ -255,24 +225,92 @@ impl Ctx {
             }
         }
     }
-}
+    /// 解析可变位置(赋值/可变方法目标):根须为局部变量,路径段为
+    /// 字段访问与 accessor 方法(`at`/`first`/`last`),对照 typst-eval
+    /// `access.rs` 可 access 的形态。返回 (根局部 rust 名, 路径段表达式)。
+    ///
+    /// 注:`at` 的参数在段处求值,先走目标链后求参数(纯下标表达式
+    /// 下与 typst 的"参数先求"等价;带副作用的下标才有顺序差)。
+    pub(super) fn parse_place(
+        &mut self,
+        expr: ast::Expr,
+        env: &Env,
+    ) -> Option<(String, Vec<String>)> {
+        let mut segs = Vec::new();
+        let mut root: Option<String> = None;
+        if !self.walk_place(expr, env, &mut segs, &mut root) {
+            return None;
+        }
+        let root = root?;
+        let (_, rust) = env.locals.iter().rev().find(|(n, _)| *n == root)?;
+        Some((rust.clone(), segs))
+    }
 
-/// 赋值目标为 `x.a.b.c` 形态:返回 (根局部 rust 名, 字段链)。
-fn field_chain_place(expr: ast::Expr, env: &Env) -> Option<(String, Vec<String>)> {
-    fn walk(expr: ast::Expr, fields: &mut Vec<String>) -> Option<String> {
+    fn walk_place(
+        &mut self,
+        expr: ast::Expr,
+        env: &Env,
+        segs: &mut Vec<String>,
+        root: &mut Option<String>,
+    ) -> bool {
         match expr {
-            ast::Expr::Ident(ident) => Some(ident.as_str().to_string()),
-            ast::Expr::FieldAccess(access) => {
-                let root = walk(access.target(), fields)?;
-                fields.push(access.field().as_str().to_string());
-                Some(root)
+            ast::Expr::Ident(ident) => {
+                if root.is_some() {
+                    return false;
+                }
+                *root = Some(ident.as_str().to_string());
+                true
             }
-            _ => None,
+            ast::Expr::Parenthesized(p) => self.walk_place(p.expr(), env, segs, root),
+            ast::Expr::FieldAccess(access) => {
+                if !self.walk_place(access.target(), env, segs, root) {
+                    return false;
+                }
+                segs.push(format!(
+                    "rt::PlaceSeg::Field(String::from(\"{}\"))",
+                    escape(access.field().as_str())
+                ));
+                true
+            }
+            ast::Expr::FuncCall(call) => {
+                let ast::Expr::FieldAccess(access) = call.callee() else {
+                    return false;
+                };
+                let seg = match access.field().as_str() {
+                    "at" => {
+                        let Some(ast::Arg::Pos(index)) = call.args().items().next() else {
+                            return false;
+                        };
+                        if !self.walk_place(access.target(), env, segs, root) {
+                            return false;
+                        }
+                        format!("rt::PlaceSeg::At({})", self.expr(index, env))
+                    }
+                    "first" | "last" => {
+                        if !self.walk_place(access.target(), env, segs, root) {
+                            return false;
+                        }
+                        if access.field().as_str() == "first" {
+                            "rt::PlaceSeg::First".into()
+                        } else {
+                            "rt::PlaceSeg::Last".into()
+                        }
+                    }
+                    _ => return false,
+                };
+                segs.push(seg);
+                true
+            }
+            _ => false,
         }
     }
-    let mut fields = Vec::new();
-    let root = walk(expr, &mut fields)?;
-    let (_, rust) = env.locals.iter().rev().find(|(n, _)| *n == root)?;
-    // 后序收集已是从根到叶的字段序,无需 reverse。
-    Some((rust.clone(), fields))
+}
+
+/// 路径段的数组字面量(空路径给 `&[]`,推断为空切片)。
+pub(super) fn place_path_lit(path: &[String]) -> String {
+    if path.is_empty() {
+        "&[]".into()
+    } else {
+        format!("&[{}]", path.join(", "))
+    }
 }

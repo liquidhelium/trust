@@ -59,7 +59,7 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let _ = __out;
     if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(SPAN)?, std::cmp::Ordering::Greater)), SPAN)? { { let mut __out = Value::None;
     let _ = __out;
-    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(&mut out, "push", __mut_args, SPAN)? }
+    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(rt::place_mut(&mut out, &[], SPAN)?, "push", __mut_args, SPAN)? }
 } } else { Value::None }
 };
       __out = rt::join(__out, __v, SPAN)?;

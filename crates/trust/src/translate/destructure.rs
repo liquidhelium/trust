@@ -152,25 +152,12 @@ impl Ctx {
                 out
             }
             ast::Pattern::Normal(other) => {
-                // 解构赋值的 accessor 目标:`(a.at(i), b.at(j)) = ...`。
-                if assign
-                    && let ast::Expr::FuncCall(call) = other
-                    && let ast::Expr::FieldAccess(access) = call.callee()
-                    && let ast::Expr::Ident(ident) = access.target()
-                    && matches!(access.field().as_str(), "at" | "first" | "last")
-                    && let Some((_, rust)) =
-                        env.locals.iter().rev().find(|(n, _)| *n == ident.as_str())
-                {
-                    let method = access.field().as_str();
-                    let mut index = "None".to_string();
-                    for arg in call.args().items() {
-                        if let ast::Arg::Pos(expr) = arg {
-                            index = format!("Some({})", self.expr(expr, env));
-                            break;
-                        }
-                    }
+                // 解构赋值的目标:局部或可变位置(字段/accessor 链),
+                // 对照 typst 的 `Access` 语义:`(a.at(i), b.c.at(j)) = ...`。
+                if assign && let Some((root, path)) = self.parse_place(other, env) {
+                    let path_lit = super::block::place_path_lit(&path);
                     return format!(
-                        "rt::accessor_assign(&mut {rust}, \"{method}\", {index}, {value}, SPAN)?;\n"
+                        "{{ *rt::place_mut(&mut {root}, {path_lit}, SPAN)? = {value}; }}\n"
                     );
                 }
                 self.diag(other.span(), "解构模式此处须为标识符".into());

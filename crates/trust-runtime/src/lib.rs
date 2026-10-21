@@ -185,10 +185,24 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
         .map(|(_, src)| src.clone())
 }
 
-/// 解释片段(`closure`/`context_closure`)的虚拟源:登记进
-/// [`CLOSURE_SOURCES`] 并包装成 markup 合法形态(`#let … = …`),
-/// 片段节点的 span 从此携带 FileId,解释执行的错误可定位到片段行。
+/// 解释片段(`closure`/`context_closure`)的虚拟源:包装成 markup 合法
+/// 形态(`#let … = …`)并登记进 [`CLOSURE_SOURCES`],片段节点的 span 从此
+/// 携带 FileId。**按片段文本缓存 parse 结果**——闭包值在每次求值期
+/// 重建(如循环体内的谓词),同文本片段共享一棵 AST,免去重复 parse
+/// (这是闭包密集负载的主要回归源)。
 fn virtual_closure_source(src: &str) -> typst::syntax::Source {
+    static CACHE: std::sync::LazyLock<
+        std::sync::RwLock<std::collections::HashMap<String, typst::syntax::Source>>,
+    > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    let trimmed = src.trim_start();
+    let text = if trimmed.starts_with("let ") {
+        format!("#{trimmed}")
+    } else {
+        format!("#let __trust_closure = ({trimmed})")
+    };
+    if let Some(hit) = CACHE.read().unwrap().get(&text) {
+        return hit.clone();
+    }
     let n = CLOSURE_SOURCES.read().unwrap().len();
     let id = typst::syntax::RootedPath::new(
         typst::syntax::VirtualRoot::Project,
@@ -196,18 +210,9 @@ fn virtual_closure_source(src: &str) -> typst::syntax::Source {
             .expect("valid closure path"),
     )
     .intern();
-    // 命名绑定形态直接嵌入(init 是 block 或单行,markup 下合法);
-    // 其余(裸闭包、context 体)包一层括号再赋给合成名——markup 的
-    // `#let x = expr` init 在**行尾**截止,裸闭包体跨行会被截断成空体,
-    // 括号强制 code 上下文才能跨行(匿名形态本就无自引用,名字不可达)。
-    let trimmed = src.trim_start();
-    let text = if trimmed.starts_with("let ") {
-        format!("#{trimmed}")
-    } else {
-        format!("#let __trust_closure = ({trimmed})")
-    };
     let source = typst::syntax::Source::new(id, text.clone());
-    CLOSURE_SOURCES.write().unwrap().push((id, text));
+    CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
+    CACHE.write().unwrap().insert(text, source.clone());
     source
 }
 

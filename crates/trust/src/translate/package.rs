@@ -303,9 +303,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 };
                 let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
                 state_fields.push(slot.clone());
+                let ext_at = cx.span_of(edge.span);
                 let _ = writeln!(
                     import_fills,
-                    "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\")?))?;"
+                    "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\", {ext_at})?))?;"
                 );
                 match &edge.items {
                     ImportItems::Bare | ImportItems::Rename(_) => {
@@ -328,7 +329,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             ));
                             let _ = writeln!(
                                 file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", SPAN)?);",
+                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
                                 escape(&as_name),
                                 escape(item)
                             );
@@ -413,7 +414,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         state_fields.push(slot.clone());
                         let _ = writeln!(
                             import_fills,
-                            "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st)?))?;"
+                            "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
                         );
                     }
                     env.module.push((bound.clone(), Ref::Slot(slot.clone())));
@@ -724,11 +725,17 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             body,
             "\n    /// `{}` 的模块作用域(import 抄入 + 本文件顶层绑定),从已填槽位构建。\n\
              \x20   #[allow(non_snake_case, dead_code)]\n\
-             \x20   pub(super) fn module(__st: &std::sync::Arc<__State>) -> SourceResult<Module> {{\n\
+             \x20   pub(super) fn module(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n\
              \x20       let _ = __st;\n\
-             \x20       let mut scope = Scope::new();\n{file_defines}        Ok(Module::new(\"{}\", scope).with_content(rt::read_content(&__st.{body_slot})?))\n    }}",
+             \x20       let mut scope = Scope::new();\n{file_defines}        let __fid = typst::syntax::RootedPath::new(\n\
+             \x20           typst::syntax::VirtualRoot::Project,\n\
+             \x20           typst::syntax::VirtualPath::new({path_repr:?}).expect(\"path\"),\n\
+             \x20       )\n\
+             \x20       .intern();\n\
+             \x20       Ok(Module::new(\"{}\", scope).with_content(rt::read_content(&__st.{body_slot})?).with_file_id(__fid))\n    }}",
             plan.path,
-            module_stem(&plan.path)
+            module_stem(&plan.path),
+            path_repr = plan.path
         );
         // 目录形态的完整模块路径段(镜像 typ 路径,目录消歧)。
         let tree_full: Vec<String> = plan

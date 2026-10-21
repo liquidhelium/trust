@@ -23,6 +23,8 @@ impl Ctx {
         let mut fn_env = env.clone();
         // 是否需要 `__st`(函数体/默认值引用了模块槽)在生成中追踪。
         self.used_state = false;
+        // 函数体上下文:return 编译为 Rust return,仅此上下文合法。
+        self.in_fn += 1;
         // sink 参数延后解包(take 收剩余,须在显式参数之后)。
         let mut sinks: Vec<Option<String>> = Vec::new();
 
@@ -93,6 +95,7 @@ impl Ctx {
         } else {
             ""
         };
+        self.in_fn -= 1;
         format!(
             "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{body}}}\n"
         )

@@ -4,7 +4,6 @@
 //! 的 `Value`,零私有值模型;所有语义函数与 `typst-eval` 的解释实现逐条
 //! 对照(报错文案与 span 行为一致),差分测试以此为验收。
 
-use comemo::Track;
 use comemo::Tracked;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
@@ -13,10 +12,11 @@ use typst::foundations::{
     Arg, Args, Array, Closure, ClosureNode, Content, Context, Func, IntoValue, Module, Scope,
     Selector, Str, Transformation, Value, ops,
 };
-use typst::syntax::{Span, Spanned, SyntaxKind, ast};
+use typst::syntax::ast::{self, AstNode};
+use typst::syntax::{Span, Spanned, SyntaxKind};
 
 use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::SourceDiagnostic;
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 
 /// 每构建状态(per-build 槽板)的存储与槽原语。
 ///
@@ -43,7 +43,7 @@ pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
 /// 无值回退调用期全局查找(对照创建期不可见名字的调用期解析)。
 pub fn read_or(
     slot: &std::sync::OnceLock<Value>,
-    engine: &Engine,
+    engine: &mut Engine,
     name: &str,
 ) -> SourceResult<Value> {
     match slot.get() {
@@ -79,10 +79,11 @@ pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()>
 
 /// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`:
 /// 局部之外查 `library.global`,miss 且名字为 `std` 时特判指向
-/// `library.std`;未命中报同款 `unknown variable`)。
-pub fn global(engine: &Engine, name: &str, span: Span) -> SourceResult<Value> {
+/// `library.std`;未命中报同款 `unknown variable`)。读取走
+/// `read_checked`,与原生一致地发出弃用警告。
+pub fn global(engine: &mut Engine, name: &str, span: Span) -> SourceResult<Value> {
     match engine.library.global.scope().get(name) {
-        Some(binding) => Ok(binding.read().clone()),
+        Some(binding) => Ok(binding.read_checked((engine, span)).clone()),
         None if name == "std" => Ok(engine.library.std.read().clone()),
         None => bail!(span, "unknown variable: {name}"),
     }
@@ -91,78 +92,179 @@ pub fn global(engine: &Engine, name: &str, span: Span) -> SourceResult<Value> {
 /// 全局查找,不存在返回 `None`(对照 typst 捕获语义:创建期不可见的
 /// 名字不捕获,由闭包体内自己的 import 在调用期绑定;`std` 特判
 /// 与 [`global`] 同款)。
-pub fn global_opt(engine: &Engine, name: &str) -> SourceResult<Option<Value>> {
+pub fn global_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
     Ok(match engine.library.global.scope().get(name) {
-        Some(binding) => Some(binding.read().clone()),
+        Some(binding) => Some(binding.read_checked((engine, Span::detached())).clone()),
         None if name == "std" => Some(engine.library.std.read().clone()),
         None => None,
     })
 }
 
-/// 字段访问 `target.name`(对照 `ast::FieldAccess` 求值:`Value::field`)。
-pub fn field(target: &Value, name: &str, span: Span) -> SourceResult<Value> {
-    target.field(name, ()).at(span)
-}
-
-/// 调用一个函数值;类型值调用其构造器(对照解释器:`str(1)`、`int("5")`)。
-pub fn call(
-    func: &Value,
-    engine: &mut Engine,
-    context: Tracked<Context>,
-    span: Span,
-    args: Args,
-) -> SourceResult<Value> {
-    match func {
-        Value::Func(func) => func.call(engine, context, args),
-        Value::Type(ty) => {
-            let ctor = ty.constructor().at(span)?;
-            ctor.call(engine, context, args)
-        }
-        other => bail!(span, "expected function or content, found {}", other.ty()),
-    }
-}
-
-/// 方法调用 `target.name(args..)`(对照 `eval_field_callee`:类型作用域
-/// 的方法把 target 作为第一个位置参数;Symbol/Func/Type/Module 允许字段
-/// 调用语法;其余情况按原版文案报错)。
-pub fn method(
+/// 字段访问 `target.name`(对照 `access_field`:`Value::field` +
+/// get-rule 样式链回退——元素函数的字段(如 `text.size`)在静态字段
+/// 未命中时按 context 样式链取值;sink 透传 engine 以发出弃用警告)。
+pub fn field(
     target: &Value,
     name: &str,
     engine: &mut Engine,
     context: Tracked<Context>,
     span: Span,
-    args: Args,
 ) -> SourceResult<Value> {
-    let mut args = args;
-    let callee = if let Some(method) = target.ty().scope().get(name) {
-        // 方法调用:target 作为第一个位置参数。
-        args.insert(0, args.span, target.clone());
-        method.read().clone()
+    let err = match target.field(name, (engine, span)).at(span) {
+        Ok(value) => return Ok(value),
+        Err(err) => err,
+    };
+    // Check whether this is a get rule field access(对照 access_field:
+    // styles 校验延迟到确认确为样式链字段之后)。
+    if let Value::Func(func) = target
+        && let Some(element) = func.to_element()
+        && let Some(id) = element.field_id(name)
+    {
+        let styles = context.styles();
+        let chain = styles.as_ref().map(|&s| s).unwrap_or_default();
+        if let Ok(value) = element.field_from_styles(id, chain) {
+            let _ = styles.at(span)?;
+            return Ok(value);
+        }
+    }
+    Err(err)
+}
+
+/// 调用点护栏:函数调用深度(对照 `vm.engine.route.check_call_depth`,
+/// 互递归触发报错而非段错误)。
+pub fn check_call_depth(engine: &Engine, span: Span) -> SourceResult<()> {
+    engine.route.check_call_depth().at(span)
+}
+
+/// 解析被调值(对照原生 `callee.eval()?.cast::<Func>()`:函数值、
+/// 类型值(取构造器)、符号(取关联函数)均可调;其余按 cast 文案
+/// 报错——实参在此之前不会被求值,与原生求值序一致)。按值收
+/// (调用点持有临时值,常见路径零克隆)。
+pub fn callee(value: Value, span: Span) -> SourceResult<Func> {
+    if let Value::Func(func) = value {
+        return Ok(func);
+    }
+    value.cast::<Func>().at(span)
+}
+
+/// 统一调用路径(对照 `call_func`):func 以调用点 span 标记、错误挂
+/// tracepoint(`error occurred in this call of function ...`)、栈上
+/// `stacker::maybe_grow` 扩栈;方法调用经 `insert` 把目标作为首个
+/// 位置参数(对照 `args.insert(0, target_expr.span(), target)`)。
+pub fn call_with(
+    func: Func,
+    insert: Option<(Value, Span)>,
+    span: Span,
+    mut args: Args,
+    engine: &mut Engine,
+    context: Tracked<Context>,
+) -> SourceResult<Value> {
+    let func = func.spanned(span);
+    if let Some((target, target_span)) = insert {
+        args.insert(0, target_span, target);
+    }
+    // tracepoint 名字仅在错误路径物化(trace 闭包惰性调用)。不包
+    // stacker::maybe_grow:调用深度由 check_call_depth 护栏(80 层)
+    // 截停,不会走到栈溢出;每调用一次的栈探测是纯税(原生在解释
+    // 路径上需要它,编译路径不需要)。
+    func.call(engine, context, args).trace(
+        engine.world,
+        || typst::diag::Tracepoint::Call(func.name().map(EcoString::from)),
+        span,
+    )
+}
+
+/// 方法调用被调值解析(对照 `eval_field_callee`:类型作用域的方法
+/// 优先,其次 content 元素作用域;Symbol/Func/Type/Module 允许字段
+/// 调用语法;报错按原版两段式 + hint 体系)。
+///
+/// 返回 `(函数值, 方法调用时的目标值)`;方法调用时调用方须把目标
+/// 作为首个位置参数传入(目标按值带回,避免一次克隆)。
+pub fn method_callee(
+    target: Value,
+    name: &str,
+    access_text: &str,
+    engine: &mut Engine,
+    span: Span,
+) -> SourceResult<(Func, Option<Value>)> {
+    let sink = (&mut *engine, span);
+    let mut is_method_call = false;
+    let callee_value = if let Some(method) = target.ty().scope().get(name) {
+        is_method_call = true;
+        method.read_checked(sink).clone()
+    } else if let Value::Content(content) = &target
+        && let Some(method) = content.elem().scope().get(name)
+    {
+        is_method_call = true;
+        method.read_checked(sink).clone()
     } else if matches!(
-        target,
+        &target,
         Value::Symbol(_) | Value::Func(_) | Value::Type(_) | Value::Module(_)
     ) {
-        target.field(name, ()).at(span)?
+        target.field(name, sink).at(span)?
     } else {
-        // 与原版一致的两段式报错:字段存在但不可调用 / 字段不存在。
-        match target.field(name, ()) {
-            Ok(_) => {
-                bail!(
-                    span,
-                    "`{name}` is not a valid method for type `{}`",
-                    target.ty().short_name()
-                )
+        // Otherwise we cannot call this field and produce an error.
+        match target.field(name, sink) {
+            Ok(callee_value) => {
+                let is_dict = matches!(target, Value::Dict(_));
+                let is_named = matches!(target, Value::Args(_));
+                let (kind, ty_name) = element_or_type_with_name(&target);
+                let message = if is_dict {
+                    EcoString::from("cannot directly call dictionary keys as functions")
+                } else if is_named {
+                    EcoString::from("cannot directly call named argument fields as functions")
+                } else {
+                    eco_format!("`{name}` is not a valid method for {kind} `{ty_name}`")
+                };
+                let mut err =
+                    SourceDiagnostic::error(span, typst::foundations::Str::from(message));
+                if callee_value.clone().cast::<Func>().is_ok() {
+                    err = err.with_hint(eco_format!(
+                        "to call the stored function, wrap the field access in parentheses: `({access_text})(..)`"
+                    ));
+                } else {
+                    err = err.with_hint(eco_format!(
+                        "to access the `{name}` {}, remove the function arguments: `{access_text}`",
+                        if is_dict { "key" } else if is_named { "argument" } else { "field" },
+                    ));
+                }
+                if is_dict {
+                    err = err.with_hint(
+                        "dictionary keys cannot be used with method syntax as keys \
+                         could conflict with built-in method names",
+                    );
+                } else if is_named {
+                    err = err.with_hint(
+                        "named arguments cannot be used with method syntax as argument \
+                         names could conflict with built-in method names",
+                    );
+                }
+                return Err(eco_vec![err]);
             }
             Err(_) => {
-                bail!(
-                    span,
-                    "type {} has no method `{name}`",
-                    target.ty().short_name()
-                )
+                let (kind, ty_name) = element_or_type_with_name(&target);
+                bail!(span, "{kind} {ty_name} has no method `{name}`")
             }
         }
     };
-    call(&callee, engine, context, span, args)
+    match callee_value {
+        Value::Func(func) if is_method_call => Ok((func, Some(target))),
+        Value::Func(func) => Ok((func, None)),
+        callee_value => callee_value
+            .cast::<Func>()
+            .map(|func| (func, None))
+            .at(span),
+    }
+}
+
+/// If the value is content, the string "element" and the name of its element
+/// function, or the string "type" and the long name of the value's type.
+fn element_or_type_with_name(value: &Value) -> (&'static str, EcoString) {
+    if let Value::Content(content) = value {
+        ("element", EcoString::from(content.elem().name()))
+    } else {
+        ("type", EcoString::from(value.ty().long_name()))
+    }
 }
 
 /// 以源码片段构造闭包值:节点经官方解析器解析,defaults 由生成代码在
@@ -185,18 +287,20 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
         .map(|(_, src)| src.clone())
 }
 
-/// 解释片段(`closure`/`native_closure`)的定位缓存:文本 → (闭包
-/// 节点, 位置参数数)。对照原生闭包创建——`Eval for ast::Closure` 的
-/// node 是源文件 AST 子树引用(SyntaxNode 内部 Arc),创建期零 parse
+/// 解释片段(`closure`/`native_closure`)的定位缓存:**原始片段文本 →
+/// (闭包节点, 位置参数数)**。对照原生闭包创建——`Eval for ast::Closure`
+/// 的 node 是源文件 AST 子树引用(SyntaxNode 内部 Arc),创建期零 parse
 /// 零查找;片段首次定位(parse + 找 Closure 节点)后,后续创建只
 /// clone 节点引用,与原生同款"AST 定位一次、值可廉价重建"。
-/// 闭包值在求值期反复重建(如循环体内谓词),这里省下的 parse 与
-/// 树遍历正是闭包密集负载的回归源。片段同时登记进
-/// [`CLOSURE_SOURCES`](虚拟文件,span 可定位到片段行)。
+/// 键为原始文本(包装/解析只在未命中时进行,命中路径零格式化)。
+/// 片段同时登记进 [`CLOSURE_SOURCES`](虚拟文件,span 可定位到片段行)。
 fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, (typst_syntax::SyntaxNode, usize)>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Some(hit) = CACHE.read().unwrap().get(src) {
+        return hit.clone();
+    }
     // markup 合法形态:命名绑定直接嵌入;其余(裸闭包/context 体)包
     // 一层括号——markup 的 `#let x = expr` init 在**行尾**截止,裸闭包
     // 体跨行会被截断成空体,括号强制 code 上下文才能跨行。
@@ -206,9 +310,6 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     } else {
         format!("#let __trust_closure = ({trimmed})")
     };
-    if let Some(hit) = CACHE.read().unwrap().get(&text) {
-        return hit.clone();
-    }
     let n = CLOSURE_SOURCES.read().unwrap().len();
     let id = typst::syntax::RootedPath::new(
         typst::syntax::VirtualRoot::Project,
@@ -234,7 +335,7 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     CACHE
         .write()
         .unwrap()
-        .insert(text, (node.clone(), num_pos_params));
+        .insert(src.to_string(), (node.clone(), num_pos_params));
     (node, num_pos_params)
 }
 
@@ -268,32 +369,6 @@ fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::S
     node.children().find_map(find_closure_node)
 }
 
-/// for 循环的迭代源(对照 `Eval for ast::ForLoop`:数组按值、字典按键值
-/// 对、字符串按字素、字节串按字节)。
-pub fn iterate(value: &Value, span: Span) -> SourceResult<Vec<Value>> {
-    use unicode_segmentation::UnicodeSegmentation;
-    Ok(match value {
-        Value::Array(array) => array.iter().cloned().collect(),
-        Value::Dict(dict) => dict
-            .iter()
-            .map(|(key, value): (&Str, &Value)| {
-                Array::from_iter([key.clone().into_value(), value.clone()]).into_value()
-            })
-            .collect(),
-        Value::Str(str) => str
-            .as_str()
-            .graphemes(true)
-            .map(|g| Value::Str(g.into()))
-            .collect(),
-        Value::Bytes(bytes) => bytes
-            .as_slice()
-            .iter()
-            .map(|b| Value::Int(*b as i64))
-            .collect(),
-        _ => bail!(span, "cannot loop over {}", value.ty()),
-    })
-}
-
 /// code block 的 join 语义(对照 `ops::join`)。
 pub fn join(lhs: Value, rhs: Value, span: Span) -> SourceResult<Value> {
     ops::join(lhs, rhs).at(span)
@@ -304,29 +379,13 @@ pub fn boolean(value: Value, span: Span) -> SourceResult<bool> {
     value.cast::<bool>().at(span)
 }
 
+/// while 循环的迭代护栏上限(对照 `typst-eval/src/flow.rs`:
+/// `MAX_ITERATIONS = 10_000`,超出报 "loop seems to be infinite")。
+pub const MAX_ITERATIONS: usize = 10_000;
+
 /// 位置参数绑定(按声明序,对照 eval_closure 的 `args.expect`)。
 pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value> {
     args.expect::<Value>(name)
-}
-
-/// 命名参数绑定(仅按名,对照 eval_closure 的 `args.named`)。
-pub fn param_named(args: &mut Args, name: &str, _span: Span) -> SourceResult<Option<Value>> {
-    args.named::<Value>(name)
-}
-
-/// 有默认值的参数:未提供时求默认值。
-pub fn param_or(
-    args: &mut Args,
-    name: &str,
-    _span: Span,
-    default: fn(&mut Engine, Tracked<Context>) -> SourceResult<Value>,
-    engine: &mut Engine,
-    context: Tracked<Context>,
-) -> SourceResult<Value> {
-    match args.named_or_find::<Value>(name)? {
-        Some(value) => Ok(value),
-        None => default(engine, context),
-    }
 }
 
 /// 参数绑定完成后检查剩余参数(对照 `Args::finish`)。
@@ -340,12 +399,13 @@ pub fn finish(args: &mut Args, _span: Span) -> SourceResult<()> {
     Ok(())
 }
 
-/// 构造一个命名参数(生成代码用于调用点)。
-pub fn named_arg(span: Span, name: &str, value: Value) -> Arg {
+/// 构造一个命名参数(生成代码用于调用点;`span` 为参数项 span,
+/// `value_span` 为值表达式 span,对照原生 `Eval for ast::Args`)。
+pub fn named_arg(span: Span, value_span: Span, name: &str, value: Value) -> Arg {
     Arg {
         span,
         name: Some(name.into()),
-        value: Spanned::new(value, span),
+        value: Spanned::new(value, value_span),
     }
 }
 
@@ -362,7 +422,7 @@ pub fn spread_args(args: &mut Args, span: Span, value: Value) -> SourceResult<()
         }
         Value::Dict(dict) => {
             for (key, value) in dict {
-                args.items.push(named_arg(span, &key, value));
+                args.items.push(named_arg(span, span, &key, value));
             }
             Ok(())
         }
@@ -431,8 +491,10 @@ pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> Source
 }
 
 /// 可变方法(push/pop/insert/remove)的就地调用,对照
-/// `typst-eval/src/methods.rs::call_method_mut`。
+/// `typst-eval/src/methods.rs::call_method_mut`(错误挂方法调用的
+/// tracepoint,与原生一致)。
 pub fn method_mut(
+    engine: &mut Engine,
     value: &mut Value,
     method: &str,
     mut args: Args,
@@ -466,44 +528,12 @@ pub fn method_mut(
         _ => bail!(span, "type {ty} has no method `{method}`"),
     }
     args.finish()?;
-    Ok(output)
-}
-
-/// 消费(数组 into_iter 无逐元素克隆),每轮体值按 join 累积。
-pub fn foreach(
-    value: &Value,
-    span: Span,
-    mut f: impl FnMut(Value) -> SourceResult<Value>,
-) -> SourceResult<Value> {
-    use unicode_segmentation::UnicodeSegmentation;
-    let mut out = Value::None;
-    match value {
-        Value::Array(array) => {
-            for item in array.clone() {
-                out = ops::join(out, f(item)?).at(span)?;
-            }
-        }
-        Value::Dict(dict) => {
-            for (key, item) in dict.iter() {
-                let pair = Array::from_iter([key.clone().into_value(), item.clone()]).into_value();
-                out = ops::join(out, f(pair)?).at(span)?;
-            }
-        }
-        Value::Str(string) => {
-            for grapheme in string.as_str().graphemes(true) {
-                let item = Value::Str(grapheme.into());
-                out = ops::join(out, f(item)?).at(span)?;
-            }
-        }
-        Value::Bytes(bytes) => {
-            for byte in bytes.as_slice() {
-                let item = Value::Int(*byte as i64);
-                out = ops::join(out, f(item)?).at(span)?;
-            }
-        }
-        other => bail!(span, "cannot loop over {}", other.ty()),
-    }
-    Ok(out)
+    let name = EcoString::from(method);
+    Ok(output).trace(
+        engine.world,
+        || typst::diag::Tracepoint::Call(Some(name.clone())),
+        span,
+    )
 }
 
 // --- content 直译助手(对照 typst-eval/src/markup.rs 的构造方式) ---
@@ -538,35 +568,33 @@ pub fn embed(value: Value) -> typst::foundations::Content {
     value.display()
 }
 
-/// 迭代器形态的循环源(数组零物化,值逐个移出;字典/字符串按原版
-/// 逐对/字素),供生成代码内联 `for` 使用(break/continue 原生可用)。
-pub fn iter_values(value: &Value, span: Span) -> SourceResult<Box<dyn Iterator<Item = Value>>> {
+/// 迭代器形态的循环源(对照 `Eval for ast::ForLoop`:数组按值消费、
+/// 字典逐键值对、字符串按字素、字节串按字节;全部流式,零物化——
+/// 字典/字符串/字节串惰性产出,供生成代码内联 `for` 使用
+/// (break/continue 原生可用)。解构模式与 Str/Bytes 的组合由调用侧
+/// 在翻译期保证不出现(原生同样报错)。迭代器借入 `value`
+/// (生成代码中循环源临时值存活于整条 for 语句)。
+pub fn iter_values<'a>(
+    value: &'a Value,
+    span: Span,
+) -> SourceResult<Box<dyn Iterator<Item = Value> + 'a>> {
     use unicode_segmentation::UnicodeSegmentation;
     Ok(match value {
         Value::Array(array) => Box::new(array.clone().into_iter()),
-        Value::Dict(dict) => Box::new(
-            dict.iter()
-                .map(|(key, item): (&Str, &Value)| {
-                    Array::from_iter([key.clone().into_value(), item.clone()]).into_value()
-                })
-                .collect::<Vec<_>>()
-                .into_iter(),
-        ),
+        Value::Dict(dict) => Box::new(dict.iter().map(|(key, item): (&Str, &Value)| {
+            Array::from_iter([key.clone().into_value(), item.clone()]).into_value()
+        })),
         Value::Str(string) => Box::new(
             string
                 .as_str()
                 .graphemes(true)
-                .map(|g| Value::Str(g.into()))
-                .collect::<Vec<_>>()
-                .into_iter(),
+                .map(|g| Value::Str(g.into())),
         ),
         Value::Bytes(bytes) => Box::new(
             bytes
                 .as_slice()
                 .iter()
-                .map(|b| Value::Int(*b as i64))
-                .collect::<Vec<_>>()
-                .into_iter(),
+                .map(|b| Value::Int(*b as i64)),
         ),
         other => bail!(span, "cannot loop over {}", other.ty()),
     })
@@ -625,12 +653,9 @@ pub fn d_array_finish(
     Ok(())
 }
 
-/// 字典解构按键取值。
+/// 字典解构按键取值(经 `Dict::get`,保留原版 hint)。
 pub fn d_get(dict: &typst::foundations::Dict, key: &str, span: Span) -> SourceResult<Value> {
-    match dict.get(key) {
-        Ok(value) => Ok(value.clone()),
-        Err(_) => bail!(span, "dictionary does not contain key \"{key}\""),
-    }
+    dict.get(key).cloned().at(span)
 }
 
 /// 字典解构的剩余收集(`..rest`,排除已用键)。
@@ -675,59 +700,50 @@ fn elements_mismatch_diagnostic(
     ]
 }
 
-/// 字段赋值 `d.k = v`(就地修改局部字典;对照解释器 `Access` 语义)。
-pub fn field_assign(target: &mut Value, key: &str, value: Value, span: Span) -> SourceResult<()> {
-    match target {
-        Value::Dict(dict) => {
-            dict.insert(key.into(), value);
-            Ok(())
-        }
-        other => bail!(span, "cannot mutate field of {}", other.ty()),
-    }
-}
-
 /// 运行时导入外部包(未被翻译的依赖走解释器,混合执行——对照
-/// typst-eval 的 `import_package` + `resolve_package`)。
-pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> {
+/// typst-eval 的 `import_package` + `import_file`:sink/route 透传
+/// (警告与调用深度进入同一链)、环检测、模块挂包短名)。
+pub fn import_external(engine: &mut Engine, spec: &str, span: Span) -> SourceResult<Module> {
     use typst::syntax::{RootedPath, VirtualPath, VirtualRoot, package::PackageSpec};
     let spec: PackageSpec = match spec.parse() {
         Ok(spec) => spec,
-        Err(_) => bail!(Span::detached(), "invalid package spec"),
+        Err(_) => bail!(span, "invalid package spec"),
     };
     let manifest_id = RootedPath::new(
         VirtualRoot::Package(spec.clone()),
         VirtualPath::new("typst.toml").expect("path"),
     )
     .intern();
-    let bytes = engine.world.file(manifest_id).at(SPAN0)?;
+    let bytes = engine.world.file(manifest_id).at(span)?;
     let text = bytes
         .as_str()
         .map_err(typst::diag::FileError::from)
-        .at(SPAN0)?;
+        .at(span)?;
     let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
         Ok(manifest) => manifest,
-        Err(err) => bail!(SPAN0, "package manifest is malformed ({})", err.message()),
+        Err(err) => bail!(span, "package manifest is malformed ({})", err.message()),
     };
-    manifest.validate(&spec).at(SPAN0)?;
+    manifest.validate(&spec).at(span)?;
     let entry_id = RootedPath::new(
         VirtualRoot::Package(spec),
         VirtualPath::new(&manifest.package.entrypoint).expect("entry"),
     )
     .intern();
-    let source = engine.world.source(entry_id).at(SPAN0)?;
-    let mut sink = typst::engine::Sink::new();
-    let route = typst::engine::Route::default();
+    let source = engine.world.source(entry_id).at(span)?;
+    // Prevent cyclic importing.
+    if engine.route.contains(source.id()) {
+        bail!(span, "cyclic import");
+    }
     typst_eval::eval(
         engine.world,
         engine.library,
-        typst::engine::Traced::default().track(),
-        sink.track_mut(),
-        route.track(),
+        engine.traced,
+        comemo::TrackedMut::reborrow_mut(&mut engine.sink),
+        engine.route.track(),
         &source,
     )
+    .map(|module| module.with_name(manifest.package.name.clone()))
 }
-
-const SPAN0: Span = Span::detached();
 
 /// 显式降级占位:发出 warning 并返回 none(不静默降级原则——
 /// 生成物在此处功能缺失,必须让使用者看见)。
@@ -744,7 +760,7 @@ pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
 /// `access.rs`:字段访问与 accessor 方法(`first`/`last`/`at`)。
 ///
 /// typst 语义(`call_method_access` / `access_dict`):
-/// - 字段段要求当前值是字典(`Dict::at_mut`);
+/// - 字段段要求当前值是字典(`Dict::at_mut`,缺失报错带 hint);
 /// - `at` 段在数组上收整数下标、在字典上收字符串键;
 /// - `first`/`last` 仅数组。
 pub enum PlaceSeg {
@@ -756,23 +772,107 @@ pub enum PlaceSeg {
     Last,
 }
 
-/// 赋值目标(`x.f = v` / `x.f OP= v` / 解构写回)的可变位置,对照
-/// typst-eval 的 `FieldAssignment` 语义:最后一段字段在字典上**缺失时
-/// 插入**;中间段与 [`place_mut`] 同(at_mut 缺失报错,服务可变方法)。
-pub fn place_assign<'a>(
+/// 普通赋值 `a.b..k = v` 的求值(对照 `apply_assignment` 的
+/// FieldAccess 特例:`access_dict` 走到**末段**后在字典上直接
+/// `insert`——缺失即创建,单次哈希写入;中间段与 [`place_mut`] 同,
+/// at_mut 报错)。末段非字段(at/first/last)按 [`place_mut`] 语义
+/// 取可变引用后写入。
+pub fn assign_value(
+    root: &mut Value,
+    path: &[PlaceSeg],
+    value: Value,
+    span: Span,
+) -> SourceResult<()> {
+    let Some((last, init)) = path.split_last() else {
+        *root = value;
+        return Ok(());
+    };
+    if let PlaceSeg::Field(name) = last {
+        let parent = place_mut(root, init, span)?;
+        if let Value::Dict(dict) = parent {
+            dict.insert(Str::from(name.as_str()), value);
+            return Ok(());
+        }
+    }
+    // 末段非字典字段:走通用可变位置(at/first/last 或非字典宿主)。
+    *place_mut(root, path, span)? = value;
+    Ok(())
+}
+
+/// 沿路径段取可变引用(对照 `Expr::access`;字段段错误文案对照
+/// `access_dict` 的三段式分支)。
+pub fn place_mut<'a>(
     root: &'a mut Value,
     path: &[PlaceSeg],
     span: Span,
 ) -> SourceResult<&'a mut Value> {
-    if let Some((PlaceSeg::Field(name), [])) = path.split_last()
-        && let Value::Dict(dict) = root
-    {
-        if dict.get(name).is_err() {
-            dict.insert(Str::from(name.as_str()), Value::None);
-        }
-        return dict.at_mut(name).at(span);
+    let mut current = root;
+    for seg in path {
+        current = match seg {
+            PlaceSeg::Field(name) => match current {
+                Value::Dict(dict) => dict.at_mut(name).at(span)?,
+                value => access_dict_error(value, span)?,
+            },
+            PlaceSeg::At(key) => match current {
+                Value::Array(array) => {
+                    let index: i64 = key.clone().cast().at(span)?;
+                    array.at_mut(index).at(span)?
+                }
+                Value::Dict(dict) => {
+                    let key: typst::foundations::Str = key.clone().cast().at(span)?;
+                    dict.at_mut(&key).at(span)?
+                }
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("at").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `at`")
+                }
+            },
+            PlaceSeg::First => match current {
+                Value::Array(array) => array.first_mut().at(span)?,
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("first").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `first`")
+                }
+            },
+            PlaceSeg::Last => match current {
+                Value::Array(array) => array.last_mut().at(span)?,
+                value => {
+                    let ty = value.ty();
+                    if ty.scope().get("last").is_some() {
+                        bail!(span, "cannot mutate a temporary value")
+                    }
+                    bail!(span, "type {ty} has no method `last`")
+                }
+            },
+        };
     }
-    place_mut(root, path, span)
+    Ok(current)
+}
+
+/// 字段可变访问的非字典分支(对照 `access_dict` 的三段式:专用
+/// getter 类型 / 无字段类型 / 静态字段未开放可变)。
+fn access_dict_error(value: &mut Value, span: Span) -> SourceResult<&mut Value> {
+    let ty = value.ty();
+    if matches!(
+        value,
+        Value::Symbol(_) | Value::Content(_) | Value::Module(_) | Value::Func(_) | Value::Args(_)
+    ) {
+        bail!(span, "cannot mutate fields on {ty}");
+    }
+    if typst::foundations::fields_on(ty).is_empty() {
+        bail!(span, "{ty} does not have accessible fields");
+    }
+    Err(eco_format!("fields on {ty} are not yet mutable"))
+        .hint(eco_format!(
+            "try creating a new {ty} with the updated field value instead"
+        ))
+        .at(span)
 }
 
 /// per-build 状态的不透明句柄:包 `Arc<dyn Any + Send + Sync>` 进
@@ -845,14 +945,8 @@ pub fn native_closure(
     defaults: Vec<Value>,
     state: &StateSlot,
 ) -> Func {
-    // 转发实参列表:位置/解构参数按名,命名参数具名转发(保持 named
-    // 语义),sink 展开;无名 sink 在 stub 签名里补一个合成名。
-    let params_src = ensure_named_sink(params_src);
-    let arg_list = forward_args(&params_src);
-    let src = format!(
-        "let {}{params_src} = __trust_impl(__trust_state, {arg_list})",
-        data.name
-    );
+    let (params, arg_list) = stub_signature(params_src);
+    let src = stub_source(data.name, &params, &arg_list);
     let (node, num_pos_params) = cached_closure_node(&src);
     let mut scope = Scope::new();
     scope.define("__trust_impl", Func::from(data));
@@ -870,45 +964,94 @@ pub fn native_closure(
     .spanned(closure_span)
 }
 
-/// stub 签名里的无名 sink(`(..)`)补合成名,转发体才能引用。
-fn ensure_named_sink(params_src: &str) -> String {
-    if params_src.contains("..)") || params_src.trim_end().ends_with("..)") {
-        return params_src.replace("..)", "..__trust_sink)");
+/// stub 签名与转发实参表(按 `params_src` 文本缓存——stub 创建高频,
+/// parse 只发生一次)。
+///
+/// 模式参数(解构参数)在签名里替换为合成名 `__trust_pN`(转发的
+/// 签名必须绑定转发体引用的名字;解构本身由 native 体完成);
+/// 无名 sink `..` 补合成名 `__trust_sink`。
+fn stub_signature(params_src: &str) -> (String, String) {
+    static CACHE: std::sync::LazyLock<
+        std::sync::RwLock<std::collections::HashMap<String, (String, String)>>,
+    > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Some(hit) = CACHE.read().unwrap().get(params_src) {
+        return hit.clone();
     }
-    params_src.to_string()
-}
-
-/// 从参数表文本提取转发实参(位置名、`name: name` 具名、`..sink`)。
-fn forward_args(params_src: &str) -> String {
     let root = typst_syntax::parse_code(&format!("let f{params_src} = none"));
-    let Some(closure_node) = find_closure_node(&root) else {
-        return String::new();
-    };
-    let Some(closure) = closure_node.cast::<ast::Closure>() else {
-        return String::new();
-    };
-    let mut parts: Vec<String> = Vec::new();
-    let mut nth_pattern = 0usize;
-    for param in closure.params().children() {
-        match param {
-            ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
-                parts.push(ident.as_str().to_string());
+    let (mut params, mut args): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    if let Some(closure_node) = find_closure_node(&root)
+        && let Some(closure) = closure_node.cast::<ast::Closure>()
+    {
+        let mut nth_pattern = 0usize;
+        for param in closure.params().children() {
+            let text = param.to_untyped().full_text().to_string();
+            match param {
+                ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(_))) => {
+                    args.push(text.clone());
+                    params.push(text);
+                }
+                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
+                    args.push(text.clone());
+                    params.push(text);
+                }
+                ast::Param::Pos(_) => {
+                    // 解构参数:签名绑定合成名,native 体自行解构。
+                    let name = format!("__trust_p{nth_pattern}");
+                    nth_pattern += 1;
+                    args.push(name.clone());
+                    params.push(name);
+                }
+                ast::Param::Named(named) => {
+                    let name = named.name().as_str();
+                    args.push(format!("{name}: {name}"));
+                    params.push(text);
+                }
+                ast::Param::Spread(spread) => match spread.sink_ident() {
+                    Some(ident) => {
+                        args.push(format!("..{}", ident.as_str()));
+                        params.push(text);
+                    }
+                    None => {
+                        args.push("..__trust_sink".to_string());
+                        // 无名 sink:原文形如 `..`,补合成名。
+                        let named = if text.trim() == ".." {
+                            "..__trust_sink".to_string()
+                        } else {
+                            text.replace("..", "..__trust_sink")
+                        };
+                        params.push(named);
+                    }
+                },
             }
-            ast::Param::Pos(_) => {
-                parts.push(format!("__trust_p{nth_pattern}"));
-                nth_pattern += 1;
-            }
-            ast::Param::Named(named) => {
-                let name = named.name().as_str();
-                parts.push(format!("{name}: {name}"));
-            }
-            ast::Param::Spread(spread) => match spread.sink_ident() {
-                Some(ident) => parts.push(format!("..{}", ident.as_str())),
-                None => parts.push("..__trust_sink".to_string()),
-            },
         }
     }
-    parts.join(", ")
+    let out = (params.join(", "), args.join(", "));
+    CACHE
+        .write()
+        .unwrap()
+        .insert(params_src.to_string(), out.clone());
+    out
+}
+
+/// stub 源码 `let {name}({params}) = __trust_impl(__trust_state, {args})`
+/// 按 (函数名, 签名) 缓存(高频创建路径零格式化)。
+fn stub_source(name: &str, params: &str, args: &str) -> String {
+    static CACHE: std::sync::LazyLock<
+        std::sync::RwLock<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Some(inner) = CACHE.read().unwrap().get(name)
+        && let Some(hit) = inner.get(params)
+    {
+        return hit.clone();
+    }
+    let src = format!("let {name}({params}) = __trust_impl(__trust_state, {args})");
+    CACHE
+        .write()
+        .unwrap()
+        .entry(name.to_string())
+        .or_default()
+        .insert(params.to_string(), src.clone());
+    src
 }
 
 /// native 体序言:从首个位置参数解包 per-build 状态并从实参中移除
@@ -929,64 +1072,6 @@ pub fn take_state<T: std::any::Any + Send + Sync>(
     }
 }
 
-/// 沿路径段取可变引用(对照 `Expr::access`)。
-pub fn place_mut<'a>(
-    root: &'a mut Value,
-    path: &[PlaceSeg],
-    span: Span,
-) -> SourceResult<&'a mut Value> {
-    let mut current = root;
-    for seg in path {
-        current = match seg {
-            PlaceSeg::Field(name) => match current {
-                Value::Dict(dict) => dict.at_mut(name).at(span)?,
-                value => {
-                    let ty = value.ty();
-                    bail!(span, "cannot mutate fields on type {ty}")
-                }
-            },
-            PlaceSeg::At(key) => match current {
-                Value::Array(array) => {
-                    let index: i64 = key.clone().cast().at(span)?;
-                    array.at_mut(index).at(span)?
-                }
-                Value::Dict(dict) => {
-                    let key: typst::foundations::Str = key.clone().cast().at(span)?;
-                    dict.at_mut(&key).at(span)?
-                }
-                value => {
-                    let ty = value.ty();
-                    if ty.scope().get("at").is_some() {
-                        bail!(span, "cannot mutate a temporary value")
-                    }
-                    bail!(span, "type {ty} has no method `at`")
-                }
-            },
-            PlaceSeg::First => match current {
-                Value::Array(array) => array.first_mut().at(span)?,
-                value => {
-                    let ty = value.ty();
-                    if ty.scope().get("first").is_some() {
-                        bail!(span, "cannot mutate a temporary value")
-                    }
-                    bail!(span, "type {ty} has no method `first`")
-                }
-            },
-            PlaceSeg::Last => match current {
-                Value::Array(array) => array.last_mut().at(span)?,
-                value => {
-                    let ty = value.ty();
-                    if ty.scope().get("last").is_some() {
-                        bail!(span, "cannot mutate a temporary value")
-                    }
-                    bail!(span, "type {ty} has no method `last`")
-                }
-            },
-        };
-    }
-    Ok(current)
-}
-
 // 样式规则原语(对照 typst-eval/src/rules.rs):求值期**只构造**,
 // 不应用——set 规则构造 `Styles`,show 规则构造 `Recipe`,真正的
 // 变换发生在 typst 的 realize/layout(生成物与解释器共用)。
@@ -994,10 +1079,10 @@ pub fn place_mut<'a>(
 /// `#set elem(..)`:构造样式表(对照 `Eval for ast::SetRule` 的
 /// `target.set(engine, args)`)。
 pub fn set_rule(
-    engine: &mut Engine,
     target: Value,
     args: Args,
     span: Span,
+    engine: &mut Engine,
 ) -> SourceResult<typst::foundations::Styles> {
     let func = target.cast::<Func>().at(span)?;
     let element = func
@@ -1013,34 +1098,82 @@ pub fn styles_empty() -> typst::foundations::Styles {
 }
 
 /// `#show selector?: transform`:构造规则(对照 `Eval for
-/// ast::ShowRule`;transform 为 content/函数值)。
+/// ast::ShowRule`:selector 强转 `ShowableSelector`(不可 show 的
+/// 选择器按原版 cast 文案报错,站点为 selector span);附带原版的
+/// `show page` 无效警告与 `show par: set block(spacing: ..)` 迁移警告)。
 pub fn show_rule(
     selector: Option<Value>,
+    sel_span: Span,
     transform: Value,
     span: Span,
+    engine: &mut Engine,
 ) -> SourceResult<typst::foundations::Recipe> {
     let selector = selector
-        .map(|value| value.cast::<Selector>().at(span))
-        .transpose()?;
+        .map(|value| value.cast::<typst::foundations::ShowableSelector>().at(sel_span))
+        .transpose()?
+        .map(|selector| selector.0);
     let transform = transform.cast::<Transformation>().at(span)?;
-    Ok(typst::foundations::Recipe::new(selector, transform, span))
+    let recipe = typst::foundations::Recipe::new(selector, transform, span);
+    check_show_rules(engine, &recipe);
+    Ok(recipe)
 }
 
 /// `#show selector?: set ..`:transform 是样式(对照
 /// `Transformation::Style(set.eval(..)?)`)。
 pub fn show_rule_style(
     selector: Option<Value>,
+    sel_span: Span,
     styles: typst::foundations::Styles,
     span: Span,
+    engine: &mut Engine,
 ) -> SourceResult<typst::foundations::Recipe> {
     let selector = selector
-        .map(|value| value.cast::<Selector>().at(span))
-        .transpose()?;
-    Ok(typst::foundations::Recipe::new(
-        selector,
-        Transformation::Style(styles),
-        span,
-    ))
+        .map(|value| value.cast::<typst::foundations::ShowableSelector>().at(sel_span))
+        .transpose()?
+        .map(|selector| selector.0);
+    let recipe = typst::foundations::Recipe::new(selector, Transformation::Style(styles), span);
+    check_show_rules(engine, &recipe);
+    Ok(recipe)
+}
+
+/// 原版 show 规则的两个警告(对照 `check_show_page_rule` 与
+/// `check_show_par_set_block`)。
+fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
+    if let Some(Selector::Elem(elem, _)) = recipe.selector()
+        && *elem == typst::foundations::Element::of::<typst::layout::PageElem>()
+    {
+        engine.sink.warn(
+            SourceDiagnostic::warning(
+                recipe.span(),
+                typst::foundations::Str::from(
+                    "`show page` is not supported and has no effect",
+                ),
+            )
+            .with_hint("customize pages with `set page(..)` instead"),
+        );
+    }
+    if let Some(Selector::Elem(elem, _)) = recipe.selector()
+        && *elem == typst::foundations::Element::of::<typst::model::ParElem>()
+        && let Transformation::Style(styles) = recipe.transform()
+    {
+        let chain = typst::foundations::StyleChain::new(styles);
+        if chain.has(typst::layout::BlockElem::above)
+            || chain.has(typst::layout::BlockElem::below)
+        {
+            engine.sink.warn(
+                SourceDiagnostic::warning(
+                    recipe.span(),
+                    typst::foundations::Str::from(
+                        "`show par: set block(spacing: ..)` has no effect anymore",
+                    ),
+                )
+                .with_hint("write `set par(spacing: ..)` instead")
+                .with_hint(
+                    "this is specific to paragraphs as they are not considered blocks anymore",
+                ),
+            );
+        }
+    }
 }
 
 /// 把规则之后的尾部内容挂上样式(对照 `eval_markup` 的
@@ -1066,18 +1199,17 @@ pub fn styled_with_recipe(
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
 pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
-    // 与 `closure` 同款定位缓存;Context 形态取根下首个表达式节点
-    // (context 体是表达式,非闭包节点)。
+    // 与 `closure` 同款定位缓存(**原始片段文本**为键,命中零格式化);
+    // Context 形态取根下首个表达式节点(context 体是表达式,非闭包节点)。
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, typst_syntax::SyntaxNode>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-    let trimmed = body_src.trim_start();
-    let text = format!("#let __trust_closure = ({trimmed})");
-    let node = if let Some(hit) = CACHE.read().unwrap().get(&text) {
+    let node = if let Some(hit) = CACHE.read().unwrap().get(body_src) {
         hit.clone()
     } else {
         // 首次:parse 片段(挂虚拟文件供 span 定位),取根下首个
         // 表达式节点(context 体是表达式,非闭包节点)。
+        let text = format!("#let __trust_closure = ({})", body_src.trim_start());
         let n = CLOSURE_SOURCES.read().unwrap().len();
         let id = typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Project,
@@ -1093,7 +1225,10 @@ pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Fu
             .find(|child| child.cast::<ast::Expr>().is_some())
             .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"))
             .clone();
-        CACHE.write().unwrap().insert(text, node.clone());
+        CACHE
+            .write()
+            .unwrap()
+            .insert(body_src.to_string(), node.clone());
         node
     };
     let mut scope = Scope::new();

@@ -131,6 +131,27 @@ fn cases(fixture: &str) -> Vec<&'static str> {
         "set_show" => vec!["m.styled", "m.cond(true)", "m.cond(false)", "m.shown"],
         "context" => vec!["m.ctx-size", "m.ctx-call"],
         "pkg_include" => vec!["m.greeting", "m.after"],
+        "regress" => vec![
+            // A1 状态函数解构参数(stub 转发)。
+            "m.pat((1, 2))",
+            "m.pat((1, 2), k: 5)",
+            "m.pat((1, 2), k: 100)",
+            // A3 多段赋值。
+            "m.deep()",
+            // A4 while 值。
+            "m.count-to(0)",
+            "m.count-to(3)",
+            // A5 代码块 join。
+            "m.block-join()",
+            "m.block-none()",
+            "m.block-tail-none()",
+            // A6 默认值。
+            "m.def-ok()",
+            "m.def-ok(x: 1)",
+            // B10 深度护栏内的自递归。
+            "m.down(0)",
+            "m.down(40)",
+        ],
         _ => vec![],
     }
 }
@@ -259,6 +280,18 @@ fn error_cases(fixture: &str) -> Vec<&'static str> {
         "control" => cases.push("m.bool-fail()"),
         "collections" => cases.push("m.iter-fail()"),
         "destructuring" => cases.push("m.destr-fail()"),
+        // A/B 批修复的错误路径(文案+hint 逐字)。
+        "regress" => cases.extend([
+            "m.mid-missing()",
+            "m.compound-missing()",
+            "m.always-true()",
+            "m.spin()",
+            "m.block-join-fail()",
+            "m.not-fn(1)",
+            "m.mk().a(2)",
+            "\"hello\".nope(1)",
+            "m.down(10000)",
+        ]),
         _ => {}
     }
     cases
@@ -285,6 +318,7 @@ fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
         "set_show" => trust_diff::gen_modules::set_show::module_init,
         "context" => trust_diff::gen_modules::context::module_init,
         "pkg_include" => trust_diff::gen_modules::pkg_include::module_init,
+        "regress" => trust_diff::gen_modules::regress::module_init,
         _ => panic!("未登记的 fixture {fixture}"),
     }
 }
@@ -311,7 +345,8 @@ diff_test!(
     sysinputs,
     set_show,
     context,
-    pkg_include
+    pkg_include,
+    regress
 );
 
 #[test]
@@ -343,6 +378,7 @@ fn all_fixtures_covered() {
         "set_show",
         "context",
         "pkg_include",
+        "regress",
     ];
     for name in declared.keys() {
         assert!(

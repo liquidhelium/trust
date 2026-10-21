@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use typst_syntax::SyntaxKind;
 use typst_syntax::ast::{self, AstNode};
 
 use super::captures::collect_idents;
@@ -206,8 +207,12 @@ impl Ctx {
                 let target = self.expr(access.target(), env);
                 let field = access.field().as_str();
                 {
-                    let at = self.span_of(access.span());
-                    format!("rt::field(&({target}), \"{}\", {at})?", escape(field))
+                    // 对照 access_field:求值/报错站点为字段名 span。
+                    let at = self.span_of(access.field().span());
+                    format!(
+                        "rt::field(&({target}), \"{}\", engine, context, {at})?",
+                        escape(field)
+                    )
                 }
             }
             ast::Expr::FuncCall(call) => self.func_call(call, env),
@@ -226,17 +231,44 @@ impl Ctx {
                 let condition = self.expr(while_loop.condition(), env);
                 let body = self.expr(while_loop.body(), env);
                 let cond_at = self.span_of(while_loop.condition().span());
-                let join_at = self.span_of(while_loop.span());
+                let join_at = self.span_of(while_loop.body().span());
+                let loop_at = self.span_of(while_loop.span());
+                // 静态"常真"检测(对照原生 i==0 分支的 is_invariant/
+                // can_diverge:条件不变式且体不含 break/return 即必为
+                // 无限循环;条件本身仍先求值,保持副作用顺序)。
+                if is_invariant(while_loop.condition().to_untyped())
+                    && !can_diverge(while_loop.body().to_untyped())
+                {
+                    return format!(
+                        "{{ rt::boolean({condition}, {cond_at})?; bail!({cond_at}, \"condition is always true\") }}"
+                    );
+                }
+                // 迭代护栏(对照原生 MAX_ITERATIONS:超出报 "loop
+                // seems to be infinite",而非挂死)。
                 format!(
-                    "{{ let mut __out = Value::None;\n  \
+                    "{{ let mut __out = Value::None; let mut __guard = 0usize;\n  \
                      while rt::boolean({condition}, {cond_at})? {{\n  \
+                     \x20   if __guard >= rt::MAX_ITERATIONS {{ bail!({loop_at}, \"loop seems to be infinite\"); }}\n  \
                      \x20   let __v = {body};\n  \
                      \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
+                     \x20   __guard += 1usize;\n  \
                      }}\n  \
                      __out }}"
                 )
             }
             ast::Expr::FuncReturn(func_return) => {
+                // return 编译为 Rust return(从生成的 f_ 函数返回);
+                // 函数体之外(模块求值/默认值等上下文)外层 Rust 函数
+                // 返回类型不同,直接 return 会让生成物无法编译——按
+                // 缺口降级诊断。
+                if self.in_fn == 0 {
+                    let message = "return 仅在函数体内支持(v1 语言子集)".to_string();
+                    self.diag(func_return.span(), message.clone());
+                    return format!(
+                        "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
+                        message, message
+                    );
+                }
                 let value = match func_return.body() {
                     Some(expr) => self.expr(expr, env),
                     None => "Value::None".into(),
@@ -249,15 +281,26 @@ impl Ctx {
                 let iterable = self.expr(for_loop.iterable(), env);
                 let id = self.fresh_id();
                 let binder = format!("__it{id}");
-                // 模式解构在循环体首展开(单一标识符直接绑定)。
+                // 模式解构在循环体首展开;简单标识符模式直接绑定迭代
+                // 值(零克隆,对照原生 destructure 的 Ident 分支=define;
+                // 读取侧的按次克隆与原生一致)。
                 let mut body_env = env.clone();
-                let pattern_code = {
-                    let inner = format!("{{ {binder}.clone() }}");
-                    self.destructure(for_loop.pattern(), inner, &mut body_env, false)
+                let pattern_code = match for_loop.pattern() {
+                    ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
+                        let rust = super::ctx::bind_local(&mut body_env, ident.as_str());
+                        format!("let mut {rust} = {binder};\n")
+                    }
+                    // 占位模式:不绑定(对照原生 iter! 宏对 Placeholder
+                    // 同样只迭代不取名),零克隆。
+                    ast::Pattern::Placeholder(_) => String::new(),
+                    pattern => {
+                        let inner = format!("{{ {binder}.clone() }}");
+                        self.destructure(pattern, inner, &mut body_env, false)
+                    }
                 };
                 let body = self.expr(for_loop.body(), &body_env);
                 let iter_at = self.span_of(for_loop.iterable().span());
-                let join_at = self.span_of(for_loop.span());
+                let join_at = self.span_of(for_loop.body().span());
                 format!(
                     "{{ let mut __out = Value::None;\n  \
                      for {binder} in rt::iter_values(&({iterable}), {iter_at})? {{\n  \
@@ -349,18 +392,20 @@ impl Ctx {
     }
 
     fn func_call(&mut self, call: ast::FuncCall, env: &Env) -> String {
-        // 参数按源序求值(对照 `Eval for ast::Args`)。
-        let args = self.gen_args(call.args(), env);
+        let at = self.span_of(call.span());
+        // 参数按源序求值(对照 `Eval for ast::Args`);Args.span 为整个
+        // 调用的 span(对照 `.spanned(self.span())`)。
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
                 // 可变方法:目标 = 局部变量或字段/accessor 链
-                // (typst 语义:就地修改,对照 `call_method_mut`)。
+                // (typst 语义:就地修改,对照 `call_method_mut`;
+                // 实参先于目标求值,对照 `maybe_resolve_mutating`)。
                 if let Some((root, path)) = self.parse_place(access.target(), env) {
                     let path_lit = super::block::place_path_lit(&path);
-                    let at = self.span_of(call.span());
+                    let args = self.gen_args(call.args(), env, &at);
                     return format!(
-                        "{{ let __mut_args = {args}; rt::method_mut(rt::place_mut(&mut {root}, {path_lit}, {at})?, \"{}\", __mut_args, {at})? }}",
+                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::method_mut(engine, rt::place_mut(&mut {root}, {path_lit}, {at})?, \"{}\", __mut_args, {at})? }}",
                         escape(field)
                     );
                 }
@@ -370,43 +415,58 @@ impl Ctx {
                 );
                 return "Value::None".into();
             }
+            // 方法/字段调用:先解析被调值(不可调用则在实参求值前报错,
+            // 对照 `eval_field_callee` 先于 args.eval;方法调用把目标
+            // 作为首个位置参数,插入位点为目标表达式 span)。
             let target = self.expr(access.target(), env);
-            let at = self.span_of(call.span());
+            let tgt_at = self.span_of(access.target().span());
+            let field_at = self.span_of(access.field().span());
+            let access_text = access.to_untyped().full_text().to_string();
+            let args = self.gen_args(call.args(), env, &at);
             return format!(
-                "{{ let __target = {target}; let __call_args = {args}; rt::method(&__target, \"{}\", engine, context, {at}, __call_args)? }}",
+                "{{ rt::check_call_depth(engine, {at})?; let __target = {target}; let __mc = rt::method_callee(__target, \"{}\", {access_text:?}, engine, {field_at})?; let __call_args = {args}; rt::call_with(__mc.0, __mc.1.map(|t| (t, {tgt_at})), {at}, __call_args, engine, context)? }}",
                 escape(field)
             );
         }
+        // 普通调用:callee 先于实参求值(对照 `Eval for ast::FuncCall`),
+        // 不可调用时实参不被求值。
+        let callee_at = self.span_of(call.callee().span());
         let callee = self.expr(call.callee(), env);
-        let at = self.span_of(call.span());
+        let args = self.gen_args(call.args(), env, &at);
         format!(
-            "{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, {at}, __call_args)? }}"
+            "{{ rt::check_call_depth(engine, {at})?; let __callee = rt::callee({callee}, {callee_at})?; let __call_args = {args}; rt::call_with(__callee, None, {at}, __call_args, engine, context)? }}"
         )
     }
 
-    /// 调用点参数:按源序构造 `Args`。
-    fn gen_args(&mut self, args: ast::Args, env: &Env) -> String {
-        let mut out = String::from(
-            "{ let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>());",
+    /// 调用点参数:按源序构造 `Args`;每项用**自身** span(项 span 与
+    /// 值 span 分开,对照原生 `Eval for ast::Args`),整体 span 为调用点。
+    fn gen_args(&mut self, args: ast::Args, env: &Env, call_at: &str) -> String {
+        let mut out = format!(
+            "{{ let mut __call_args_v = Args::new({call_at}, std::iter::empty::<Value>());"
         );
         for arg in args.items() {
+            let item_at = self.span_of(arg.span());
             match arg {
                 ast::Arg::Pos(expr) => {
                     let value = self.expr(expr, env);
-                    let _ = write!(out, " __call_args_v.push(__fs, {value});");
+                    let _ = write!(out, " __call_args_v.push({item_at}, {value});");
                 }
                 ast::Arg::Named(named) => {
                     let name = named.name().as_str();
+                    let value_at = self.span_of(named.expr().span());
                     let value = self.expr(named.expr(), env);
                     let _ = write!(
                         out,
-                        " __call_args_v.items.push(rt::named_arg(__fs, \"{}\", {value}));",
+                        " __call_args_v.items.push(rt::named_arg({item_at}, {value_at}, \"{}\", {value}));",
                         escape(name)
                     );
                 }
                 ast::Arg::Spread(spread) => {
                     let value = self.expr(spread.expr(), env);
-                    let _ = write!(out, " rt::spread_args(&mut __call_args_v, __fs, {value})?;");
+                    let _ = write!(
+                        out,
+                        " rt::spread_args(&mut __call_args_v, {item_at}, {value})?;"
+                    );
                 }
             }
         }
@@ -495,53 +555,47 @@ impl Ctx {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
                     let tail = self.content_seq_top(&items[i + 1..]);
-                    let args = self.gen_args(set.args(), env);
-                    let target = self.expr(set.target(), env);
-                    // 条件为假时规则为空样式(对照 `Ok(Styles::new())`)。
-                    let styles = match set.condition() {
-                        Some(cond) => {
-                            let cond_at = self.span_of(cond.span());
-                            let rule_at = self.span_of(set.span());
-                            format!(
-                                "if rt::boolean({}, {cond_at})? {{ rt::set_rule(engine, {target}, {args}, {rule_at})? }} else {{ rt::styles_empty() }}",
-                                self.expr(cond, env)
-                            )
-                        }
-                        None => {
-                            let rule_at = self.span_of(set.span());
-                            format!("rt::set_rule(engine, {target}, {args}, {rule_at})?")
-                        }
-                    };
-                    parts.push(format!("rt::styled_with_map({tail}, {styles})"));
+                    // 样式先于尾部内容求值(对照 eval_code/eval_markup:
+                    // set.eval 之后才是 tail;Rust 实参从左到右,故用
+                    // 局部先物化样式)。
+                    let rule_at = self.span_of(set.span());
+                    let styles = self.set_styles_code(*set, env, &rule_at);
+                    parts.push(format!("{{ let __s = {styles}; rt::styled_with_map({tail}, __s) }}"));
                     return self.content_join(parts);
                 }
                 ContentItem::Show(show) => {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
                     let tail = self.content_seq_top(&items[i + 1..]);
-                    let sel_arg = match show.selector() {
-                        Some(sel) => format!("Some({})", self.expr(sel, env)),
-                        None => "None".to_string(),
+                    // 求值序对照 `Eval for ast::ShowRule`:selector →
+                    // transform(set 或表达式)→ 尾部内容。
+                    let show_at = self.span_of(show.span());
+                    let (sel_arg, sel_at) = match show.selector() {
+                        Some(sel) => {
+                            let sel_at = self.span_of(sel.span());
+                            (format!("Some({})", self.expr(sel, env)), sel_at)
+                        }
+                        None => ("None".to_string(), show_at.clone()),
                     };
                     let recipe = match show.transform() {
                         ast::Expr::SetRule(set) => {
-                            let args = self.gen_args(set.args(), env);
-                            let target = self.expr(set.target(), env);
-                            let rule_at = self.span_of(set.span());
+                            // show-set:transform 是样式;set 的条件在
+                            // set.eval 内处理(条件假 → 空样式)。
+                            let set_at = self.span_of(set.span());
+                            let styles = self.set_styles_code(set, env, &set_at);
                             format!(
-                                "rt::show_rule_style({sel_arg}, rt::set_rule(engine, {target}, {args}, {rule_at})?, {rule_at})?"
+                                "rt::show_rule_style({sel_arg}, {sel_at}, {styles}, {show_at}, engine)?"
                             )
                         }
                         transform => {
-                            let at = self.span_of(show.span());
                             format!(
-                                "rt::show_rule({sel_arg}, {}, {at})?",
+                                "rt::show_rule({sel_arg}, {sel_at}, {}, {show_at}, engine)?",
                                 self.expr(transform, env)
                             )
                         }
                     };
                     parts.push(format!(
-                        "{{ let __tail = {tail}; let __recipe = {recipe}; rt::styled_with_recipe(engine, context, __tail, __recipe)? }}"
+                        "{{ let __recipe = {recipe}; let __tail = {tail}; rt::styled_with_recipe(engine, context, __tail, __recipe)? }}"
                     ));
                     return self.content_join(parts);
                 }
@@ -550,6 +604,24 @@ impl Ctx {
         }
         let parts: Vec<String> = items.iter().map(|e| self.content_part(e)).collect();
         self.content_join(parts)
+    }
+
+    /// set 规则的样式求值代码(条件假 → 空样式;条件先于目标与实参
+    /// 求值,对照 `Eval for ast::SetRule`)。`call_at` 为调用点 span
+    /// (Args.span 与规则 span 同源)。set/show-set 两臂共用。
+    fn set_styles_code(&mut self, set: ast::SetRule, env: &Env, call_at: &str) -> String {
+        let args = self.gen_args(set.args(), env, call_at);
+        let target = self.expr(set.target(), env);
+        match set.condition() {
+            Some(cond) => {
+                let cond_at = self.span_of(cond.span());
+                let cond = self.expr(cond, env);
+                format!(
+                    "if rt::boolean({cond}, {cond_at})? {{ rt::set_rule({target}, {args}, {call_at}, engine)? }} else {{ rt::styles_empty() }}"
+                )
+            }
+            None => format!("rt::set_rule({target}, {args}, {call_at}, engine)?"),
+        }
     }
 
     /// content 的单个部分(表达式产出 Content 构造代码;env 取该项
@@ -611,4 +683,25 @@ impl Ctx {
         }
         (captured, globals)
     }
+}
+
+/// 表达式是否恒值(对照 typst-eval flow.rs 的 `is_invariant`:
+/// 标识符与数学标识符视作可变,字段访问随目标,调用随被调+实参,
+/// 其余节点看全部子节点)。
+fn is_invariant(expr: &typst_syntax::SyntaxNode) -> bool {
+    match expr.cast() {
+        Some(ast::Expr::Ident(_)) => false,
+        Some(ast::Expr::MathIdent(_)) => false,
+        Some(ast::Expr::FieldAccess(access)) => is_invariant(access.target().to_untyped()),
+        Some(ast::Expr::FuncCall(call)) => {
+            is_invariant(call.callee().to_untyped()) && is_invariant(call.args().to_untyped())
+        }
+        _ => expr.children().all(is_invariant),
+    }
+}
+
+/// 表达式是否含 break/return(对照 typst-eval flow.rs 的 `can_diverge`)。
+fn can_diverge(expr: &typst_syntax::SyntaxNode) -> bool {
+    matches!(expr.kind(), SyntaxKind::Break | SyntaxKind::Return)
+        || expr.children().any(can_diverge)
 }

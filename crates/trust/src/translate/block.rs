@@ -19,11 +19,14 @@ impl Ctx {
     ) -> String {
         let mut out = String::from("{ let mut __out = Value::None;\n");
         let mut env = env.clone();
-        let mut last: Option<String> = None;
+        // (尾表达式代码, 其 span):非末位语句值按 join 语义累积,
+        // 末位表达式同样并入 __out 后返回——对照 `eval_code` 的
+        // `output = ops::join(output, value).at(span)?`(每个表达式的
+        // 值都 join,错误站点为该表达式自身 span)。
+        let mut last: Option<(String, String)> = None;
         for stmt in stmts {
-            if let Some(prev) = last.take() {
-                let at = self.span_of(stmt.span());
-                let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {at})?;");
+            if let Some((prev, prev_at)) = last.take() {
+                let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
             }
             if let ast::Expr::LetBinding(lets) = stmt {
                 let init = match lets.init() {
@@ -62,7 +65,7 @@ impl Ctx {
                                 let at = self.span_of(stmt.span());
                                 for field in &fields {
                                     expr = format!(
-                                        "rt::field(&({expr}), \"{}\", {at})?",
+                                        "rt::field(&({expr}), \"{}\", engine, context, {at})?",
                                         escape(field)
                                     );
                                 }
@@ -142,7 +145,7 @@ impl Ctx {
                             let at = self.span_of(stmt.span());
                             let _ = writeln!(
                                 out,
-                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", {at})?;",
+                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", engine, context, {at})?;",
                                 escape(&original)
                             );
                         }
@@ -184,15 +187,21 @@ impl Ctx {
                     };
                     match op {
                         Some(op) => {
+                            // 复合赋值:单次寻址 + mem::take(对照原生
+                            // `let lhs = std::mem::take(&mut *location)`,
+                            // 免一次旧值克隆)。
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; let __p = rt::place_assign(&mut {root}, {path_lit}, {at})?; *__p = ops::{op}((*__p).clone(), __rhs).at({at})?; }}"
+                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{op}(__old, __rhs).at({at})?; }}"
                             );
                         }
                         None => {
+                            // 普通赋值:末段字段在字典上缺失即创建
+                            // (对照 `apply_assignment` 的 FieldAccess
+                            // 特例:access_dict + insert,单次写入)。
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; *rt::place_assign(&mut {root}, {path_lit}, {at})? = __rhs; }}"
+                                "    {{ let __rhs = {rhs}; rt::assign_value(&mut {root}, {path_lit}, __rhs, {at})?; }}"
                             );
                         }
                     }
@@ -213,22 +222,18 @@ impl Ctx {
                 continue;
             }
             let value = self.expr(stmt, &env);
-            last = Some(value);
+            let at = self.span_of(stmt.span());
+            last = Some((value, at));
         }
-        match last {
-            Some(tail) => {
-                let _ = writeln!(out, "    let _ = __out;");
-                let _ = writeln!(out, "    {tail}");
-                out.push('}');
-                out
-            }
-            None => {
-                let _ = writeln!(out, "    let _ = __out;");
-                let _ = writeln!(out, "    Value::None");
-                out.push('}');
-                out
-            }
+        // 块值 = 全部语句值的 join(尾语句并入后返回 __out;无表达式
+        // 语句时 __out 保持 None,与空块值一致)。
+        if let Some((tail, tail_at)) = last {
+            let _ = writeln!(out, "    __out = rt::join(__out, {tail}, {tail_at})?;");
         }
+        let _ = writeln!(out, "    let _ = &__out;");
+        let _ = writeln!(out, "    __out");
+        out.push('}');
+        out
     }
     /// 解析可变位置(赋值/可变方法目标):根须为局部变量,路径段为
     /// 字段访问与 accessor 方法(`at`/`first`/`last`),对照 typst-eval

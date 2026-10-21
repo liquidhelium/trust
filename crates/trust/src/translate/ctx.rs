@@ -25,6 +25,9 @@ pub(super) struct Ctx {
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
     /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
     pub(super) used_state: bool,
+    /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
+    /// 仅在该上下文合法——外层 Rust 函数返回类型不同)。
+    pub(super) in_fn: usize,
     /// 错误站点 span 表:AST span 的原始 u64 → 站点索引(生成物以
     /// `s(idx)` 引用,常数表运行时一次构建)。
     pub(super) span_table: Vec<u64>,
@@ -62,6 +65,7 @@ impl Ctx {
             package_files: None,
             package_mods: None,
             used_state: false,
+            in_fn: 0,
             span_table: Vec::new(),
             span_index: std::collections::HashMap::new(),
         }
@@ -122,7 +126,7 @@ impl Ctx {
         match module_ref {
             Ref::Slot(id) => format!("rt::read(&__st.{id})?"),
             Ref::ModuleField { expr, name } => {
-                format!("rt::field(&({expr}), \"{name}\", SPAN)?")
+                format!("rt::field(&({expr}), \"{name}\", engine, context, SPAN)?")
             }
             Ref::Value(expr) => expr.clone(),
             Ref::GlobalFallback { slot, name } => {

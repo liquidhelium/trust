@@ -154,12 +154,14 @@ impl Ctx {
             }
             ast::Pattern::Normal(other) => {
                 // 解构赋值的目标:局部或可变位置(字段/accessor 链),
-                // 对照 typst 的 `Access` 语义:`(a.at(i), b.c.at(j)) = ...`。
+                // 对照 typst 的 `Access` 语义:`(a.at(i), b.c.at(j)) = ...`
+                // (DestructAssignment 走 access() 即 at_mut,**不**
+                // 插入缺失键——与普通赋值的末段插入语义不同)。
                 if assign && let Some((root, path)) = self.parse_place(other, env) {
                     let path_lit = super::block::place_path_lit(&path);
                     let at = self.span_of(other.span());
                     return format!(
-                        "{{ *rt::place_assign(&mut {root}, {path_lit}, {at})? = {value}; }}\n"
+                        "{{ *rt::place_mut(&mut {root}, {path_lit}, {at})? = {value}; }}\n"
                     );
                 }
                 self.diag(other.span(), "解构模式此处须为标识符".into());

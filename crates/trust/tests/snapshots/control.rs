@@ -24,10 +24,12 @@ const fn nz(n: u64) -> std::num::NonZeroU64 {
 }
 const S0: Span = Span::from_raw(nz(288344138459499));
 const S1: Span = Span::from_raw(nz(288375944433528));
-const S2: Span = Span::from_raw(nz(288333923402147));
-const S3: Span = Span::from_raw(nz(288235487394932));
-const S4: Span = Span::from_raw(nz(288027471681572));
-const S5: Span = Span::from_raw(nz(290479085446172));
+const S2: Span = Span::from_raw(nz(288378614278059));
+const S3: Span = Span::from_raw(nz(288333923402147));
+const S4: Span = Span::from_raw(nz(288235487394932));
+const S5: Span = Span::from_raw(nz(288287491323272));
+const S6: Span = Span::from_raw(nz(288027471681572));
+const S7: Span = Span::from_raw(nz(290479085446172));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -56,7 +58,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let _ = context;
     if let Some(v) = rt::global_opt(engine, "items")? { rt::fill(&__st.G_V0_pick_items, v)?; }
     { let v = Value::Func(Func::from(&D_V0_pick)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
-    Ok(Module::new("control", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])))
+    Ok(Module::new("control", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])).with_file_id(file_span().id().expect("file span id")))
 }
 
 #[allow(non_snake_case, dead_code, unused_variables)]
@@ -67,21 +69,24 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(&(items.clone()), S3)? {
-      let mut x = { __it1.clone() };
+  for __it1 in rt::iter_values(&(items.clone()), S4)? {
+      let mut x = __it1;
 
       let __v = { let mut __out = Value::None;
-    let _ = __out;
-    if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(S0)?, std::cmp::Ordering::Greater)), S2)? { { let mut __out = Value::None;
-    let _ = __out;
-    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(rt::place_mut(&mut out, &[], S1)?, "push", __mut_args, S1)? }
-} } else { Value::None }
+    __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(S0)?, std::cmp::Ordering::Greater)), S3)? { { let mut __out = Value::None;
+    __out = rt::join(__out, { rt::check_call_depth(engine, S1)?; let __mut_args = { let mut __call_args_v = Args::new(S1, std::iter::empty::<Value>()); __call_args_v.push(S2, x.clone()); __call_args_v }; rt::method_mut(engine, rt::place_mut(&mut out, &[], S1)?, "push", __mut_args, S1)? }, S1)?;
+    let _ = &__out;
+    __out
+} } else { Value::None }, S3)?;
+    let _ = &__out;
+    __out
 };
-      __out = rt::join(__out, __v, S4)?;
+      __out = rt::join(__out, __v, S5)?;
   }
-  __out }, S5)?;
-    let _ = __out;
-    out.clone()
+  __out }, S6)?;
+    __out = rt::join(__out, out.clone(), S7)?;
+    let _ = &__out;
+    __out
 })
 }
 

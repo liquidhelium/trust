@@ -10,7 +10,7 @@
 
 pub mod translate;
 
-pub use translate::{translate, translate_package, translate_package_lenient, Diag, PackageInput};
+pub use translate::{Diag, PackageInput, translate, translate_package, translate_package_lenient};
 
 /// 前端入口:把 typst 源码解析为官方语法树。
 ///
@@ -35,6 +35,9 @@ mod tests {
     fn translates_simple_function() {
         let out = super::translate("#let add(a, b) = a + b", "test").expect("translate ok");
         assert!(out.contains("pub fn module()"), "generated:\n{out}");
-        assert!(out.contains("rt::param_pos(__args, \"a\", span)?"), "generated:\n{out}");
+        assert!(
+            out.contains("rt::param_pos(__args, \"a\", span)?"),
+            "generated:\n{out}"
+        );
     }
 }

@@ -70,12 +70,14 @@ impl Ctx {
                 if parts.is_empty() {
                     "Value::Content(Content::sequence(Vec::new()))".into()
                 } else {
-                    format!("Value::Content(rt::content_sequence(vec![{}]))", parts.join(", "))
+                    format!(
+                        "Value::Content(rt::content_sequence(vec![{}]))",
+                        parts.join(", ")
+                    )
                 }
             }
             ast::Expr::Array(array) => {
-                let mut out =
-                    String::from("{ let mut __a: Vec<Value> = Vec::new();");
+                let mut out = String::from("{ let mut __a: Vec<Value> = Vec::new();");
                 for item in array.items() {
                     match item {
                         ast::ArrayItem::Pos(expr) => {
@@ -98,7 +100,11 @@ impl Ctx {
                         ast::DictItem::Named(named) => {
                             let key = named.name().as_str();
                             let value = self.expr(named.expr(), env, mode);
-                            let _ = write!(out, " rt::dict_put(&mut __d, \"{}\", {value});", escape(key));
+                            let _ = write!(
+                                out,
+                                " rt::dict_put(&mut __d, \"{}\", {value});",
+                                escape(key)
+                            );
                         }
                         ast::DictItem::Keyed(keyed) => {
                             let ast::Expr::Str(key) = keyed.key() else {
@@ -302,16 +308,23 @@ impl Ctx {
             );
         }
         if mode == Mode::ModuleInit {
-            self.diag(call.span(), "顶层值中的函数调用需要引擎(暂不支持,请包进函数)".into());
+            self.diag(
+                call.span(),
+                "顶层值中的函数调用需要引擎(暂不支持,请包进函数)".into(),
+            );
             return "Value::None".into();
         }
         let callee = self.expr(call.callee(), env, mode);
-        format!("{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, SPAN, __call_args)? }}")
+        format!(
+            "{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, SPAN, __call_args)? }}"
+        )
     }
 
     /// 调用点参数:按源序构造 `Args`。
     fn gen_args(&mut self, args: ast::Args, env: &Env, mode: Mode) -> String {
-        let mut out = String::from("{ let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>());");
+        let mut out = String::from(
+            "{ let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>());",
+        );
         for arg in args.items() {
             match arg {
                 ast::Arg::Pos(expr) => {
@@ -367,7 +380,8 @@ impl Ctx {
             }
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == name) {
                 captured.push(format!("(\"{}\", {rust}.clone())", escape(&name)));
-            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| *n == name) {
+            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| *n == name)
+            {
                 match module_ref {
                     Ref::Slot(id) => {
                         captured.push(format!("(\"{}\", rt::slot(&{id}))", escape(&name)))
@@ -375,15 +389,11 @@ impl Ctx {
                     Ref::Engine(id) => {
                         captured.push(format!("(\"{}\", {id}_get()?)", escape(&name)))
                     }
-                    Ref::ModuleField { expr, name: field } => {
-                        captured.push(format!(
-                            "(\"{}\", rt::field(&({expr}), \"{field}\", SPAN)?)",
-                            escape(&name)
-                        ))
-                    }
-                    Ref::Value(expr) => {
-                        captured.push(format!("(\"{}\", {expr})", escape(&name)))
-                    }
+                    Ref::ModuleField { expr, name: field } => captured.push(format!(
+                        "(\"{}\", rt::field(&({expr}), \"{field}\", SPAN)?)",
+                        escape(&name)
+                    )),
+                    Ref::Value(expr) => captured.push(format!("(\"{}\", {expr})", escape(&name))),
                 }
             } else if mode == Mode::FnBody {
                 // 全局名:typst 闭包求值不带库基座(Scopes::new(None)),
@@ -395,8 +405,16 @@ impl Ctx {
                 ));
             }
         }
-        let defaults = if defaults.is_empty() { "Vec::new()".into() } else { format!("vec![{}]", defaults.join(", ")) };
-        let captured = if captured.is_empty() { "&[]".into() } else { format!("&[{}]", captured.join(", ")) };
+        let defaults = if defaults.is_empty() {
+            "Vec::new()".into()
+        } else {
+            format!("vec![{}]", defaults.join(", "))
+        };
+        let captured = if captured.is_empty() {
+            "&[]".into()
+        } else {
+            format!("&[{}]", captured.join(", "))
+        };
         format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}))")
     }
 }

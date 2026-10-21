@@ -22,12 +22,20 @@ fn main() {
         if path.extension().and_then(|e| e.to_str()) != Some("typ") {
             continue;
         }
-        let name = path.file_stem().and_then(|s| s.to_str()).expect("stem").to_string();
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("stem")
+            .to_string();
         let src = std::fs::read_to_string(&path).expect("read fixture");
         let code = trust::translate(&src, &name).unwrap_or_else(|diags| {
             panic!(
                 "fixture {name} 翻译失败:\n{}",
-                diags.iter().map(|d| format!("  {:?}: {}", d.span, d.message)).collect::<Vec<_>>().join("\n")
+                diags
+                    .iter()
+                    .map(|d| format!("  {:?}: {}", d.span, d.message))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         });
         std::fs::write(gen_dir.join(format!("{name}.rs")), code).expect("write generated");
@@ -40,14 +48,25 @@ fn main() {
         if !path.is_dir() {
             continue;
         }
-        let name = path.file_stem().and_then(|s| s.to_str()).expect("stem").to_string();
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("stem")
+            .to_string();
         let mut files = BTreeMap::new();
         collect_typ_files(&path, "", &mut files);
-        let input = trust::PackageInput { files, entry: "entry.typ".into() };
+        let input = trust::PackageInput {
+            files,
+            entry: "entry.typ".into(),
+        };
         let code = trust::translate_package(&input, &name).unwrap_or_else(|diags| {
             panic!(
                 "package fixture {name} 翻译失败:\n{}",
-                diags.iter().map(|d| format!("  {:?}: {}", d.span, d.message)).collect::<Vec<_>>().join("\n")
+                diags
+                    .iter()
+                    .map(|d| format!("  {:?}: {}", d.span, d.message))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         });
         std::fs::write(gen_dir.join(format!("{name}.rs")), code).expect("write generated");

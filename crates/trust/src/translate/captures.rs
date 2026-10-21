@@ -8,11 +8,17 @@
 
 use typst_syntax::ast::{self, AstNode};
 
-pub(super) fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<String>, out: &mut Vec<String>) {
+pub(super) fn collect_idents(
+    node: &typst_syntax::SyntaxNode,
+    bound: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
     use typst_syntax::SyntaxKind as K;
     match node.kind() {
         K::Closure => {
-            let Some(cl) = node.cast::<ast::Closure>() else { return };
+            let Some(cl) = node.cast::<ast::Closure>() else {
+                return;
+            };
             // 默认值在外层作用域求值。
             for param in cl.params().children() {
                 if let ast::Param::Named(named) = param {
@@ -50,7 +56,9 @@ pub(super) fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<St
             }
         }
         K::LetBinding => {
-            let Some(lets) = node.cast::<ast::LetBinding>() else { return };
+            let Some(lets) = node.cast::<ast::LetBinding>() else {
+                return;
+            };
             if let Some(init) = lets.init() {
                 collect_idents(init.to_untyped(), bound, out);
             }
@@ -60,7 +68,9 @@ pub(super) fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<St
             }
         }
         K::ForLoop => {
-            let Some(for_loop) = node.cast::<ast::ForLoop>() else { return };
+            let Some(for_loop) = node.cast::<ast::ForLoop>() else {
+                return;
+            };
             collect_idents(for_loop.iterable().to_untyped(), bound, out);
             let mut pushed = 0;
             for ident in for_loop.pattern().bindings() {
@@ -73,15 +83,21 @@ pub(super) fn collect_idents(node: &typst_syntax::SyntaxNode, bound: &mut Vec<St
             }
         }
         K::FieldAccess => {
-            let Some(access) = node.cast::<ast::FieldAccess>() else { return };
+            let Some(access) = node.cast::<ast::FieldAccess>() else {
+                return;
+            };
             collect_idents(access.target().to_untyped(), bound, out);
         }
         K::Named => {
-            let Some(named) = node.cast::<ast::Named>() else { return };
+            let Some(named) = node.cast::<ast::Named>() else {
+                return;
+            };
             collect_idents(named.expr().to_untyped(), bound, out);
         }
         K::Keyed => {
-            let Some(keyed) = node.cast::<ast::Keyed>() else { return };
+            let Some(keyed) = node.cast::<ast::Keyed>() else {
+                return;
+            };
             collect_idents(keyed.expr().to_untyped(), bound, out);
         }
         K::CodeBlock | K::ContentBlock => {

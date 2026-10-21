@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
-use super::ctx::{bind_local, Ctx, Env, Mode, Ref};
+use super::ctx::{Ctx, Env, Mode, Ref, bind_local};
 use super::naming::escape;
 use super::paths::{normalize_import, parse_module_access};
 
@@ -64,14 +64,19 @@ impl Ctx {
                                         format!("rt::global(engine, \"{root}\", SPAN)?")
                                     }
                                     None => {
-                                        self.diag(source.span(), format!("import 的模块根 `{root}` 不可见"));
+                                        self.diag(
+                                            source.span(),
+                                            format!("import 的模块根 `{root}` 不可见"),
+                                        );
                                         continue;
                                     }
                                 };
                                 let mut expr = base;
                                 for field in &fields {
-                                    expr =
-                                        format!("rt::field(&({expr}), \"{}\", SPAN)?", escape(field));
+                                    expr = format!(
+                                        "rt::field(&({expr}), \"{}\", SPAN)?",
+                                        escape(field)
+                                    );
                                 }
                                 Some(expr)
                             }
@@ -114,7 +119,9 @@ impl Ctx {
                         continue;
                     }
                 };
-                let Some(module_expr) = module_expr else { continue };
+                let Some(module_expr) = module_expr else {
+                    continue;
+                };
                 // 形态:bare / rename → 模块值;列表 → 字段取值。
                 match import.imports() {
                     None => {
@@ -264,10 +271,7 @@ impl Ctx {
 }
 
 /// 赋值目标为 `x.a.b.c` 形态:返回 (根局部 rust 名, 字段链)。
-fn field_chain_place(
-    expr: ast::Expr,
-    env: &Env,
-) -> Option<(String, Vec<String>)> {
+fn field_chain_place(expr: ast::Expr, env: &Env) -> Option<(String, Vec<String>)> {
     fn walk(expr: ast::Expr, fields: &mut Vec<String>) -> Option<String> {
         match expr {
             ast::Expr::Ident(ident) => Some(ident.as_str().to_string()),

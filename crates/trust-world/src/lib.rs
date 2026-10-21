@@ -28,8 +28,7 @@ use typst::foundations::{
 };
 use typst::introspection::EmptyIntrospector;
 use typst::syntax::{
-    FileId, RootedPath, Source, Span, SyntaxMode, VirtualPath, VirtualRoot,
-    package::PackageSpec,
+    FileId, RootedPath, Source, Span, SyntaxMode, VirtualPath, VirtualRoot, package::PackageSpec,
 };
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -58,10 +57,7 @@ pub struct InjectWorld {
 
 impl InjectWorld {
     /// 新建:主文件文本 + 要注入全局作用域的模块列表 `(名字, 模块)`。
-    pub fn new(
-        main_text: &str,
-        modules: impl IntoIterator<Item = (&'static str, Module)>,
-    ) -> Self {
+    pub fn new(main_text: &str, modules: impl IntoIterator<Item = (&'static str, Module)>) -> Self {
         let main = RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new("main.typ").expect("valid path"),
@@ -78,9 +74,14 @@ impl InjectWorld {
 
         let packages_root = std::env::var_os("USER_HOME")
             .map(|h| PathBuf::from(h).join(".cache/typst/packages"))
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/typst/packages")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/typst/packages"))
+            })
             .filter(|p| p.exists());
-        let fs_root = std::env::var("TRUST_WORLD_ROOT").ok().map(PathBuf::from).filter(|p| p.exists());
+        let fs_root = std::env::var("TRUST_WORLD_ROOT")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.exists());
         Self {
             library: LazyHash::new(library),
             book: LazyHash::new(FontBook::new()),
@@ -143,7 +144,9 @@ impl InjectWorld {
     /// 包 FileId 到磁盘仓库路径(仅 VirtualRoot::Package)。
     fn package_path(&self, id: FileId) -> Option<PathBuf> {
         let root = self.packages_root.as_ref()?;
-        let VirtualRoot::Package(spec) = id.root() else { return None; };
+        let VirtualRoot::Package(spec) = id.root() else {
+            return None;
+        };
         // 布局:{root}/{namespace}/{name}/{version}/{vpath}。
         let mut path = root
             .join(spec.namespace.as_str())
@@ -172,9 +175,15 @@ impl InjectWorld {
     ///
     /// 由此,`#import "<spec>": ...` 不经磁盘与网络,直接落到注入的
     /// 原生模块;其他包不受影响。
-    pub fn add_virtual_package(&mut self, spec: &str, entry: &str, entry_text: &str) -> Result<(), String> {
-        let spec: PackageSpec =
-            spec.parse().map_err(|err| format!("invalid package spec: {err}"))?;
+    pub fn add_virtual_package(
+        &mut self,
+        spec: &str,
+        entry: &str,
+        entry_text: &str,
+    ) -> Result<(), String> {
+        let spec: PackageSpec = spec
+            .parse()
+            .map_err(|err| format!("invalid package spec: {err}"))?;
         let manifest_id = RootedPath::new(
             VirtualRoot::Package(spec.clone()),
             VirtualPath::new("typst.toml").expect("valid path"),
@@ -259,8 +268,8 @@ impl World for InjectWorld {
         }
         // 包路径回退:磁盘上的包仓库。
         if let Some(path) = self.package_path(id) {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|_| FileError::NotFound(path.clone()))?;
+            let text =
+                std::fs::read_to_string(&path).map_err(|_| FileError::NotFound(path.clone()))?;
             return Ok(Source::new(id, text));
         }
         Err(FileError::NotFound(PathBuf::from("not in this world")))
@@ -286,14 +295,12 @@ impl World for InjectWorld {
             let rel = id.vpath().get_with_slash().trim_start_matches('/');
             let path = root.join(rel);
             if path.exists() {
-                let bytes =
-                    std::fs::read(&path).map_err(|_| FileError::NotFound(path.clone()))?;
+                let bytes = std::fs::read(&path).map_err(|_| FileError::NotFound(path.clone()))?;
                 return Ok(Bytes::new(bytes));
             }
         }
         Err(FileError::NotFound(PathBuf::from("not in this world")))
     }
-
 
     fn font(&self, _index: usize) -> Option<Font> {
         None
@@ -385,7 +392,9 @@ mod tests {
         let mut scope = Scope::new();
         scope.define("add2", add2);
         let world = InjectWorld::new("", vec![]);
-        let v = world.eval_code("add2(3)", scope).expect("call composed func");
+        let v = world
+            .eval_code("add2(3)", scope)
+            .expect("call composed func");
         assert_eq!(v, Value::Int(5));
     }
 }

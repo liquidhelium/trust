@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self};
 
-use super::ctx::{bind_local, Ctx, Env, Mode};
+use super::ctx::{Ctx, Env, Mode, bind_local};
 use super::naming::escape;
 
 impl Ctx {
@@ -21,14 +21,23 @@ impl Ctx {
                 ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
                     let name = ident.as_str().to_string();
                     let rust = bind_local(&mut fn_env, &name);
-                    let _ =
-                        writeln!(body, "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;", escape(&name));
+                    let _ = writeln!(
+                        body,
+                        "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;",
+                        escape(&name)
+                    );
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
                 ast::Param::Pos(pattern) => {
                     // 解构参数(对照 eval_closure:"pattern parameter")。
                     let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
-                    body.push_str(&self.destructure(pattern, value, &mut fn_env, Mode::FnBody, false));
+                    body.push_str(&self.destructure(
+                        pattern,
+                        value,
+                        &mut fn_env,
+                        Mode::FnBody,
+                        false,
+                    ));
                 }
                 ast::Param::Named(named) => {
                     let name = named.name().as_str().to_string();

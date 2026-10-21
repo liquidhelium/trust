@@ -7,10 +7,10 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
+use super::Diag;
 use super::ctx::{Ctx, Env, Mode, Ref};
 use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, uppercase};
-use super::Diag;
 
 /// 顶层绑定:名字 + 槽名 + 形态(函数闭包节点或值 init)。
 struct TopBinding<'a> {
@@ -28,10 +28,21 @@ enum TopKind<'a> {
 pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let root = typst_syntax::parse(src);
     let Some(markup) = root.cast::<ast::Markup>() else {
-        return Err(vec![Diag { span: typst_syntax::Span::detached(), message: "源文件未能解析为 markup 模块".into(), file: None }]);
+        return Err(vec![Diag {
+            span: typst_syntax::Span::detached(),
+            message: "源文件未能解析为 markup 模块".into(),
+            file: None,
+        }]);
     };
 
-    let mut cx = Ctx { diags: Vec::new(), lenient: false, next_id: 0, current_file: None, package_files: None, package_mods: None };
+    let mut cx = Ctx {
+        diags: Vec::new(),
+        lenient: false,
+        next_id: 0,
+        current_file: None,
+        package_files: None,
+        package_mods: None,
+    };
     // 第一遍:收集顶层绑定(名字 → 槽),函数绑定取其闭包节点。
     let mut tops: Vec<TopBinding> = Vec::new();
     for expr in markup.exprs() {
@@ -58,7 +69,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         continue;
                     };
                     let Some(init) = lets.init() else {
-                        cx.diag(lets.span(), format!("顶层 `#let {}` 缺少初始化", name.as_str()));
+                        cx.diag(
+                            lets.span(),
+                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                        );
                         continue;
                     };
                     let id = cx.fresh_id();
@@ -74,7 +88,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let kind = other.to_untyped().kind();
                 cx.diag(
                     other.span(),
-                    format!("模块顶层暂只支持 `#let` 绑定,遇到 {kind:?}(标记内容/导入等属高级语义)"),
+                    format!(
+                        "模块顶层暂只支持 `#let` 绑定,遇到 {kind:?}(标记内容/导入等属高级语义)"
+                    ),
                 );
             }
         }
@@ -85,7 +101,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         .iter()
         .map(|top| match &top.kind {
             TopKind::Value { init } => {
-                let env = Env { locals: Vec::new(), module: Vec::new() };
+                let env = Env {
+                    locals: Vec::new(),
+                    module: Vec::new(),
+                };
                 let before = cx.diags.len();
                 let _ = cx.expr(*init, &env, Mode::ModuleInit);
                 let needs = cx.diags.len() > before;
@@ -109,7 +128,11 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 .iter()
                 .enumerate()
                 .map(|(j, t)| {
-                    let r = if engine_flags[j] { Ref::Engine(t.rust.clone()) } else { Ref::Slot(t.rust.clone()) };
+                    let r = if engine_flags[j] {
+                        Ref::Engine(t.rust.clone())
+                    } else {
+                        Ref::Slot(t.rust.clone())
+                    };
                     (t.name.clone(), r)
                 })
                 .collect(),
@@ -120,7 +143,11 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 .iter()
                 .enumerate()
                 .map(|(j, t)| {
-                    let r = if engine_flags[j] { Ref::Engine(t.rust.clone()) } else { Ref::Slot(t.rust.clone()) };
+                    let r = if engine_flags[j] {
+                        Ref::Engine(t.rust.clone())
+                    } else {
+                        Ref::Slot(t.rust.clone())
+                    };
                     (t.name.clone(), r)
                 })
                 .collect(),
@@ -138,7 +165,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                          #[allow(non_snake_case, dead_code)]\nstatic {id}: std::sync::OnceLock<Value> = std::sync::OnceLock::new();\n\
                          #[allow(non_snake_case, dead_code)]\nfn {id}_get() -> SourceResult<Value> {{\n    {id}.get().cloned().ok_or_else(|| eco_vec![typst::diag::SourceDiagnostic::error(SPAN, typst::foundations::Str::from(\"引擎值未初始化:宿主未调用 module_init(装配期求值)\"))])\n}}"
                     );
-                    let _ = writeln!(engine_fills, "    let _ = {id}.set({id}_init(engine, context)?);");
+                    let _ = writeln!(
+                        engine_fills,
+                        "    let _ = {id}.set({id}_init(engine, context)?);"
+                    );
                     let _ = writeln!(
                         engine_defines,
                         "    scope.define(\"{}\", {id}_get()?);",
@@ -169,7 +199,11 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     "\n#[allow(non_snake_case, dead_code)]\nfn {id}_init() -> Value {{\n    Value::Func(Func::from(&{data}))\n}}\n\
                      #[allow(non_snake_case, dead_code)]\nstatic {id}: rt::Slot = LazyLock::new(&{id}_init);"
                 );
-                let _ = writeln!(defines, "    scope.define(\"{}\", rt::slot(&{id}));", escape(&top.name));
+                let _ = writeln!(
+                    defines,
+                    "    scope.define(\"{}\", rt::slot(&{id}));",
+                    escape(&top.name)
+                );
             }
         }
     }

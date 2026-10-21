@@ -4,15 +4,16 @@
 //! 的 `Value`,零私有值模型;所有语义函数与 `typst-eval` 的解释实现逐条
 //! 对照(报错文案与 span 行为一致),差分测试以此为验收。
 
+use comemo::Track;
 use comemo::Tracked;
+use typst::World;
 use typst::diag::{At, SourceResult, bail};
 use typst::engine::Engine;
 use typst::foundations::{
-    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Str, Value, ops,
+    Arg, Args, Array, Closure, ClosureNode, Context, Func, IntoValue, Module, Scope, Str, Value,
+    ops,
 };
-use typst::syntax::{Span, Spanned, ast, SyntaxKind};
-use typst::World;
-use comemo::Track;
+use typst::syntax::{Span, Spanned, SyntaxKind, ast};
 
 /// 模块级值槽:由生成代码以 `LazyLock::new(&init_fn)` 构造。
 pub type Slot = std::sync::LazyLock<Value, &'static (dyn Fn() -> Value + Send + Sync)>;
@@ -96,7 +97,11 @@ pub fn method(
                 )
             }
             Err(_) => {
-                bail!(span, "type {} has no method `{name}`", target.ty().short_name())
+                bail!(
+                    span,
+                    "type {} has no method `{name}`",
+                    target.ty().short_name()
+                )
             }
         }
     };
@@ -160,9 +165,11 @@ pub fn iterate(value: &Value, span: Span) -> SourceResult<Vec<Value>> {
             .graphemes(true)
             .map(|g| Value::Str(g.into()))
             .collect(),
-        Value::Bytes(bytes) => {
-            bytes.as_slice().iter().map(|b| Value::Int(*b as i64)).collect()
-        }
+        Value::Bytes(bytes) => bytes
+            .as_slice()
+            .iter()
+            .map(|b| Value::Int(*b as i64))
+            .collect(),
         _ => bail!(span, "cannot loop over {}", value.ty()),
     })
 }
@@ -215,7 +222,11 @@ pub fn finish(args: &mut Args, _span: Span) -> SourceResult<()> {
 
 /// 构造一个命名参数(生成代码用于调用点)。
 pub fn named_arg(span: Span, name: &str, value: Value) -> Arg {
-    Arg { span, name: Some(name.into()), value: Spanned::new(value, span) }
+    Arg {
+        span,
+        name: Some(name.into()),
+        value: Spanned::new(value, span),
+    }
 }
 
 /// 展开参数(`f(..args)`,对照 `Eval for ast::Arg::Spread`:数组按位置、
@@ -301,7 +312,12 @@ pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> Source
 
 /// 可变方法(push/pop/insert/remove)的就地调用,对照
 /// `typst-eval/src/methods.rs::call_method_mut`。
-pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -> SourceResult<Value> {
+pub fn method_mut(
+    value: &mut Value,
+    method: &str,
+    mut args: Args,
+    span: Span,
+) -> SourceResult<Value> {
     let ty = value.ty();
     let mut output = Value::None;
     match value {
@@ -309,9 +325,9 @@ pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -
             match method {
                 "push" => array.push(args.expect("value")?),
                 "pop" => output = array.pop().at(span)?,
-                "insert" => {
-                    array.insert(args.expect("index")?, args.expect("value")?).at(span)?
-                }
+                "insert" => array
+                    .insert(args.expect("index")?, args.expect("value")?)
+                    .at(span)?,
                 _ => {
                     output = array
                         .remove(args.expect("index")?, args.named("default")?)
@@ -319,15 +335,14 @@ pub fn method_mut(value: &mut Value, method: &str, mut args: Args, span: Span) -
                 }
             }
         }
-        Value::Dict(dict) if matches!(method, "insert" | "remove") => {
-            match method {
-                "insert" => dict.insert(args.expect("key")?, args.expect("value")?),
-                _ => {
-                    output =
-                        dict.remove(args.expect("key")?, args.named("default")?).at(span)?
-                }
+        Value::Dict(dict) if matches!(method, "insert" | "remove") => match method {
+            "insert" => dict.insert(args.expect("key")?, args.expect("value")?),
+            _ => {
+                output = dict
+                    .remove(args.expect("key")?, args.named("default")?)
+                    .at(span)?
             }
-        }
+        },
         _ => bail!(span, "type {ty} has no method `{method}`"),
     }
     args.finish()?;
@@ -350,8 +365,7 @@ pub fn foreach(
         }
         Value::Dict(dict) => {
             for (key, item) in dict.iter() {
-                let pair =
-                    Array::from_iter([key.clone().into_value(), item.clone()]).into_value();
+                let pair = Array::from_iter([key.clone().into_value(), item.clone()]).into_value();
                 out = ops::join(out, f(pair)?).at(span)?;
             }
         }
@@ -406,10 +420,7 @@ pub fn embed(value: Value) -> typst::foundations::Content {
 
 /// 迭代器形态的循环源(数组零物化,值逐个移出;字典/字符串按原版
 /// 逐对/字素),供生成代码内联 `for` 使用(break/continue 原生可用)。
-pub fn iter_values(
-    value: &Value,
-    span: Span,
-) -> SourceResult<Box<dyn Iterator<Item = Value>>> {
+pub fn iter_values(value: &Value, span: Span) -> SourceResult<Box<dyn Iterator<Item = Value>>> {
     use unicode_segmentation::UnicodeSegmentation;
     Ok(match value {
         Value::Array(array) => Box::new(array.clone().into_iter()),
@@ -460,9 +471,9 @@ pub fn d_rest(
 ) -> SourceResult<typst::foundations::Array> {
     let sink_size = (1 + array.len()).checked_sub(total);
     match sink_size {
-        Some(sink_size) if i + sink_size <= array.len() => Ok(
-            array.as_slice()[i..i + sink_size].iter().cloned().collect(),
-        ),
+        Some(sink_size) if i + sink_size <= array.len() => {
+            Ok(array.as_slice()[i..i + sink_size].iter().cloned().collect())
+        }
         _ => bail!(span, "{}", elements_mismatch(array.len(), total - 1, true)),
     }
 }
@@ -500,7 +511,11 @@ pub fn d_dict_rest(dict: &typst::foundations::Dict, used: &[&str]) -> typst::fou
 
 /// 对照原版 wrong_number_of_elements 的文案形态。
 fn elements_mismatch(len: usize, expected: usize, spread: bool) -> String {
-    let quantifier = if len > expected { "too many" } else { "not enough" };
+    let quantifier = if len > expected {
+        "too many"
+    } else {
+        "not enough"
+    };
     let what = if spread {
         format!("at least {expected} elements")
     } else if expected == 1 {
@@ -536,7 +551,10 @@ pub fn import_external(engine: &mut Engine, spec: &str) -> SourceResult<Module> 
     )
     .intern();
     let bytes = engine.world.file(manifest_id).at(SPAN0)?;
-    let text = bytes.as_str().map_err(typst::diag::FileError::from).at(SPAN0)?;
+    let text = bytes
+        .as_str()
+        .map_err(typst::diag::FileError::from)
+        .at(SPAN0)?;
     let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
         Ok(manifest) => manifest,
         Err(err) => bail!(SPAN0, "package manifest is malformed ({})", err.message()),
@@ -577,7 +595,10 @@ pub fn accessor_assign(
                 "first" => array.first_mut().at(span)?,
                 "last" => array.last_mut().at(span)?,
                 _ => {
-                    let i = index.unwrap_or_else(|| Value::None).cast::<i64>().at(span)?;
+                    let i = index
+                        .unwrap_or_else(|| Value::None)
+                        .cast::<i64>()
+                        .at(span)?;
                     array.at_mut(i).at(span)?
                 }
             };
@@ -585,8 +606,14 @@ pub fn accessor_assign(
             Ok(())
         }
         Value::Dict(dict) if method == "at" => {
-            let key = index.unwrap_or_else(|| Value::None).cast::<Str>().at(span)?;
-            { let slot = dict.at_mut(&key).at(span)?; *slot = value; }
+            let key = index
+                .unwrap_or_else(|| Value::None)
+                .cast::<Str>()
+                .at(span)?;
+            {
+                let slot = dict.at_mut(&key).at(span)?;
+                *slot = value;
+            }
             Ok(())
         }
         other => bail!(span, "type {} has no method `{}`", other.ty(), method),

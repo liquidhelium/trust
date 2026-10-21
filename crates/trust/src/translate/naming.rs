@@ -4,14 +4,20 @@
 pub(super) fn sanitize(name: &str) -> String {
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     // Rust 关键字加原始标识符前缀(typst 允许 `fn` 等作参数名)。
     const KEYWORDS: &[&str] = &[
-        "fn", "let", "if", "else", "while", "for", "in", "loop", "match", "return",
-        "break", "continue", "struct", "enum", "impl", "trait", "type", "mod", "pub",
-        "use", "as", "const", "static", "mut", "ref", "move", "true", "false", "self",
-        "super", "crate", "dyn", "where", "unsafe", "async", "await", "box", "union",
+        "fn", "let", "if", "else", "while", "for", "in", "loop", "match", "return", "break",
+        "continue", "struct", "enum", "impl", "trait", "type", "mod", "pub", "use", "as", "const",
+        "static", "mut", "ref", "move", "true", "false", "self", "super", "crate", "dyn", "where",
+        "unsafe", "async", "await", "box", "union",
     ];
     if KEYWORDS.contains(&out.as_str()) {
         out = format!("r#{out}");

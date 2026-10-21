@@ -115,12 +115,7 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.set-deep((a: (b: 1)))",
             "m.swap-at((1, 2, 3))",
         ],
-        "toplevel" => vec![
-            "m.squares5",
-            "m.golden-name",
-            "m.mean-of",
-            "m.mean(3, 5)",
-        ],
+        "toplevel" => vec!["m.squares5", "m.golden-name", "m.mean-of", "m.mean(3, 5)"],
         "pkg_shapes" => vec![
             "m.area(3, 4)",
             "m.describe(\"rect\", 2.5, 3.25)",
@@ -158,12 +153,19 @@ fn pkg_files(name: &str) -> Vec<(String, String)> {
             if path.is_dir() {
                 walk(&path, &format!("{prefix}{file}/"), out);
             } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
-                out.push((format!("{prefix}{file}"), std::fs::read_to_string(&path).unwrap()));
+                out.push((
+                    format!("{prefix}{file}"),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
             }
         }
     }
     let mut out = Vec::new();
-    walk(std::path::Path::new(&format!("fixtures/{name}")), "", &mut out);
+    walk(
+        std::path::Path::new(&format!("fixtures/{name}")),
+        "",
+        &mut out,
+    );
     out
 }
 
@@ -202,10 +204,10 @@ fn differential(fixture: &str) {
     let mut failures = Vec::new();
     for call in calls {
         let g = golden_world
-            .eval_code(&format!("{call}"), golden_scope_clone(&golden_scope))
+            .eval_code(call, golden_scope_clone(&golden_scope))
             .unwrap_or_else(|e| panic!("golden 执行失败 {call}: {e:?}"));
         let r = rust_world
-            .eval_code(&format!("{call}"), golden_scope_clone(&rust_scope))
+            .eval_code(call, golden_scope_clone(&rust_scope))
             .unwrap_or_else(|e| panic!("rust 执行失败 {call}: {e:?}"));
         let (g, r) = (format!("{g:?}"), format!("{r:?}"));
         if g != r {
@@ -257,7 +259,17 @@ macro_rules! diff_test {
     };
 }
 
-diff_test!(arith, control, collections, closure, stdlib, pkg_shapes, content, toplevel, destructuring);
+diff_test!(
+    arith,
+    control,
+    collections,
+    closure,
+    stdlib,
+    pkg_shapes,
+    content,
+    toplevel,
+    destructuring
+);
 
 #[test]
 fn all_fixtures_covered() {
@@ -273,7 +285,18 @@ fn all_fixtures_covered() {
             .into_owned();
         declared.insert(name, true);
     }
-    let covered: Vec<&str> = vec!["arith", "control", "collections", "closure", "stdlib", "pkg_shapes", "bench", "content", "toplevel", "destructuring"];
+    let covered: Vec<&str> = vec![
+        "arith",
+        "control",
+        "collections",
+        "closure",
+        "stdlib",
+        "pkg_shapes",
+        "bench",
+        "content",
+        "toplevel",
+        "destructuring",
+    ];
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),

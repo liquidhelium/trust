@@ -38,7 +38,7 @@ mod paths;
 mod plan;
 
 pub use file::translate;
-pub use package::{translate_package, translate_package_lenient, PackageInput};
+pub use package::{PackageInput, translate_package, translate_package_lenient};
 
 /// 翻译诊断:语法 span + 消息 + 所属文件(包模式)。
 #[derive(Debug, Clone)]

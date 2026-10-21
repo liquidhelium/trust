@@ -99,7 +99,11 @@ fn main() {
                     if path.is_dir() {
                         stack.push(path);
                     } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
-                        let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                        let rel = path
+                            .strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
                         files.insert(rel, std::fs::read_to_string(&path).expect("read"));
                     }
                 }
@@ -111,7 +115,10 @@ fn main() {
                 .cloned()
                 .expect("entry lib.typ");
             // 只收 entry 所在的包源树(docs/tests 等不入包)。
-            let src_root = entry.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default();
+            let src_root = entry
+                .rsplit_once('/')
+                .map(|(dir, _)| format!("{dir}/"))
+                .unwrap_or_default();
             if !src_root.is_empty() {
                 files.retain(|k, _| k.starts_with(&src_root));
             }
@@ -123,7 +130,11 @@ fn main() {
                     eprintln!("降级 {:?}: {}", d.span, d.message);
                 }
                 std::fs::write(output, &code).expect("write");
-                println!("已生成 {output}({} 字节,降级 {} 处,清单见上方与文件头注释)", code.len(), diags.len());
+                println!(
+                    "已生成 {output}({} 字节,降级 {} 处,清单见上方与文件头注释)",
+                    code.len(),
+                    diags.len()
+                );
             } else {
                 match trust::translate_package(&pkg, name) {
                     Ok(code) => {
@@ -159,7 +170,9 @@ fn main() {
 /// 按诊断消息聚类统计缺口(数据驱动开发优先级)。
 fn coverage(root: &str) -> i32 {
     fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -195,7 +208,10 @@ fn coverage(root: &str) -> i32 {
                     .replace('\\', "/")
             });
         if let (true, Some(entry)) = (has_lib, entry) {
-            let src_root = entry.rsplit_once('/').map(|(dir, _)| format!("{dir}/")).unwrap_or_default();
+            let src_root = entry
+                .rsplit_once('/')
+                .map(|(dir, _)| format!("{dir}/"))
+                .unwrap_or_default();
             let mut map = std::collections::BTreeMap::new();
             for file in &files {
                 let rel = file
@@ -242,7 +258,9 @@ fn coverage(root: &str) -> i32 {
     let mut total = 0usize;
     let mut ok_files = 0usize;
     for file in &files {
-        let Ok(src) = std::fs::read_to_string(file) else { continue };
+        let Ok(src) = std::fs::read_to_string(file) else {
+            continue;
+        };
         total += 1;
         let diags = match trust::translate(&src, "m") {
             Ok(_) => Vec::new(),
@@ -278,7 +296,8 @@ fn coverage(root: &str) -> i32 {
 fn normalize_diag(message: &str) -> String {
     let m = message;
     let pick = |prefix: &str| -> Option<String> {
-        m.find(prefix).map(|i| m[i..].split(')').next().unwrap_or(&m[i..]).to_string())
+        m.find(prefix)
+            .map(|i| m[i..].split(')').next().unwrap_or(&m[i..]).to_string())
     };
     if m.contains("遇到 ") {
         return format!("顶层: {}", m.split("遇到 ").nth(1).unwrap_or("?"));

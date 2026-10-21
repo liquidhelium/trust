@@ -24,7 +24,10 @@ fn snapshots_match() {
 
     for (name, src) in INPUTS {
         let out = trust::translate(src, name).unwrap_or_else(|diags| {
-            panic!("快照输入 {name} 翻译失败: {:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>())
+            panic!(
+                "快照输入 {name} 翻译失败: {:?}",
+                diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+            )
         });
         let path = dir.join(format!("{name}.rs"));
         if update || !path.exists() {
@@ -33,8 +36,7 @@ fn snapshots_match() {
         }
         let expect = std::fs::read_to_string(&path).expect("read snapshot");
         assert_eq!(
-            expect,
-            out,
+            expect, out,
             "生成物与快照不一致(输入 {name});确认变更合理后用 UPDATE_SNAPSHOTS=1 更新"
         );
     }

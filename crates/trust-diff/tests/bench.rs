@@ -28,7 +28,10 @@ fn run_interpreted(calls: &[String]) -> Vec<String> {
     calls
         .iter()
         .map(|call| {
-            format!("{:?}", world.eval_code(call, scope.clone()).expect("golden run"))
+            format!(
+                "{:?}",
+                world.eval_code(call, scope.clone()).expect("golden run")
+            )
         })
         .collect()
 }
@@ -41,7 +44,10 @@ fn run_compiled(calls: &[String]) -> Vec<String> {
     calls
         .iter()
         .map(|call| {
-            format!("{:?}", world.eval_code(call, scope.clone()).expect("rust run"))
+            format!(
+                "{:?}",
+                world.eval_code(call, scope.clone()).expect("rust run")
+            )
         })
         .collect()
 }
@@ -65,7 +71,7 @@ fn interpreter_vs_compiled() {
 
     let mut interp_total = 0u128;
     let mut comp_total = 0u128;
-    for (idx, template) in templates.iter().enumerate() {
+    for template in &templates {
         let mut interp_one = 0u128;
         let mut comp_one = 0u128;
         for offset in 0..5 {
@@ -89,5 +95,8 @@ fn interpreter_vs_compiled() {
     }
     println!("interpreter: {interp_total} ms (5 轮合计)");
     println!("compiled:    {comp_total} ms (5 轮合计)");
-    println!("speedup:     {:.1}x", interp_total as f64 / comp_total as f64);
+    println!(
+        "speedup:     {:.1}x",
+        interp_total as f64 / comp_total as f64
+    );
 }

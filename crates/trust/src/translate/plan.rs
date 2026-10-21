@@ -65,11 +65,13 @@ pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
         seen.pop();
         true
     }
-    let mut edges: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut edges: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for plan in plans {
-        edges.entry(plan.path.clone()).or_default().extend(
-            plan.imports.iter().map(|edge| edge.target.clone()),
-        );
+        edges
+            .entry(plan.path.clone())
+            .or_default()
+            .extend(plan.imports.iter().map(|edge| edge.target.clone()));
     }
     let mut stack = Vec::new();
     !dfs(entry, &edges, &mut stack)
@@ -77,12 +79,7 @@ pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
 
 /// 文件依赖的拓扑序(被依赖者在前)。
 pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
-    fn visit(
-        idx: usize,
-        plans: &[FilePlan],
-        order: &mut Vec<usize>,
-        state: &mut Vec<u8>,
-    ) {
+    fn visit(idx: usize, plans: &[FilePlan], order: &mut Vec<usize>, state: &mut Vec<u8>) {
         if state[idx] != 0 {
             return;
         }
@@ -116,7 +113,10 @@ pub(super) fn scan_engine_slots(
     for &idx in order {
         let plan = &plans[idx];
         // 该文件的 env:import 边(带跨文件 flag)+ 自身绑定(逐个补 flag)。
-        let mut env = Env { locals: Vec::new(), module: Vec::new() };
+        let mut env = Env {
+            locals: Vec::new(),
+            module: Vec::new(),
+        };
         for edge in &plan.imports {
             let Some(target_plan) = plans.iter().find(|p| p.path == edge.target) else {
                 continue;
@@ -155,14 +155,20 @@ pub(super) fn scan_engine_slots(
         let mut seen_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for expr in plan.markup.exprs() {
-            let ast::Expr::LetBinding(lets) = expr else { continue };
+            let ast::Expr::LetBinding(lets) = expr else {
+                continue;
+            };
             let kind = lets.kind();
             let names = kind.bindings();
-            let [name_ident] = names.as_slice() else { continue };
+            let [name_ident] = names.as_slice() else {
+                continue;
+            };
             let name = name_ident.as_str().to_string();
             let nth = seen_counts.get(&name).copied().unwrap_or(0);
             seen_counts.insert(name.clone(), nth + 1);
-            let Some(slot) = nth_slot(plan, &name, nth) else { continue };
+            let Some(slot) = nth_slot(plan, &name, nth) else {
+                continue;
+            };
             let qualified = format!("{}::{slot}", plan.mod_name);
             let is_engine = engine_slots.contains(&qualified);
             let mut env2 = env.clone();

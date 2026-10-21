@@ -9,15 +9,15 @@ use std::fmt::Write as _;
 
 use typst_syntax::ast::{self, AstNode};
 
+use super::Diag;
 use super::ctx::{Ctx, Env, Mode, Ref};
 use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, uppercase};
-use super::plan::{
-    build_export_table, has_import_cycle, nth_slot, scan_engine_slots, topo_order, FilePlan,
-    ImportEdge, ImportItems,
-};
 use super::paths::{normalize_import, parse_module_access};
-use super::Diag;
+use super::plan::{
+    FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, nth_slot,
+    scan_engine_slots, topo_order,
+};
 
 /// 待翻译的多文件包。
 pub struct PackageInput {
@@ -28,20 +28,28 @@ pub struct PackageInput {
 }
 
 /// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
-pub fn translate_package_lenient(
-    input: &PackageInput,
-    module_name: &str,
-) -> (String, Vec<Diag>) {
-    let mut cx = Ctx { diags: Vec::new(), lenient: true, next_id: 0, current_file: None, package_files: None, package_mods: None };
+pub fn translate_package_lenient(input: &PackageInput, module_name: &str) -> (String, Vec<Diag>) {
+    let mut cx = Ctx {
+        diags: Vec::new(),
+        lenient: true,
+        next_id: 0,
+        current_file: None,
+        package_files: None,
+        package_mods: None,
+    };
     let code = translate_package_inner(input, module_name, &mut cx);
     (code, cx.diags)
 }
 
-pub fn translate_package(
-    input: &PackageInput,
-    module_name: &str,
-) -> Result<String, Vec<Diag>> {
-    let mut cx = Ctx { diags: Vec::new(), lenient: false, next_id: 0, current_file: None, package_files: None, package_mods: None };
+pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<String, Vec<Diag>> {
+    let mut cx = Ctx {
+        diags: Vec::new(),
+        lenient: false,
+        next_id: 0,
+        current_file: None,
+        package_files: None,
+        package_mods: None,
+    };
     let code = translate_package_inner(input, module_name, &mut cx);
     if !cx.diags.is_empty() {
         return Err(cx.diags);
@@ -49,11 +57,7 @@ pub fn translate_package(
     Ok(code)
 }
 
-fn translate_package_inner(
-    input: &PackageInput,
-    module_name: &str,
-    cx: &mut Ctx,
-) -> String {
+fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx) -> String {
     let entry = input.entry.trim_start_matches('/');
     if !input.files.contains_key(entry) {
         cx.diags.push(Diag {
@@ -74,10 +78,19 @@ fn translate_package_inner(
     }
     for (idx, (path, root)) in roots.iter().enumerate() {
         let Some(markup) = root.cast::<ast::Markup>() else {
-            cx.diag(typst_syntax::Span::detached(), format!("{path} 未能解析为 markup 模块"));
+            cx.diag(
+                typst_syntax::Span::detached(),
+                format!("{path} 未能解析为 markup 模块"),
+            );
             continue;
         };
-        let stem = path.rsplit('/').next().unwrap_or("f").split('.').next().unwrap_or("f");
+        let stem = path
+            .rsplit('/')
+            .next()
+            .unwrap_or("f")
+            .split('.')
+            .next()
+            .unwrap_or("f");
         let mod_name = format!("m{idx}_{}", sanitize(stem));
         let mut tops = Vec::new();
         let mut imports = Vec::new();
@@ -96,7 +109,10 @@ fn translate_package_inner(
                         other => match parse_module_access(other) {
                             Some(access) => (String::new(), false, Some(access)),
                             None => {
-                                cx.diag(expr.span(), "import 源须为字符串路径或模块字段访问".into());
+                                cx.diag(
+                                    expr.span(),
+                                    "import 源须为字符串路径或模块字段访问".into(),
+                                );
                                 continue;
                             }
                         },
@@ -139,14 +155,22 @@ fn translate_package_inner(
                                 .collect(),
                         ),
                     };
-                    imports.push(ImportEdge { span: expr.span(), target, items, external, module_access });
+                    imports.push(ImportEdge {
+                        span: expr.span(),
+                        target,
+                        items,
+                        external,
+                        module_access,
+                    });
                 }
                 ast::Expr::LetBinding(lets) => {
                     let names = match lets.kind() {
                         ast::LetBindingKind::Closure(name) => vec![name.as_str().to_string()],
-                        ast::LetBindingKind::Normal(pattern) => {
-                            pattern.bindings().iter().map(|i| i.as_str().to_string()).collect()
-                        }
+                        ast::LetBindingKind::Normal(pattern) => pattern
+                            .bindings()
+                            .iter()
+                            .map(|i| i.as_str().to_string())
+                            .collect(),
                     };
                     for name in names {
                         let id = cx.fresh_id();
@@ -162,7 +186,13 @@ fn translate_package_inner(
                 }
             }
         }
-        plans.push(FilePlan { path: path.clone(), mod_name, markup, tops, imports });
+        plans.push(FilePlan {
+            path: path.clone(),
+            mod_name,
+            markup,
+            tops,
+            imports,
+        });
     }
     if !cx.diags.is_empty() && !cx.lenient {
         // 壳层负责返回 Err。
@@ -204,7 +234,10 @@ fn translate_package_inner(
     for plan in &plans {
         cx.current_file = Some(plan.path.clone());
         let is_entry = plan.path == entry;
-        let mut env = Env { locals: Vec::new(), module: Vec::new() };
+        let mut env = Env {
+            locals: Vec::new(),
+            module: Vec::new(),
+        };
         // 当前文件的 import 抄入(可见绑定 + module() 定义)。
         let mut file_defines = String::new();
         let mut import_slots: std::collections::HashMap<String, String> =
@@ -267,7 +300,10 @@ fn translate_package_inner(
                         }
                     },
                     None => {
-                        cx.diag(edge.span, format!("import 的模块根 `{root}` 不可见(须先 import)"));
+                        cx.diag(
+                            edge.span,
+                            format!("import 的模块根 `{root}` 不可见(须先 import)"),
+                        );
                         continue;
                     }
                 };
@@ -288,7 +324,10 @@ fn translate_package_inner(
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
                             env.module.push((
                                 as_name,
-                                Ref::ModuleField { expr: expr.clone(), name: item.clone() },
+                                Ref::ModuleField {
+                                    expr: expr.clone(),
+                                    name: item.clone(),
+                                },
                             ));
                         }
                     }
@@ -329,7 +368,11 @@ fn translate_package_inner(
                         );
                     }
                     env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                    let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(&name));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::slot(&{slot}));",
+                        escape(&name)
+                    );
                 }
                 ImportItems::Rename(name) => {
                     let value = format!("Value::Module({target_mod}::module())");
@@ -346,15 +389,16 @@ fn translate_package_inner(
                         );
                     }
                     env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                    let _ = writeln!(file_defines, "    scope.define(\"{}\", rt::slot(&{slot}));", escape(name));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::slot(&{slot}));",
+                        escape(name)
+                    );
                 }
                 ImportItems::List(list) => {
                     for (name, rename) in list {
                         let Some(qualified) = exports.get(name) else {
-                            cx.diag(
-                                edge.span,
-                                format!("`{}` 不包含导出 `{name}`", edge.target),
-                            );
+                            cx.diag(edge.span, format!("`{}` 不包含导出 `{name}`", edge.target));
                             continue;
                         };
                         let as_name = rename.clone().unwrap_or_else(|| name.clone());
@@ -415,7 +459,9 @@ fn translate_package_inner(
         let mut own_seen_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for expr in plan.markup.exprs() {
-            let ast::Expr::LetBinding(lets) = expr else { continue };
+            let ast::Expr::LetBinding(lets) = expr else {
+                continue;
+            };
             match lets.kind() {
                 ast::LetBindingKind::Closure(name) => {
                     let Some(ast::Expr::Closure(closure)) = lets.init() else {
@@ -436,7 +482,8 @@ fn translate_package_inner(
                         };
                         env2.module.push((seen.clone(), r));
                     }
-                    env2.module.push((name.as_str().to_string(), Ref::Slot(slot.clone())));
+                    env2.module
+                        .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
                     file_items.push_str(&cx.gen_function(&fun, closure, &env2));
@@ -455,7 +502,10 @@ fn translate_package_inner(
                         continue;
                     };
                     let Some(init_expr) = lets.init() else {
-                        cx.diag(lets.span(), format!("顶层 `#let {}` 缺少初始化", name.as_str()));
+                        cx.diag(
+                            lets.span(),
+                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                        );
                         continue;
                     };
                     let nth = own_seen_counts.get(name.as_str()).copied().unwrap_or(0);
@@ -576,10 +626,22 @@ use typst::syntax::ast::Unit;\n\
 
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
 fn spec_name(spec: &str) -> String {
-    spec.split('/').nth(1).unwrap_or("pkg").split(':').next().unwrap_or("pkg").to_string()
+    spec.split('/')
+        .nth(1)
+        .unwrap_or("pkg")
+        .split(':')
+        .next()
+        .unwrap_or("pkg")
+        .to_string()
 }
 
 /// 文件路径的模块名(bare import 的名字 = 文件 stem)。
 fn module_stem(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or("m").split('.').next().unwrap_or("m").to_string()
+    path.rsplit('/')
+        .next()
+        .unwrap_or("m")
+        .split('.')
+        .next()
+        .unwrap_or("m")
+        .to_string()
 }

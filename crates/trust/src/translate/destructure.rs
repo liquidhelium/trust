@@ -5,7 +5,7 @@
 
 use typst_syntax::ast::{self, AstNode};
 
-use super::ctx::{bind_local, Ctx, Env, Mode};
+use super::ctx::{Ctx, Env, Mode, bind_local};
 use super::naming::escape;
 
 impl Ctx {
@@ -25,10 +25,7 @@ impl Ctx {
                     Some((_, rust)) => format!("{rust} = {value};\n"),
                     None => {
                         if assign {
-                            self.diag(
-                                ident.span(),
-                                format!("解构赋值目标 `{name}` 不是局部变量"),
-                            );
+                            self.diag(ident.span(), format!("解构赋值目标 `{name}` 不是局部变量"));
                             String::new()
                         } else {
                             let rust = bind_local(env, &name);
@@ -38,7 +35,9 @@ impl Ctx {
                 }
             }
             ast::Pattern::Placeholder(_) => format!("let _ = {value};\n"),
-            ast::Pattern::Parenthesized(p) => self.destructure(p.pattern(), value, env, mode, assign),
+            ast::Pattern::Parenthesized(p) => {
+                self.destructure(p.pattern(), value, env, mode, assign)
+            }
             ast::Pattern::Destructuring(d) => {
                 let id = self.fresh_id();
                 let tmp = format!("__d{id}");
@@ -68,8 +67,9 @@ impl Ctx {
                         }
                         ast::DestructuringItem::Spread(spread) => {
                             has_spread = true;
-                            let v =
-                                format!("Value::Array(rt::d_rest(&{arr_ref}, {i}, {n_items}, SPAN)?)");
+                            let v = format!(
+                                "Value::Array(rt::d_rest(&{arr_ref}, {i}, {n_items}, SPAN)?)"
+                            );
                             match spread.sink_expr() {
                                 Some(expr) => {
                                     arr.push_str(&self.destructure(
@@ -101,9 +101,9 @@ impl Ctx {
                 let mut sink: Option<(ast::Expr, String)> = None;
                 for item in d.items() {
                     match item {
-                        ast::DestructuringItem::Pattern(ast::Pattern::Normal(ast::Expr::Ident(
-                            ident,
-                        ))) => {
+                        ast::DestructuringItem::Pattern(ast::Pattern::Normal(
+                            ast::Expr::Ident(ident),
+                        )) => {
                             let key = ident.as_str().to_string();
                             used.push(key.clone());
                             let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));

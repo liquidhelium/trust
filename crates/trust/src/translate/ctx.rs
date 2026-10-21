@@ -5,8 +5,8 @@
 //! 模块槽);`Ref` 是模块槽的引用形态;`Mode` 区分函数体(引擎在手)
 //! 与顶层值初始化(免引擎)。
 
-use super::naming::fresh_rust_ident;
 use super::Diag;
+use super::naming::fresh_rust_ident;
 
 pub(super) struct Ctx {
     pub(super) diags: Vec<Diag>,
@@ -27,7 +27,10 @@ pub(super) enum Ref {
     Slot(String),
     Engine(String),
     /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`)。
-    ModuleField { expr: String, name: String },
+    ModuleField {
+        expr: String,
+        name: String,
+    },
     /// 直接以表达式求值的绑定(模块值本身或其字段)。
     Value(String),
 }
@@ -56,7 +59,11 @@ impl Ctx {
 
     pub(super) fn diag(&mut self, span: typst_syntax::Span, message: String) {
         let file = self.current_file.clone();
-        self.diags.push(Diag { span, message, file });
+        self.diags.push(Diag {
+            span,
+            message,
+            file,
+        });
     }
 }
 

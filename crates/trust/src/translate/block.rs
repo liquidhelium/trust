@@ -186,13 +186,13 @@ impl Ctx {
                         Some(op) => {
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; *__p = ops::{op}((*__p).clone(), __rhs).at({at})?; }}"
+                                "    {{ let __rhs = {rhs}; let __p = rt::place_assign(&mut {root}, {path_lit}, {at})?; *__p = ops::{op}((*__p).clone(), __rhs).at({at})?; }}"
                             );
                         }
                         None => {
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; *rt::place_mut(&mut {root}, {path_lit}, {at})? = __rhs; }}"
+                                "    {{ let __rhs = {rhs}; *rt::place_assign(&mut {root}, {path_lit}, {at})? = __rhs; }}"
                             );
                         }
                     }

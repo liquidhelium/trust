@@ -159,7 +159,7 @@ impl Ctx {
                     let path_lit = super::block::place_path_lit(&path);
                     let at = self.span_of(other.span());
                     return format!(
-                        "{{ *rt::place_mut(&mut {root}, {path_lit}, {at})? = {value}; }}\n"
+                        "{{ *rt::place_assign(&mut {root}, {path_lit}, {at})? = {value}; }}\n"
                     );
                 }
                 self.diag(other.span(), "解构模式此处须为标识符".into());

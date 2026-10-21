@@ -276,13 +276,15 @@ fn virtual_closure_source(src: &str) -> typst::syntax::Source {
             .expect("valid closure path"),
     )
     .intern();
-    // 命名绑定形态直接嵌入;其余(裸闭包、context 体)包一层合成名
-    //(匿名形态本就无自引用,名字不可达)。
+    // 命名绑定形态直接嵌入(init 是 block 或单行,markup 下合法);
+    // 其余(裸闭包、context 体)包一层括号再赋给合成名——markup 的
+    // `#let x = expr` init 在**行尾**截止,裸闭包体跨行会被截断成空体,
+    // 括号强制 code 上下文才能跨行(匿名形态本就无自引用,名字不可达)。
     let trimmed = src.trim_start();
     let text = if trimmed.starts_with("let ") {
         format!("#{trimmed}")
     } else {
-        format!("#let __trust_closure = {trimmed}")
+        format!("#let __trust_closure = ({trimmed})")
     };
     let source = typst::syntax::Source::new(id, text.clone());
     CLOSURE_SOURCES.write().unwrap().push((id, text));
@@ -299,6 +301,13 @@ pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value
     let node = find_closure_node(root)
         .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
         .clone();
+    if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() {
+        eprintln!(
+            "[closure] 闭包节点 span: {:?} (detached={})",
+            node.span(),
+            node.span().is_detached()
+        );
+    }
     let num_pos_params = node
         .cast::<ast::Closure>()
         .expect("closure node casts")
@@ -306,8 +315,22 @@ pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value
         .children()
         .filter(|p| matches!(p, ast::Param::Pos(_)))
         .count();
+    let closure_span = node.span();
+    if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() {
+        eprintln!(
+            "[closure+ span={:?}] {}",
+            closure_span,
+            text[..text.len().min(100)].replace('\n', "\\n")
+        );
+    }
     let mut scope = Scope::new();
     for (name, value) in captured {
+        if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some()
+            && (src.contains("ctx => {") || src.contains("key =>"))
+        {
+            let brief = format!("{value:?}");
+            eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
+        }
         scope.define(name, value.clone());
     }
     Func::from(Closure {
@@ -316,6 +339,9 @@ pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value
         captured: scope,
         num_pos_params,
     })
+    // 对照 typst:闭包创建时 spanned(定义点);解释体内错误的传播点
+    // (如 array.any 谓词的 cast 用 test.span())从此可定位到虚拟源。
+    .spanned(closure_span)
 }
 
 /// 先序遍历找第一个 Closure 节点。
@@ -812,6 +838,25 @@ pub enum PlaceSeg {
     At(Value),
     First,
     Last,
+}
+
+/// 赋值目标(`x.f = v` / `x.f OP= v` / 解构写回)的可变位置,对照
+/// typst-eval 的 `FieldAssignment` 语义:最后一段字段在字典上**缺失时
+/// 插入**;中间段与 [`place_mut`] 同(at_mut 缺失报错,服务可变方法)。
+pub fn place_assign<'a>(
+    root: &'a mut Value,
+    path: &[PlaceSeg],
+    span: Span,
+) -> SourceResult<&'a mut Value> {
+    if let Some((PlaceSeg::Field(name), [])) = path.split_last()
+        && let Value::Dict(dict) = root
+    {
+        if dict.get(name).is_err() {
+            dict.insert(Str::from(name.as_str()), Value::None);
+        }
+        return dict.at_mut(name).at(span);
+    }
+    place_mut(root, path, span)
 }
 
 /// 沿路径段取可变引用(对照 `Expr::access`)。

@@ -85,7 +85,7 @@ fn main() {
                 }
             }
             let (Some(input), Some(output)) = (input, output) else {
-                eprintln!("用法: trust translate-pkg <包根目录> -o <输出.rs> [--lenient]");
+                eprintln!("用法: trust translate-pkg <包根目录> -o <输出.rs|目录/> [--lenient]");
                 std::process::exit(2);
             };
             let lenient = args.iter().any(|a| a == "--lenient");
@@ -124,6 +124,35 @@ fn main() {
             }
             let pkg = trust::PackageInput { files, entry };
             let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("pkg");
+            // `-o 目录/`(尾斜杠):目录形态,镜像源码树的多文件产物。
+            if let Some(dir) = output.strip_suffix('/') {
+                if lenient {
+                    eprintln!("目录形态暂不支持 --lenient");
+                    std::process::exit(2);
+                }
+                match trust::translate_package_tree(&pkg, name) {
+                    Ok(tree) => {
+                        let out_root = std::path::Path::new(dir);
+                        std::fs::create_dir_all(out_root).expect("create output dir");
+                        let mut bytes = 0usize;
+                        for (rel, content) in &tree {
+                            let path = out_root.join(rel);
+                            std::fs::create_dir_all(path.parent().expect("parent"))
+                                .expect("create dirs");
+                            std::fs::write(&path, content).expect("write");
+                            bytes += content.len();
+                        }
+                        println!("已生成树 {} 个文件({} 字节)于 {output}", tree.len(), bytes);
+                    }
+                    Err(diags) => {
+                        for d in diags {
+                            eprintln!("  {:?}: {}", d.span, d.message);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, name);
                 for d in &diags {

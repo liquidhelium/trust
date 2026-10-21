@@ -42,7 +42,9 @@ mod paths;
 mod plan;
 
 pub use file::translate;
-pub use package::{PackageInput, translate_package, translate_package_lenient};
+pub use package::{
+    PackageInput, translate_package, translate_package_lenient, translate_package_tree,
+};
 
 /// 翻译诊断:语法 span + 消息 + 所属文件(包模式)。
 #[derive(Debug, Clone)]

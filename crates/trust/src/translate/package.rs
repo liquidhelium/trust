@@ -1,12 +1,19 @@
-//! 多文件包驱动:一个 typst 包 → **单个** Rust 源文件。
+//! 多文件包驱动:一个 typst 包 → 单文件或目录树两种 Rust 产物。
 //!
 //! 生成形态(per-build 槽板,见 `_things/DESIGN-per-build.md`):
 //! - `__State`:包内全部顶层绑定槽 + import 槽(外部包、bare/rename
 //!   模块值),每构建一份实例;
-//! - 每个源文件一个 `mod m<i>_<stem>`:`eval(&__st, engine, context)`
-//!   按源序填本文件槽位(模块求值的镜像),`module(&__st)` 从已填
-//!   槽位构建该文件的导出面(含引擎值);
+//! - 每个源文件一个模块:`eval(&__st, engine, context)` 按源序填本
+//!   文件槽位(模块求值的镜像),`module(&__st)` 从已填槽位构建该文件
+//!   的导出面(含引擎值);
 //! - 顶层 `module_init` 按拓扑序驱动各文件求值,返回入口模块。
+//!
+//! 单文件形态(`render_single`):全部文件体内联为扁平 `mod` 块,是
+//! 差分与快照的锁定基准;目录形态(`translate_package_tree`):镜像
+//! 源码树,每个 typ 文件一个 rust 文件,跨文件引用经根的 `__State`
+//! 与 `use super::*` 链(私有 use 对后代可见)。`x.typ` 与 `x/` 目录
+//! 并存时,目录声明并入 `x.rs`(rust 文件模块的子模块查找目录恰为
+//! `x/`),否则目录用 `mod.rs`。
 //!
 //! 包内 `#import` 在翻译期解析为跨文件槽引用;结构分析见 `plan.rs`。
 
@@ -31,23 +38,44 @@ pub struct PackageInput {
     pub entry: String,
 }
 
+/// 一个 typ 文件的可发射产物:文件体 + 单文件/目录两种模块名。
+struct FileOut {
+    /// 文件体(`mod` 块内部形态,与单文件产物逐字节同形)。
+    body: String,
+    /// 单文件形态的扁平 mod 名(`m{i}_{stem}`)。
+    flat_name: String,
+    /// 目录形态的完整模块路径段(镜像 typ 路径,如 `[src, draw, shapes]`)。
+    tree_full: Vec<String>,
+}
+
+/// 包翻译的中间产物:header(带 `{EVAL_CALLS}`/`{ITEMS}` 占位)+
+/// 双形态 eval 驱动 + 各文件体,由 `render_single`/`translate_package_tree`
+/// 组装为最终产物。空态(header 空、files 空)对应早退。
+#[derive(Default)]
+struct PackageParts {
+    header: String,
+    eval_flat: String,
+    eval_tree: String,
+    files: Vec<FileOut>,
+}
+
 /// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
 pub fn translate_package_lenient(input: &PackageInput, module_name: &str) -> (String, Vec<Diag>) {
     let mut cx = Ctx::new(true);
-    let code = translate_package_inner(input, module_name, &mut cx);
-    (code, cx.diags)
+    let parts = translate_package_parts(input, module_name, &mut cx);
+    (render_single(&parts), cx.diags)
 }
 
 pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut cx = Ctx::new(false);
-    let code = translate_package_inner(input, module_name, &mut cx);
+    let parts = translate_package_parts(input, module_name, &mut cx);
     if !cx.diags.is_empty() {
         return Err(cx.diags);
     }
-    Ok(code)
+    Ok(render_single(&parts))
 }
 
-fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx) -> String {
+fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx) -> PackageParts {
     let entry = input.entry.trim_start_matches('/');
     if !input.files.contains_key(entry) {
         cx.diags.push(Diag {
@@ -55,7 +83,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
             message: format!("入口文件 {entry} 不在文件集中"),
             file: None,
         });
-        return String::new();
+        return PackageParts::default();
     }
 
     // 第一遍:每个文件的顶层绑定与 import 边。
@@ -214,7 +242,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
     if !cx.diags.is_empty() && !cx.lenient {
         // 壳层负责返回 Err。
-        return String::new();
+        return PackageParts::default();
     }
 
     // import 环检测(typst 模块循环求值同样报错)。
@@ -224,7 +252,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
             message: "包内 import 成环(typst 运行时同样会报循环求值)".into(),
             file: None,
         });
-        return String::new();
+        return PackageParts::default();
     }
 
     let package_files = std::rc::Rc::new(input.files.clone());
@@ -241,10 +269,11 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let export_table = build_export_table(&plans);
 
     // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
-    let mut items = String::new();
     let mut top_defines = String::new();
     let mut state_fields: Vec<String> = Vec::new();
-    let mut eval_calls = String::new();
+    let mut files: Vec<FileOut> = Vec::new();
+    let mut eval_flat = String::new();
+    let mut eval_tree = String::new();
     for &idx in &order {
         let plan = &plans[idx];
         cx.current_file = Some(plan.path.clone());
@@ -658,20 +687,21 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
         );
 
-        // 文件 mod 块:file_span 锚点 + 函数体 + eval(填槽)+ module(导出面)。
-        let mut file_mod = format!(
-            "\nmod {} {{\n    use super::*;\n\n    #[allow(non_snake_case, dead_code)]\n    fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
-            plan.mod_name, plan.path
+        // 文件体:file_span 锚点 + 函数体 + eval(填槽)+ module(导出面);
+        // 单文件形态包进 `mod` 块,目录形态独立成文件(镜像源码树)。
+        let mut body = format!(
+            "\n    #[allow(non_snake_case, dead_code)]\n    fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
+            plan.path
         );
         let _ = writeln!(
-            file_mod,
+            body,
             "\n    /// `{}` 的求值:填 import 槽与自身绑定槽(模块求值的镜像)。\n\
              \x20   pub(super) fn eval(__st: &__State, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
              \x20       let _ = (&*engine, context);\n{import_fills}{binding_code}        Ok(())\n    }}",
             plan.path
         );
         let _ = writeln!(
-            file_mod,
+            body,
             "\n    /// `{}` 的模块作用域(import 抄入 + 本文件顶层绑定),从已填槽位构建。\n\
              \x20   #[allow(non_snake_case, dead_code)]\n\
              \x20   pub(super) fn module(__st: &__State) -> SourceResult<Module> {{\n\
@@ -680,21 +710,32 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
             plan.path,
             module_stem(&plan.path)
         );
-        items.push_str(&file_mod);
-        items.push_str("}\n");
+        // 目录形态的完整模块路径段(镜像 typ 路径,目录消歧)。
+        let tree_full: Vec<String> = plan
+            .path
+            .strip_suffix(".typ")
+            .unwrap_or(&plan.path)
+            .split('/')
+            .map(sanitize)
+            .collect();
+        let tree_path = tree_full.join("::");
+        files.push(FileOut {
+            body,
+            flat_name: plan.mod_name.clone(),
+            tree_full,
+        });
 
         if is_entry {
             top_defines = file_defines;
-            let _ = writeln!(
-                eval_calls,
-                "    // 入口 `{entry}`(被依赖文件已在上方求值)。"
-            );
+            let _ = writeln!(eval_flat, "    // 入口 `{entry}`(被依赖文件已在上方求值)。");
+            let _ = writeln!(eval_tree, "    // 入口 `{entry}`(被依赖文件已在上方求值)。");
         }
         let _ = writeln!(
-            eval_calls,
+            eval_flat,
             "    {}::eval(&__st, engine, context)?;",
             plan.mod_name
         );
+        let _ = writeln!(eval_tree, "    {tree_path}::eval(&__st, engine, context)?;");
     }
 
     let degraded_header = if cx.lenient && !cx.diags.is_empty() {
@@ -722,7 +763,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
 
     let span_consts = cx.span_consts();
-    format!(
+    let header = format!(
         "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n{degraded_header}\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
@@ -738,8 +779,135 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n{eval_calls}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{items}"
-    )
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = rt::state_get_or_insert::<__State>(engine, __State::default);\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{{ITEMS}}"
+    );
+    PackageParts {
+        header,
+        eval_flat,
+        eval_tree,
+        files,
+    }
+}
+
+/// 单文件形态:header 的占位替换为扁平 eval 驱动与全部 `mod` 块。
+/// 逐段 `push_str` 拼接(`writeln!` 格式串的 `{{}}}}` 转义易错),
+/// 与重构前产物逐字节同形,是差分与快照的锁定基准。
+fn render_single(parts: &PackageParts) -> String {
+    let mut items = String::new();
+    for f in &parts.files {
+        items.push_str("\nmod ");
+        items.push_str(&f.flat_name);
+        items.push_str(" {\n    use super::*;\n");
+        items.push_str(&f.body);
+        items.push_str("}\n");
+    }
+    parts
+        .header
+        .replace("{EVAL_CALLS}", &parts.eval_flat)
+        .replace("{ITEMS}", &items)
+}
+
+/// 目录形态:镜像源码树的多文件产物(相对路径 → 内容,根为 `mod.rs`)。
+/// 每个 typ 文件一个 rust 文件(首行 `use super::*;`,文件体剥掉单
+/// 文件 `mod` 块的一层缩进,`pub(super)` 放宽为 `pub(crate)`,扁平
+/// 模块路径 `m<i>_<stem>::module` 换为树路径);`x.typ` 与 `x/` 目录
+/// 并存时子模块声明并入 `x.rs` 尾部,否则目录用 `mod.rs`(声明
+/// `use super::*;` + `pub mod 子;`)。glob 链靠"父的私有 use 对后代
+/// 可见",与单文件形态同机制。
+pub fn translate_package_tree(
+    input: &PackageInput,
+    module_name: &str,
+) -> Result<std::collections::BTreeMap<String, String>, Vec<Diag>> {
+    let mut cx = Ctx::new(false);
+    let parts = translate_package_parts(input, module_name, &mut cx);
+    if !cx.diags.is_empty() {
+        return Err(cx.diags);
+    }
+    let mut tree = std::collections::BTreeMap::new();
+
+    // 根 `mod.rs`:header(树形态 eval 驱动)+ 顶层模块声明。
+    let mut root_segs: Vec<String> = Vec::new();
+    for f in &parts.files {
+        let seg = f.tree_full[0].clone();
+        if !root_segs.contains(&seg) {
+            root_segs.push(seg);
+        }
+    }
+    let mut root_decls = String::new();
+    for seg in &root_segs {
+        let _ = writeln!(root_decls, "mod {seg};");
+    }
+    let root = parts
+        .header
+        .replace("{EVAL_CALLS}", &parts.eval_tree)
+        .replace("{ITEMS}", &root_decls);
+    tree.insert("mod.rs".to_string(), root);
+
+    // 目录 → 直接子段(有序去重);根为空段,深度 = 段下标。
+    let mut dir_subs: std::collections::BTreeMap<Vec<String>, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for f in &parts.files {
+        for depth in 0..f.tree_full.len() {
+            let dir = f.tree_full[..depth].to_vec();
+            let seg = f.tree_full[depth].clone();
+            let subs = dir_subs.entry(dir).or_default();
+            if !subs.contains(&seg) {
+                subs.push(seg);
+            }
+        }
+    }
+
+    // typ 文件 → 镜像 `.rs`;与目录同名的文件兼作目录声明。
+    let by_tree: std::collections::HashMap<Vec<String>, ()> = parts
+        .files
+        .iter()
+        .map(|f| (f.tree_full.clone(), ()))
+        .collect();
+    for f in &parts.files {
+        let mut body = dedent4(&f.body).replace("pub(super) fn", "pub(crate) fn");
+        // body 内对其他文件的引用(`{flat}::module(`,import 填充与
+        // 模块路径表达式)换为树路径;扁平名唯一,前缀替换无歧义。
+        for g in &parts.files {
+            if g.flat_name != f.flat_name {
+                body = body.replace(
+                    &format!("{}::module(", g.flat_name),
+                    &format!("{}::module(", g.tree_full.join("::")),
+                );
+            }
+        }
+        if let Some(subs) = dir_subs.get(&f.tree_full) {
+            let mut decls = String::new();
+            for seg in subs {
+                let _ = writeln!(decls, "pub mod {seg};");
+            }
+            body.push_str(&decls);
+        }
+        // rust 文件名用 sanitize 段(与模块声明一致:`mark-shapes.typ`
+        // → `mark_shapes.rs`)。
+        let rel = format!("{}.rs", f.tree_full.join("/"));
+        tree.insert(rel, format!("use super::*;\n{body}"));
+    }
+    // 无同名文件的目录:`dir/mod.rs`。
+    for (dir, subs) in &dir_subs {
+        if dir.is_empty() || by_tree.contains_key(dir) {
+            continue;
+        }
+        let mut content = String::from("use super::*;\n");
+        for seg in subs {
+            let _ = writeln!(content, "pub mod {seg};");
+        }
+        tree.insert(format!("{}/mod.rs", dir.join("/")), content);
+    }
+    Ok(tree)
+}
+
+/// 目录形态剥掉单文件 `mod` 块的一层缩进(每行前导 4 空格,不足则原样)。
+fn dedent4(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for line in s.split_inclusive('\n') {
+        out.push_str(line.strip_prefix("    ").unwrap_or(line));
+    }
+    out
 }
 
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。

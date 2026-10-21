@@ -10,7 +10,10 @@
 
 pub mod translate;
 
-pub use translate::{Diag, PackageInput, translate, translate_package, translate_package_lenient};
+pub use translate::{
+    Diag, PackageInput, translate, translate_package, translate_package_lenient,
+    translate_package_tree,
+};
 
 /// 前端入口:把 typst 源码解析为官方语法树。
 ///

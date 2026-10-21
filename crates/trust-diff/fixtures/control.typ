@@ -70,3 +70,5 @@
   }
   total
 }
+// 错误路径(M2.x):条件须为布尔(文案对照 rt::boolean 与 typst-eval)。
+#let bool-fail() = if 1 { "t" }

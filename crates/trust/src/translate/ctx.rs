@@ -25,6 +25,10 @@ pub(super) struct Ctx {
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
     /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
     pub(super) used_state: bool,
+    /// 错误站点 span 表:AST span 的原始 u64 → 站点索引(生成物以
+    /// `s(idx)` 引用,常数表运行时一次构建)。
+    pub(super) span_table: Vec<u64>,
+    span_index: std::collections::HashMap<u64, usize>,
 }
 
 /// 模块绑定的引用形态(统一指向 per-build 槽板字段)。
@@ -46,10 +50,58 @@ pub(super) struct Env {
 }
 
 impl Ctx {
+    pub(super) fn new(lenient: bool) -> Self {
+        Self {
+            diags: Vec::new(),
+            lenient,
+            next_id: 0,
+            current_file: None,
+            package_files: None,
+            package_mods: None,
+            used_state: false,
+            span_table: Vec::new(),
+            span_index: std::collections::HashMap::new(),
+        }
+    }
+
     pub(super) fn fresh_id(&mut self) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// 登记一个源 span,返回生成物里的常量名 `S{idx}`(错误站点用,
+    /// 对照原版:错误的定位指向源表达式;生成物里是编译期常量)。
+    pub(super) fn span_of(&mut self, span: typst_syntax::Span) -> String {
+        let raw = span.into_raw().get();
+        let next = self.span_table.len();
+        let idx = *self.span_index.entry(raw).or_insert(next);
+        if idx == next {
+            self.span_table.push(raw);
+        }
+        format!("S{idx}")
+    }
+
+    /// 登记源 span 并以其常量名填充格式串中的 `{at}` 占位。
+    pub(super) fn span_fmt(&mut self, span: typst_syntax::Span, fmt: String) -> String {
+        let at = self.span_of(span);
+        fmt.replace("{at}", &at)
+    }
+
+    /// 生成错误站点 span 常量块(源定位,编译期构造;无站点则空)。
+    pub(super) fn span_consts(&self) -> String {
+        if self.span_table.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(
+            "\nconst fn nz(n: u64) -> std::num::NonZeroU64 {\n    match std::num::NonZeroU64::new(n) {\n        Some(v) => v,\n        None => panic!(\"span 常量非法:0\"),\n    }\n}\n",
+        );
+        for (idx, raw) in self.span_table.iter().enumerate() {
+            out.push_str(&format!(
+                "const S{idx}: Span = Span::from_raw(nz({raw}));\n"
+            ));
+        }
+        out
     }
 
     pub(super) fn diag(&mut self, span: typst_syntax::Span, message: String) {

@@ -13,8 +13,16 @@ use typst::syntax::Span;
 use typst::syntax::ast::Unit;
 use trust_runtime as rt;
 
-/// 生成的错误 span:detached(差分对拍只比较值)。
+/// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
+
+const fn nz(n: u64) -> std::num::NonZeroU64 {
+    match std::num::NonZeroU64::new(n) {
+        Some(v) => v,
+        None => panic!("span 常量非法:0"),
+    }
+}
+const S0: Span = Span::from_raw(nz(300716430196727));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -50,7 +58,7 @@ fn f_v0_add(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -
     let mut a = rt::param_pos(__args, "a", span)?;
     let mut b = rt::param_pos(__args, "b", span)?;
     rt::finish(__args, span)?;
-    Ok(ops::add(a.clone(), b.clone()).at(SPAN)?)
+    Ok(ops::add(a.clone(), b.clone()).at(S0)?)
 }
 
 #[allow(non_snake_case, dead_code)]

@@ -24,3 +24,5 @@
   }
   out
 }
+// 错误路径(M2.x):循环源须可迭代。
+#let iter-fail() = { for x in 1 { x } }

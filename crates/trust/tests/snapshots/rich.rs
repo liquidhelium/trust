@@ -13,8 +13,17 @@ use typst::syntax::Span;
 use typst::syntax::ast::Unit;
 use trust_runtime as rt;
 
-/// 生成的错误 span:detached(差分对拍只比较值)。
+/// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
+
+const fn nz(n: u64) -> std::num::NonZeroU64 {
+    match std::num::NonZeroU64::new(n) {
+        Some(v) => v,
+        None => panic!("span 常量非法:0"),
+    }
+}
+const S0: Span = Span::from_raw(nz(289662109446693));
+const S1: Span = Span::from_raw(nz(329176865792586));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -33,6 +42,7 @@ fn file_span() -> Span {
 #[derive(Default)]
 struct __State {
     V0_scale: std::sync::OnceLock<Value>,
+    DEF_V0_scale_k: std::sync::OnceLock<Value>,
     V1_base: std::sync::OnceLock<Value>,
     V2_wrap: std::sync::OnceLock<Value>,
 }
@@ -42,6 +52,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = rt::state_get_or_insert::<__State>(engine, __State::default);
     let _ = context;
+    { let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; }
     { let v = Value::Func(Func::from(&D_V0_scale)); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
         let mut V1_base = Value::None;
@@ -55,13 +66,14 @@ V1_base = v.clone();
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;
+    let __st = rt::state_require::<__State>(engine)?;
     let mut x = rt::param_pos(__args, "x", span)?;
     let mut k = match __args.named::<Value>("k")? {
         Some(value) => value,
-        None => Value::Int(2),
+        None => rt::read(&__st.DEF_V0_scale_k)?,
     };
     rt::finish(__args, span)?;
-    Ok(ops::mul(x.clone(), k.clone()).at(SPAN)?)
+    Ok(ops::mul(x.clone(), k.clone()).at(S0)?)
 }
 
 #[allow(non_snake_case, dead_code)]
@@ -91,7 +103,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut f = rt::param_pos(__args, "f", span)?;
     let mut rest = Value::Args(__args.take());
     rt::finish(__args, span)?;
-    Ok({ let __callee = f.clone(); let __call_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, __fs, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, SPAN, __call_args)? })
+    Ok({ let __callee = f.clone(); let __call_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, __fs, rest.clone())?; __call_args_v }; rt::call(&__callee, engine, context, S1, __call_args)? })
 }
 
 #[allow(non_snake_case, dead_code)]

@@ -127,7 +127,8 @@ impl Ctx {
                         }
                         ast::ArrayItem::Spread(spread) => {
                             let value = self.expr(spread.expr(), env);
-                            let _ = write!(out, " rt::array_spread(&mut __a, {value}, SPAN)?;");
+                            let at = self.span_of(spread.span());
+                            let _ = write!(out, " rt::array_spread(&mut __a, {value}, {at})?;");
                         }
                     }
                 }
@@ -157,7 +158,8 @@ impl Ctx {
                         }
                         ast::DictItem::Spread(spread) => {
                             let value = self.expr(spread.expr(), env);
-                            let _ = write!(out, " rt::dict_spread(&mut __d, {value}, SPAN)?;");
+                            let at = self.span_of(spread.span());
+                            let _ = write!(out, " rt::dict_spread(&mut __d, {value}, {at})?;");
                         }
                     }
                 }
@@ -171,13 +173,19 @@ impl Ctx {
                     ast::UnOp::Neg => "neg",
                     ast::UnOp::Not => "not",
                 };
-                format!("ops::{op}({inner}).at(SPAN)?")
+                {
+                    let at = self.span_of(unary.span());
+                    format!("ops::{op}({inner}).at({at})?")
+                }
             }
             ast::Expr::Binary(binary) => self.binary(binary, env),
             ast::Expr::FieldAccess(access) => {
                 let target = self.expr(access.target(), env);
                 let field = access.field().as_str();
-                format!("rt::field(&({target}), \"{}\", SPAN)?", escape(field))
+                {
+                    let at = self.span_of(access.span());
+                    format!("rt::field(&({target}), \"{}\", {at})?", escape(field))
+                }
             }
             ast::Expr::FuncCall(call) => self.func_call(call, env),
             ast::Expr::Closure(closure) => self.closure_expr(closure, env),
@@ -188,16 +196,19 @@ impl Ctx {
                     Some(e) => self.expr(e, env),
                     None => "Value::None".into(),
                 };
-                format!("if rt::boolean({condition}, SPAN)? {{ {then} }} else {{ {otherwise} }}")
+                let at = self.span_of(cond.span());
+                format!("if rt::boolean({condition}, {at})? {{ {then} }} else {{ {otherwise} }}")
             }
             ast::Expr::WhileLoop(while_loop) => {
                 let condition = self.expr(while_loop.condition(), env);
                 let body = self.expr(while_loop.body(), env);
+                let cond_at = self.span_of(while_loop.condition().span());
+                let join_at = self.span_of(while_loop.span());
                 format!(
                     "{{ let mut __out = Value::None;\n  \
-                     while rt::boolean({condition}, SPAN)? {{\n  \
+                     while rt::boolean({condition}, {cond_at})? {{\n  \
                      \x20   let __v = {body};\n  \
-                     \x20   __out = rt::join(__out, __v, SPAN)?;\n  \
+                     \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
                      }}\n  \
                      __out }}"
                 )
@@ -222,12 +233,14 @@ impl Ctx {
                     self.destructure(for_loop.pattern(), inner, &mut body_env, false)
                 };
                 let body = self.expr(for_loop.body(), &body_env);
+                let iter_at = self.span_of(for_loop.iterable().span());
+                let join_at = self.span_of(for_loop.span());
                 format!(
                     "{{ let mut __out = Value::None;\n  \
-                     for {binder} in rt::iter_values(&({iterable}), SPAN)? {{\n  \
+                     for {binder} in rt::iter_values(&({iterable}), {iter_at})? {{\n  \
                      \x20   {pattern_code}\n  \
                      \x20   let __v = {body};\n  \
-                     \x20   __out = rt::join(__out, __v, SPAN)?;\n  \
+                     \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
                      }}\n  \
                      __out }}"
                 )
@@ -268,21 +281,25 @@ impl Ctx {
                 Or => ("__l == Value::Bool(true)", "Value::Bool(true)", "or"),
                 _ => unreachable!(),
             };
+            let at = self.span_of(binary.span());
             return format!(
-                "{{ let __l = {lhs}; if {test} {{ {fuse} }} else {{ ops::{rest}(__l, {rhs}).at(SPAN)? }} }}"
+                "{{ let __l = {lhs}; if {test} {{ {fuse} }} else {{ ops::{rest}(__l, {rhs}).at({at})? }} }}"
             );
         }
         let lhs = self.expr(binary.lhs(), env);
         let rhs = self.expr(binary.rhs(), env);
         match op {
-            Add => format!("ops::add({lhs}, {rhs}).at(SPAN)?"),
-            Sub => format!("ops::sub({lhs}, {rhs}).at(SPAN)?"),
-            Mul => format!("ops::mul({lhs}, {rhs}).at(SPAN)?"),
-            Div => format!("ops::div({lhs}, {rhs}).at(SPAN)?"),
-            Eq => format!("ops::eq({lhs}, {rhs}).at(SPAN)?"),
-            Neq => format!("ops::neq({lhs}, {rhs}).at(SPAN)?"),
+            Add => self.span_fmt(binary.span(), format!("ops::add({lhs}, {rhs}).at({{at}})?")),
+            Sub => self.span_fmt(binary.span(), format!("ops::sub({lhs}, {rhs}).at({{at}})?")),
+            Mul => self.span_fmt(binary.span(), format!("ops::mul({lhs}, {rhs}).at({{at}})?")),
+            Div => self.span_fmt(binary.span(), format!("ops::div({lhs}, {rhs}).at({{at}})?")),
+            Eq => self.span_fmt(binary.span(), format!("ops::eq({lhs}, {rhs}).at({{at}})?")),
+            Neq => self.span_fmt(binary.span(), format!("ops::neq({lhs}, {rhs}).at({{at}})?")),
             Lt | Leq | Gt | Geq => {
-                let ord = format!("ops::compare(&({lhs}), &({rhs})).at(SPAN)?");
+                let ord = self.span_fmt(
+                    binary.span(),
+                    format!("ops::compare(&({lhs}), &({rhs})).at({{at}})?"),
+                );
                 let test = match op {
                     Lt => "std::cmp::Ordering::Less",
                     Leq => "std::cmp::Ordering::Less | std::cmp::Ordering::Equal",
@@ -292,8 +309,11 @@ impl Ctx {
                 };
                 format!("Value::Bool(matches!({ord}, {test}))")
             }
-            In => format!("ops::in_({lhs}, {rhs}).at(SPAN)?"),
-            NotIn => format!("ops::not_in({lhs}, {rhs}).at(SPAN)?"),
+            In => self.span_fmt(binary.span(), format!("ops::in_({lhs}, {rhs}).at({{at}})?")),
+            NotIn => self.span_fmt(
+                binary.span(),
+                format!("ops::not_in({lhs}, {rhs}).at({{at}})?"),
+            ),
             other => {
                 let message = format!("二元运算 {other:?} 暂不支持");
                 self.diag(binary.span(), message.clone());
@@ -315,8 +335,9 @@ impl Ctx {
                 // (typst 语义:就地修改,对照 `call_method_mut`)。
                 if let Some((root, path)) = self.parse_place(access.target(), env) {
                     let path_lit = super::block::place_path_lit(&path);
+                    let at = self.span_of(call.span());
                     return format!(
-                        "{{ let __mut_args = {args}; rt::method_mut(rt::place_mut(&mut {root}, {path_lit}, SPAN)?, \"{}\", __mut_args, SPAN)? }}",
+                        "{{ let __mut_args = {args}; rt::method_mut(rt::place_mut(&mut {root}, {path_lit}, {at})?, \"{}\", __mut_args, {at})? }}",
                         escape(field)
                     );
                 }
@@ -327,14 +348,16 @@ impl Ctx {
                 return "Value::None".into();
             }
             let target = self.expr(access.target(), env);
+            let at = self.span_of(call.span());
             return format!(
-                "{{ let __target = {target}; let __call_args = {args}; rt::method(&__target, \"{}\", engine, context, SPAN, __call_args)? }}",
+                "{{ let __target = {target}; let __call_args = {args}; rt::method(&__target, \"{}\", engine, context, {at}, __call_args)? }}",
                 escape(field)
             );
         }
         let callee = self.expr(call.callee(), env);
+        let at = self.span_of(call.span());
         format!(
-            "{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, SPAN, __call_args)? }}"
+            "{{ let __callee = {callee}; let __call_args = {args}; rt::call(&__callee, engine, context, {at}, __call_args)? }}"
         )
     }
 

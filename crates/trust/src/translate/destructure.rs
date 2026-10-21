@@ -36,6 +36,7 @@ impl Ctx {
             ast::Pattern::Placeholder(_) => format!("let _ = {value};\n"),
             ast::Pattern::Parenthesized(p) => self.destructure(p.pattern(), value, env, assign),
             ast::Pattern::Destructuring(d) => {
+                let at = self.span_of(d.span());
                 let id = self.fresh_id();
                 let tmp = format!("__d{id}");
                 let n_items = d.items().count();
@@ -58,14 +59,14 @@ impl Ctx {
                 for item in d.items() {
                     match item {
                         ast::DestructuringItem::Pattern(p) => {
-                            let v = format!("rt::d_at(&{arr_ref}, {i}, SPAN)?");
+                            let v = format!("rt::d_at(&{arr_ref}, {i}, {at})?");
                             arr.push_str(&self.destructure(p, v, env, true));
                             i += 1;
                         }
                         ast::DestructuringItem::Spread(spread) => {
                             has_spread = true;
                             let v = format!(
-                                "Value::Array(rt::d_rest(&{arr_ref}, {i}, {n_items}, SPAN)?)"
+                                "Value::Array(rt::d_rest(&{arr_ref}, {i}, {n_items}, {at})?)"
                             );
                             match spread.sink_expr() {
                                 Some(expr) => {
@@ -80,14 +81,14 @@ impl Ctx {
                             }
                         }
                         ast::DestructuringItem::Named(_) => {
-                            arr.push_str(
-                                "bail!(SPAN, \"cannot destructure named pattern from an array\");\n",
-                            );
+                            arr.push_str(&format!(
+                                "bail!({at}, \"cannot destructure named pattern from an array\");\n"
+                            ));
                         }
                     }
                 }
                 if !has_spread {
-                    arr.push_str(&format!("rt::d_array_finish(&{arr_ref}, {i}, SPAN)?;\n"));
+                    arr.push_str(&format!("rt::d_array_finish(&{arr_ref}, {i}, {at})?;\n"));
                 }
 
                 // 字典分支。
@@ -102,7 +103,7 @@ impl Ctx {
                         )) => {
                             let key = ident.as_str().to_string();
                             used.push(key.clone());
-                            let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));
+                            let v = format!("rt::d_get(&{dict_ref}, \"{}\", {at})?", escape(&key));
                             dict.push_str(&self.destructure(
                                 ast::Pattern::Normal(ast::Expr::Ident(ident)),
                                 v,
@@ -113,7 +114,7 @@ impl Ctx {
                         ast::DestructuringItem::Named(named) => {
                             let key = named.name().as_str().to_string();
                             used.push(key.clone());
-                            let v = format!("rt::d_get(&{dict_ref}, \"{}\", SPAN)?", escape(&key));
+                            let v = format!("rt::d_get(&{dict_ref}, \"{}\", {at})?", escape(&key));
                             dict.push_str(&self.destructure(named.pattern(), v, env, true));
                         }
                         ast::DestructuringItem::Spread(spread) => {
@@ -123,9 +124,9 @@ impl Ctx {
                         }
                         ast::DestructuringItem::Pattern(p) => {
                             let _ = p;
-                            dict.push_str(
-                                "bail!(SPAN, \"cannot destructure unnamed pattern from dictionary\");\n",
-                            );
+                            dict.push_str(&format!(
+                                "bail!({at}, \"cannot destructure unnamed pattern from dictionary\");\n"
+                            ));
                         }
                     }
                 }
@@ -147,7 +148,7 @@ impl Ctx {
                 }
 
                 out.push_str(&format!(
-                    "match &{tmp} {{\n    Value::Array({arr_ref}) => {{\n{arr}    }}\n    Value::Dict({dict_ref}) => {{\n{dict}    }}\n    other => bail!(SPAN, \"cannot destructure {{}}\", other.ty()),\n}}\n"
+                    "match &{tmp} {{\n    Value::Array({arr_ref}) => {{\n{arr}    }}\n    Value::Dict({dict_ref}) => {{\n{dict}    }}\n    other => bail!({at}, \"cannot destructure {{}}\", other.ty()),\n}}\n"
                 ));
                 out
             }
@@ -156,8 +157,9 @@ impl Ctx {
                 // 对照 typst 的 `Access` 语义:`(a.at(i), b.c.at(j)) = ...`。
                 if assign && let Some((root, path)) = self.parse_place(other, env) {
                     let path_lit = super::block::place_path_lit(&path);
+                    let at = self.span_of(other.span());
                     return format!(
-                        "{{ *rt::place_mut(&mut {root}, {path_lit}, SPAN)? = {value}; }}\n"
+                        "{{ *rt::place_mut(&mut {root}, {path_lit}, {at})? = {value}; }}\n"
                     );
                 }
                 self.diag(other.span(), "解构模式此处须为标识符".into());

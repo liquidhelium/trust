@@ -22,7 +22,8 @@ impl Ctx {
         let mut last: Option<String> = None;
         for stmt in stmts {
             if let Some(prev) = last.take() {
-                let _ = writeln!(out, "    __out = rt::join(__out, {prev}, SPAN)?;");
+                let at = self.span_of(stmt.span());
+                let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {at})?;");
             }
             if let ast::Expr::LetBinding(lets) = stmt {
                 let init = match lets.init() {
@@ -53,13 +54,15 @@ impl Ctx {
                                     Some((_, module_ref)) => self.ref_value(module_ref),
                                     None => {
                                         // 全局模块(如 `import calc: abs`)。
-                                        format!("rt::global(engine, \"{root}\", SPAN)?")
+                                        let at = self.span_of(stmt.span());
+                                        format!("rt::global(engine, \"{root}\", {at})?")
                                     }
                                 };
                                 let mut expr = base;
+                                let at = self.span_of(stmt.span());
                                 for field in &fields {
                                     expr = format!(
-                                        "rt::field(&({expr}), \"{}\", SPAN)?",
+                                        "rt::field(&({expr}), \"{}\", {at})?",
                                         escape(field)
                                     );
                                 }
@@ -136,9 +139,10 @@ impl Ctx {
                             let original = item.original_name().as_str().to_string();
                             let bound = item.bound_name().as_str().to_string();
                             let rust = bind_local(&mut env, &bound);
+                            let at = self.span_of(stmt.span());
                             let _ = writeln!(
                                 out,
-                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", SPAN)?;",
+                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", {at})?;",
                                 escape(&original)
                             );
                         }
@@ -168,6 +172,7 @@ impl Ctx {
                 // 对照 typst 的 `Expr::access`;复合赋值读旧值再写回。
                 if let Some((root, path)) = self.parse_place(binary.lhs(), &env) {
                     let path_lit = place_path_lit(&path);
+                    let at = self.span_of(binary.span());
                     let rhs = self.expr(binary.rhs(), &env);
                     let op = match binary.op() {
                         ast::BinOp::Assign => None,
@@ -181,13 +186,13 @@ impl Ctx {
                         Some(op) => {
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, SPAN)?; *__p = ops::{op}((*__p).clone(), __rhs).at(SPAN)?; }}"
+                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; *__p = ops::{op}((*__p).clone(), __rhs).at({at})?; }}"
                             );
                         }
                         None => {
                             let _ = writeln!(
                                 out,
-                                "    {{ let __rhs = {rhs}; *rt::place_mut(&mut {root}, {path_lit}, SPAN)? = __rhs; }}"
+                                "    {{ let __rhs = {rhs}; *rt::place_mut(&mut {root}, {path_lit}, {at})? = __rhs; }}"
                             );
                         }
                     }
@@ -281,10 +286,13 @@ impl Ctx {
                         let Some(ast::Arg::Pos(index)) = call.args().items().next() else {
                             return false;
                         };
+                        // 对照 typst 的 FuncCall access:先求参数,后走
+                        // 目标链(带副作用的下标保求值顺序)。
+                        let index_code = self.expr(index, env);
                         if !self.walk_place(access.target(), env, segs, root) {
                             return false;
                         }
-                        format!("rt::PlaceSeg::At({})", self.expr(index, env))
+                        format!("rt::PlaceSeg::At({index_code})")
                     }
                     "first" | "last" => {
                         if !self.walk_place(access.target(), env, segs, root) {

@@ -37,7 +37,15 @@ enum TopKind<'a> {
 
 /// 把一个 typst 模块源文件翻译为 Rust 源码文本。
 pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
-    let root = typst_syntax::parse(src);
+    // 经 Source 解析:span 携带 FileId(与生成物 file_span 同源),
+    // 错误站点的定位可直接指向源表达式。
+    let id = typst_syntax::RootedPath::new(
+        typst_syntax::VirtualRoot::Project,
+        typst_syntax::VirtualPath::new("main.typ").expect("path"),
+    )
+    .intern();
+    let source = typst_syntax::Source::new(id, src.to_string());
+    let root = source.root().clone();
     let Some(markup) = root.cast::<ast::Markup>() else {
         return Err(vec![Diag {
             span: typst_syntax::Span::detached(),
@@ -46,15 +54,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }]);
     };
 
-    let mut cx = Ctx {
-        diags: Vec::new(),
-        lenient: false,
-        next_id: 0,
-        current_file: None,
-        package_files: None,
-        package_mods: None,
-        used_state: false,
-    };
+    let mut cx = Ctx::new(false);
     // 第一遍:收集顶层绑定与内容项(交错保序:求值按源序)。
     #[derive(Clone)]
     enum Seq<'a> {
@@ -234,8 +234,23 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let (name, slot) = &top.names[0];
                 let fun = format!("f_{}", lowercase(slot));
                 let data = format!("D_{}", uppercase(slot));
-                items.push_str(&cx.gen_function(&fun, *closure, &env));
+                items.push_str(&cx.gen_function(&fun, slot, *closure, &env));
                 items.push_str(&gen_func_data(&data, &fun, name, *closure));
+                // 默认值创建期物化(对照 typst:闭包创建时逐参数求值)。
+                let mut def_code = String::new();
+                for param in closure.params().children() {
+                    if let ast::Param::Named(named) = param {
+                        let pname = named.name().as_str();
+                        let def_slot = format!("DEF_{slot}_{}", sanitize(pname));
+                        let _ = writeln!(fields, "    {def_slot}: std::sync::OnceLock<Value>,");
+                        let value = cx.expr(named.expr(), &init_env);
+                        let _ = writeln!(
+                            def_code,
+                            "    {{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; }}"
+                        );
+                    }
+                }
+                init_code.push_str(&def_code);
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = Value::Func(Func::from(&{data})); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
@@ -267,6 +282,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         return Err(cx.diags);
     }
 
+    let span_consts = cx.span_consts();
     Ok(format!(
         "// 由 trust 从 `{module_name}` 生成,勿手改。\n\n\
          use std::sync::LazyLock;\n\
@@ -278,8 +294,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use typst::syntax::Span;\n\
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
-         /// 生成的错误 span:detached(差分对拍只比较值)。\n\
-         const SPAN: Span = Span::detached();\n\
+         /// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。\n\
+         const SPAN: Span = Span::detached();\n{span_consts}\
+\
          /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。\n\
          #[allow(non_snake_case, dead_code)]\n\
          fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\

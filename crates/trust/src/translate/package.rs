@@ -33,29 +33,13 @@ pub struct PackageInput {
 
 /// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
 pub fn translate_package_lenient(input: &PackageInput, module_name: &str) -> (String, Vec<Diag>) {
-    let mut cx = Ctx {
-        diags: Vec::new(),
-        lenient: true,
-        next_id: 0,
-        current_file: None,
-        package_files: None,
-        package_mods: None,
-        used_state: false,
-    };
+    let mut cx = Ctx::new(true);
     let code = translate_package_inner(input, module_name, &mut cx);
     (code, cx.diags)
 }
 
 pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<String, Vec<Diag>> {
-    let mut cx = Ctx {
-        diags: Vec::new(),
-        lenient: false,
-        next_id: 0,
-        current_file: None,
-        package_files: None,
-        package_mods: None,
-        used_state: false,
-    };
+    let mut cx = Ctx::new(false);
     let code = translate_package_inner(input, module_name, &mut cx);
     if !cx.diags.is_empty() {
         return Err(cx.diags);
@@ -78,11 +62,18 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
     // 注意:此处直接使用形参 cx(此前误建局部同名 Ctx 遮蔽形参,
     // 导致包模式的诊断从未传回壳层,严格性失效)。
     let mut plans: Vec<FilePlan> = Vec::new();
-    let mut roots: Vec<(String, typst_syntax::SyntaxNode)> = Vec::new();
+    // 经 Source 解析:span 携带 FileId(与生成物 file_span 同源)。
+    let mut roots: Vec<(String, typst_syntax::Source)> = Vec::new();
     for (path, src) in input.files.iter() {
-        roots.push((path.clone(), typst_syntax::parse(src)));
+        let id = typst_syntax::RootedPath::new(
+            typst_syntax::VirtualRoot::Project,
+            typst_syntax::VirtualPath::new(path.as_str()).expect("path"),
+        )
+        .intern();
+        roots.push((path.clone(), typst_syntax::Source::new(id, src.clone())));
     }
-    for (idx, (path, root)) in roots.iter().enumerate() {
+    for (idx, (path, source)) in roots.iter().enumerate() {
+        let root: &'static typst_syntax::SyntaxNode = Box::leak(source.root().clone().into());
         let Some(markup) = root.cast::<ast::Markup>() else {
             cx.diag(
                 typst_syntax::Span::detached(),
@@ -497,8 +488,22 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
-                    file_fns.push_str(&cx.gen_function(&fun, closure, &env2));
+                    file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &env2));
                     file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
+                    // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
+                    // env2 = import + 此前绑定,不含本函数自身)。
+                    for param in closure.params().children() {
+                        if let ast::Param::Named(named) = param {
+                            let pname = named.name().as_str();
+                            let def_slot = format!("DEF_{slot}_{}", sanitize(pname));
+                            state_fields.push(def_slot.clone());
+                            let value = cx.expr(named.expr(), &env2);
+                            let _ = writeln!(
+                                binding_code,
+                                "    {{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; }}"
+                            );
+                        }
+                    }
                     let _ = writeln!(
                         binding_code,
                         "    rt::fill(&__st.{slot}, Value::Func(Func::from(&{data})))?;"
@@ -664,6 +669,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
     }
 
+    let span_consts = cx.span_consts();
     format!(
         "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n{degraded_header}\n\n\
          use std::sync::LazyLock;\n\
@@ -675,7 +681,7 @@ fn translate_package_inner(input: &PackageInput, module_name: &str, cx: &mut Ctx
          use typst::syntax::Span;\n\
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
-         const SPAN: Span = Span::detached();\n\n\
+         const SPAN: Span = Span::detached();\n{span_consts}\n\
          /// 本包的求值状态:全部顶层绑定槽与 import 槽(每构建一份)。\n\
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\

@@ -564,7 +564,14 @@ pub fn iter_values(value: &Value, span: Span) -> SourceResult<Box<dyn Iterator<I
 pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceResult<Value> {
     match array.at(i as i64, None) {
         Ok(value) => Ok(value),
-        Err(_) => bail!(span, "{}", elements_mismatch(array.len(), i + 1, false)),
+        Err(_) => {
+            Err(elements_mismatch_diagnostic(
+                array.len(),
+                i + 1,
+                false,
+                span,
+            ))
+        }
     }
 }
 
@@ -580,7 +587,14 @@ pub fn d_rest(
         Some(sink_size) if i + sink_size <= array.len() => {
             Ok(array.as_slice()[i..i + sink_size].iter().cloned().collect())
         }
-        _ => bail!(span, "{}", elements_mismatch(array.len(), total - 1, true)),
+        _ => {
+            Err(elements_mismatch_diagnostic(
+                array.len(),
+                total - 1,
+                true,
+                span,
+            ))
+        }
     }
 }
 
@@ -591,7 +605,12 @@ pub fn d_array_finish(
     span: Span,
 ) -> SourceResult<()> {
     if consumed < array.len() {
-        bail!(span, "{}", elements_mismatch(array.len(), consumed, false));
+        return Err(elements_mismatch_diagnostic(
+            array.len(),
+            consumed,
+            false,
+            span,
+        ));
     }
     Ok(())
 }
@@ -615,21 +634,35 @@ pub fn d_dict_rest(dict: &typst::foundations::Dict, used: &[&str]) -> typst::fou
     rest
 }
 
-/// 对照原版 wrong_number_of_elements 的文案形态。
-fn elements_mismatch(len: usize, expected: usize, spread: bool) -> String {
-    let quantifier = if len > expected {
+/// 对照原版 `wrong_number_of_elements`:主消息 + hint(数量语义进
+/// hint,与 typst-eval 逐字一致)。
+fn elements_mismatch_diagnostic(
+    len: usize,
+    expected_count: usize,
+    spread: bool,
+    span: Span,
+) -> EcoVec<SourceDiagnostic> {
+    let quantifier = if len > expected_count {
         "too many"
     } else {
         "not enough"
     };
-    let what = if spread {
-        format!("at least {expected} elements")
-    } else if expected == 1 {
-        "a single element".to_string()
-    } else {
-        format!("{expected} elements")
+    let expected = match (spread, expected_count) {
+        (true, 1) => "at least 1 element".to_string(),
+        (true, c) => format!("at least {c} elements"),
+        (false, 0) => "an empty array".to_string(),
+        (false, 1) => "a single element".to_string(),
+        (false, c) => format!("{c} elements"),
     };
-    format!("{quantifier} elements to destructure, expected {what}")
+    eco_vec![
+        SourceDiagnostic::error(
+            span,
+            typst::foundations::Str::from(format!("{quantifier} elements to destructure"))
+        )
+        .with_hint(format!(
+            "the provided array has a length of {len}, but the pattern expects {expected}"
+        ))
+    ]
 }
 
 /// 字段赋值 `d.k = v`(就地修改局部字典;对照解释器 `Access` 语义)。

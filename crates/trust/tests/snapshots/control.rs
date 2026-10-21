@@ -13,8 +13,21 @@ use typst::syntax::Span;
 use typst::syntax::ast::Unit;
 use trust_runtime as rt;
 
-/// 生成的错误 span:detached(差分对拍只比较值)。
+/// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
+
+const fn nz(n: u64) -> std::num::NonZeroU64 {
+    match std::num::NonZeroU64::new(n) {
+        Some(v) => v,
+        None => panic!("span 常量非法:0"),
+    }
+}
+const S0: Span = Span::from_raw(nz(288344138459499));
+const S1: Span = Span::from_raw(nz(288375944433528));
+const S2: Span = Span::from_raw(nz(288333923402147));
+const S3: Span = Span::from_raw(nz(288235487394932));
+const S4: Span = Span::from_raw(nz(288027471681572));
+const S5: Span = Span::from_raw(nz(290479085446172));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -52,19 +65,19 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(&(items.clone()), SPAN)? {
+  for __it1 in rt::iter_values(&(items.clone()), S3)? {
       let mut x = { __it1.clone() };
 
       let __v = { let mut __out = Value::None;
     let _ = __out;
-    if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(SPAN)?, std::cmp::Ordering::Greater)), SPAN)? { { let mut __out = Value::None;
+    if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(S0)?, std::cmp::Ordering::Greater)), S2)? { { let mut __out = Value::None;
     let _ = __out;
-    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(rt::place_mut(&mut out, &[], SPAN)?, "push", __mut_args, SPAN)? }
+    { let __mut_args = { let mut __fs = file_span(); let mut __call_args_v = Args::new(__fs, std::iter::empty::<Value>()); __call_args_v.push(__fs, x.clone()); __call_args_v }; rt::method_mut(rt::place_mut(&mut out, &[], S1)?, "push", __mut_args, S1)? }
 } } else { Value::None }
 };
-      __out = rt::join(__out, __v, SPAN)?;
+      __out = rt::join(__out, __v, S4)?;
   }
-  __out }, SPAN)?;
+  __out }, S5)?;
     let _ = __out;
     out.clone()
 })

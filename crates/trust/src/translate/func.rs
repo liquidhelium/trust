@@ -8,11 +8,17 @@ use std::fmt::Write as _;
 use typst_syntax::ast::{self};
 
 use super::ctx::{Ctx, Env, bind_local};
-use super::naming::escape;
+use super::naming::{escape, sanitize};
 
 impl Ctx {
     /// 生成一个函数:参数解构 + 体直译。
-    pub(super) fn gen_function(&mut self, fun: &str, closure: ast::Closure, env: &Env) -> String {
+    pub(super) fn gen_function(
+        &mut self,
+        fun: &str,
+        slot: &str,
+        closure: ast::Closure,
+        env: &Env,
+    ) -> String {
         let mut body = String::new();
         let mut fn_env = env.clone();
         // 是否需要 `__st`(函数体/默认值引用了模块槽)在生成中追踪。
@@ -37,15 +43,16 @@ impl Ctx {
                 }
                 ast::Param::Named(named) => {
                     let name = named.name().as_str().to_string();
-                    // 默认值在定义环境求值:不可引用本参数,可引用先前参数。
-                    let default = self.expr(named.expr(), &fn_env);
+                    // 默认值在定义期(module_init)求值物化进槽,调用期
+                    // 只读:求值时机与 typst 一致(创建期一次)。
+                    let def_slot = format!("DEF_{slot}_{}", sanitize(&name));
+                    self.used_state = true;
                     let rust = bind_local(&mut fn_env, &name);
-                    // 惰性默认值:未提供时在调用点求值(语义边界见 mod.rs)。
                     let _ = writeln!(
                         body,
                         "    let mut {rust} = match __args.named::<Value>(\"{}\")? {{\n\
                          \x20       Some(value) => value,\n\
-                         \x20       None => {default},\n\
+                         \x20       None => rt::read(&__st.{def_slot})?,\n\
                          \x20   }};",
                         escape(&name)
                     );

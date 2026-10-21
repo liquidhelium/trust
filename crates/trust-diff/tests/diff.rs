@@ -209,6 +209,27 @@ fn differential(fixture: &str) {
     let mut rust_scope = Scope::new();
     rust_scope.define("m", rust_module.clone());
 
+    // 错误路径对拍:双侧都须报错,消息文案逐字一致(定位不比:
+    // 两侧文件 id 不同;错误站点 span 映射见 KNOWN-ISSUES #4 的修复)。
+    for call in error_cases(fixture) {
+        let g = golden_world.eval_code(call, golden_scope_clone(&golden_scope));
+        let r = rust_world.eval_code(call, golden_scope_clone(&rust_scope));
+        let render = |res: typst::diag::SourceResult<typst::foundations::Value>| match res {
+            Err(diags) => diags
+                .iter()
+                .map(|d| {
+                    let mut parts = vec![d.message.to_string()];
+                    parts.extend(d.hints.iter().map(|h| format!("hint: {h:?}")));
+                    parts.join(" | ")
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+            Ok(value) => format!("(未报错,返回 {value:?})"),
+        };
+        let (gm, rm) = (render(g), render(r));
+        assert_eq!(gm, rm, "错误用例 {call}:两侧消息不一致");
+    }
+
     let mut failures = Vec::new();
     for call in calls {
         let g = golden_world
@@ -228,6 +249,19 @@ fn differential(fixture: &str) {
         failures.len(),
         failures.join("\n")
     );
+}
+
+fn error_cases(fixture: &str) -> Vec<&'static str> {
+    // 通用运算错误(两侧共用 typst ops,验证接线与 span 不进文案)。
+    let mut cases = vec!["1 / 0", "2 + \"x\"", "\"a\" - \"b\"", "none + 1"];
+    match fixture {
+        // 生成物运行时复刻的文案(rt::boolean/iter_values/d_array_finish)。
+        "control" => cases.push("m.bool-fail()"),
+        "collections" => cases.push("m.iter-fail()"),
+        "destructuring" => cases.push("m.destr-fail()"),
+        _ => {}
+    }
+    cases
 }
 
 fn golden_scope_clone(scope: &Scope) -> Scope {

@@ -204,9 +204,22 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             items
                                 .iter()
                                 .map(|item| {
-                                    let original = item.original_name().as_str().to_string();
+                                    // 完整名字含点号路径(`a.b as c`):
+                                    // original_name() 只给末段,这里按
+                                    // 段连出全名(hydra 驱动);未改名时
+                                    // 绑定名= 末段(typst 语义)。
+                                    let original = item
+                                        .path()
+                                        .iter()
+                                        .map(|seg| seg.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(".");
                                     let bound = match item {
-                                        ast::ImportItem::Simple(_) => original.clone(),
+                                        ast::ImportItem::Simple(_) => original
+                                            .rsplit('.')
+                                            .next()
+                                            .unwrap_or(&original)
+                                            .to_string(),
                                         ast::ImportItem::Renamed(renamed) => {
                                             renamed.new_name().as_str().to_string()
                                         }
@@ -644,7 +657,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             .strip_suffix(".typ")
             .unwrap_or(&plan.path)
             .split('/')
-            .map(sanitize)
+            // 树段名兼作文件名与模块声明:`r#` 前缀会进文件名(非法)
+            // 与 mod 声明/路径不一致——用 sanitize_key(剥 r# 加 _kw)。
+            .map(sanitize_key)
             .collect();
         let tree_path = tree_full.join("::");
         files.push(FileOut {
@@ -990,7 +1005,30 @@ impl Ctx {
                         }
                     }
                     ImportItems::Wildcard => {
-                        cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
+                        if input.dep_entries.contains_key(&spec) {
+                            // 合并依赖的通配:按入口导出表展开(与 LIST
+                            // 同形,字段访问物化;gentle-clues 驱动)。
+                            for (wname, _) in &export_table[&edge.target] {
+                                if env.module.iter().any(|(n, _)| n == wname) {
+                                    continue;
+                                }
+                                env.module.push((
+                                    wname.clone(),
+                                    Ref::ModuleField {
+                                        expr: format!("rt::read(&__st.{slot})?"),
+                                        name: wname.clone(),
+                                    },
+                                ));
+                                let _ = writeln!(
+                                    file_defines,
+                                    "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                    escape(wname),
+                                    escape(wname)
+                                );
+                            }
+                        } else {
+                            cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
+                        }
                     }
                 }
                 continue;
@@ -1131,17 +1169,51 @@ impl Ctx {
                 }
                 ImportItems::List(list) => {
                     for (name, rename) in list {
-                        let Some(slot) = exports.get(name) else {
-                            cx.diag(edge.span, format!("`{}` 不包含导出 `{name}`", edge.target));
+                        // 点分项(`a.b as c`,hydra 驱动:首段按导出表
+                        // 解析,余段字段链物化进独立 IMPORT 槽)。
+                        let (first, rest): (&str, &[&str]) = match name.split_once('.') {
+                            Some((f, r)) => {
+                                (f, r.split('.').collect::<Vec<_>>().leak())
+                            }
+                            None => (name.as_str(), &[]),
+                        };
+                        let Some(slot) = exports.get(first) else {
+                            cx.diag(edge.span, format!("`{}` 不包含导出 `{first}`", edge.target));
                             continue;
                         };
                         let as_name = rename.clone().unwrap_or_else(|| name.clone());
-                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&as_name)
-                        );
+                        if rest.is_empty() {
+                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                escape(&as_name)
+                            );
+                        } else {
+                            let dot_slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize_key(&plan.mod_name),
+                                sanitize_key(&as_name)
+                            );
+                            state_fields.push(dot_slot.clone());
+                            let mut chain = format!("rt::read(&__st.{slot})?");
+                            for field in rest {
+                                chain = format!(
+                                    "rt::field(&({chain}), \"{}\", engine, context, SPAN)?",
+                                    escape(field)
+                                );
+                            }
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::fill(&__st.{dot_slot}, {chain})?;"
+                            );
+                            env.module.push((as_name.clone(), Ref::Slot(dot_slot.clone())));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{dot_slot})?);",
+                                escape(&as_name)
+                            );
+                        }
                     }
                 }
                 ImportItems::Wildcard => {

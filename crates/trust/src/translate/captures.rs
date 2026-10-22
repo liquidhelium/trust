@@ -102,6 +102,15 @@ pub(super) fn collect_idents(
             };
             collect_idents(access.target().to_untyped(), bound, out);
         }
+        // 数学字段访问(`$arrow.t$` / 三段链 `$arrow.t.twohead$`,
+        // commute 驱动):字段名不是自由变量(数学体经 eval_expr 解释、
+        // 名字自解析)——只收目标(首个非 Dot 子节点,可能是嵌套的
+        // 字段链),其余 MathIdent 是字段名,不进捕获名单。
+        K::MathFieldAccess => {
+            if let Some(target) = node.children().find(|c| c.kind() != K::Dot) {
+                collect_idents(target, bound, out);
+            }
+        }
         K::Named => {
             let Some(named) = node.cast::<ast::Named>() else {
                 return;
@@ -141,5 +150,23 @@ pub(super) fn collect_idents(
                 collect_idents(child, bound, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn math_field_names_not_collected() {
+        let src = "#let f(x) = { box($arrow.t.twohead$); $arrows.tt$; $arrow.t$; x }";
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.contains(&"twohead".to_string()) && !out.contains(&"tt".to_string()),
+            "数学字段名不应被收集: {out:?}"
+        );
+        assert!(out.contains(&"arrow".to_string()), "目标名应收集: {out:?}");
     }
 }

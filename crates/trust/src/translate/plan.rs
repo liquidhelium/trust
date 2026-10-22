@@ -5,7 +5,7 @@
 
 use typst_syntax::ast;
 
-use super::naming::sanitize;
+use super::naming::{sanitize, sanitize_key};
 
 /// 一个源文件的翻译计划:mod 名、顶层绑定(名字 → 槽)与 import 边。
 pub(super) struct FilePlan<'a> {
@@ -152,8 +152,8 @@ pub(super) fn build_export_table(
                         };
                         let slot = format!(
                             "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&bound)
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(&bound)
                         );
                         exports.entry(bound).or_insert(slot);
                     }
@@ -184,10 +184,24 @@ pub(super) fn build_export_table(
                     };
                     let slot = format!(
                         "IMPORT_{}_{}",
-                        sanitize(&plan.mod_name),
-                        sanitize(&bound)
+                        sanitize_key(&plan.mod_name),
+                        sanitize_key(&bound)
                     );
                     exports.entry(bound).or_insert(slot);
+                }
+                // 外部包 LIST:绑定名同样转出(hydra 驱动:`_pkgs.typ`
+                // 从 oxifmt 取 strfmt 再被下游 import——槽公式与
+                // package.rs 的字段访问生成侧逐字一致)。
+                if let ImportItems::List(list) = &edge.items {
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(&as_name)
+                        );
+                        exports.entry(as_name).or_insert(slot);
+                    }
                 }
                 continue;
             }
@@ -199,7 +213,11 @@ pub(super) fn build_export_table(
                     };
                     let slot = match import_slots.get(&edge.target) {
                         Some(slot) => slot.clone(),
-                        None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&bound)),
+                        None => format!(
+                            "IMPORT_{}_{}",
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(&bound)
+                        ),
                     };
                     import_slots
                         .entry(edge.target.clone())
@@ -209,9 +227,25 @@ pub(super) fn build_export_table(
                 ImportItems::List(items) => {
                     let target_exports = &table[&edge.target];
                     for (original, rename) in items {
-                        if let Some(slot) = target_exports.get(original) {
+                        // 点分项:首段解析,余段物化进独立槽(package.rs
+                        // 同公式;hydra 驱动)。
+                        let (first, rest): (&str, Vec<&str>) = match original.split_once('.') {
+                            Some((f, r)) => (f, r.split('.').collect()),
+                            None => (original.as_str(), Vec::new()),
+                        };
+                        if rest.is_empty() {
+                            if let Some(slot) = target_exports.get(first) {
+                                let as_name = rename.clone().unwrap_or_else(|| original.clone());
+                                exports.entry(as_name).or_insert_with(|| slot.clone());
+                            }
+                        } else if target_exports.contains_key(first) {
                             let as_name = rename.clone().unwrap_or_else(|| original.clone());
-                            exports.entry(as_name).or_insert_with(|| slot.clone());
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize_key(&plan.mod_name),
+                                sanitize_key(&as_name)
+                            );
+                            exports.entry(as_name).or_insert(slot);
                         }
                     }
                 }

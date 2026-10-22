@@ -68,7 +68,7 @@ impl Ctx {
                 // `.text` 等字段访问走元素字段(与原生同语义)。
                 let lines = raw
                     .lines()
-                    .map(|l| format!("{:?}", l.get().as_str()))
+                    .map(|l| format!("{:?}.into()", l.get().as_str()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let lang = match raw.lang() {
@@ -439,7 +439,7 @@ impl Ctx {
                     let path_lit = super::block::place_path_lit(&path);
                     let args = self.gen_args(call.args(), env, &at);
                     return format!(
-                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::method_mut(engine, rt::place_mut(&mut {root}, {path_lit}, {at})?, \"{}\", __mut_args, {at})? }}",
+                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut(engine, __place, \"{}\", __mut_args, {at})? }}",
                         escape(field)
                     );
                 }

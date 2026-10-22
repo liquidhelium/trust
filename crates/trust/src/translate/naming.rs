@@ -23,7 +23,12 @@ pub(super) fn sanitize(name: &str) -> String {
     ];
     // r# 不适用的保留字(self/Self/super/crate 禁作 raw ident):
     // 加下划线后缀(cmarker 驱动:`super` 生成 `r#super` 被 rustc 拒)。
-    const RAW_ILLEGAL: &[&str] = &["self", "Self", "super", "crate"];
+    // 另有一类**保留未用**关键字(rustc 词法保留,r# 也拒或列入即拒):
+    // override/priv/typeof 等——同样后缀(codly 驱动:`override` 裸出)。
+    const RAW_ILLEGAL: &[&str] = &[
+        "self", "Self", "super", "crate", "override", "priv", "typeof", "unsized", "virtual",
+        "yield", "abstract", "become", "do", "final", "macro",
+    ];
     if RAW_ILLEGAL.contains(&out.as_str()) {
         out.push('_');
     } else if KEYWORDS.contains(&out.as_str()) {

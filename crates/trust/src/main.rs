@@ -59,7 +59,7 @@ fn main() {
                 },
                 Err(diags) => {
                     for diag in diags {
-                        eprintln!("{input}: {:?}: {}", diag.span, diag.message);
+                        eprintln!("{input}: {:?} @ {}: {}", diag.span, diag.file.as_deref().unwrap_or("?"), diag.message);
                     }
                     std::process::exit(1);
                 }
@@ -196,7 +196,7 @@ fn main() {
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?}: {}", d.span, d.message);
+                            eprintln!("  {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
                         }
                         std::process::exit(1);
                     }
@@ -206,7 +206,7 @@ fn main() {
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
-                    eprintln!("降级 {:?}: {}", d.span, d.message);
+                    eprintln!("降级 {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
                 }
                 std::fs::write(output, &code).expect("write");
                 println!(
@@ -222,7 +222,7 @@ fn main() {
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?}: {}", d.span, d.message);
+                            eprintln!("  {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
                         }
                         std::process::exit(1);
                     }

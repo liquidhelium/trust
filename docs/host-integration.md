@@ -12,17 +12,27 @@
 (`gen/mod.rs` 根)。没有 dylib/wasm 等可加载形态;非 Rust 宿主
 (纯编译好的 typst-cli 二进制)当前完全无法使用。
 
-### 2. 注入协议(trust-world `InjectWorld`,或宿主逐条复刻)
+### 2. 接入协议(已收进 trust-runtime,宿主一行调用)
 
-- **驱动 module_init**:构造 `Engine`(library + world +
-  `EmptyIntrospector` + 新 `Sink` + `Route::default`),`Context::none()`,
-  调 `module_init`。经 comemo memoize 壳缓存(`eval_native_module`,
-  按 (world 读取约束, library 内容, init 函数) 失效;`rt::fill` 对
-  同值幂等,驱逐重入安全)。
-- **注入 library**:`library.global.scope_mut().bind(name,
-  Binding::detached(module))`,并且**重建 `library.std` 绑定**(std
-  持有 global 的另一 Arc 副本,scope 写时复制会让两者分叉),最后
-  重包 `LazyHash<Library>`(否则 comemo 缓存哈希不感知注入)。
+协议本体在 `trust_runtime`(每个产物天然已链接),产物 crate 再包
+一层薄壳 `install`——宿主**不再需要 trust-world**:
+
+```rust
+// 产物 crate 自带:
+pub fn install(world: Tracked<dyn World>, library: &LazyHash<Library>)
+    -> SourceResult<Module>                      // = rt::init_module(.., module_init)
+
+// rt 侧两个通用原语:
+rt::init_module(world, library, init)             // 驱动壳:Engine(EmptyIntrospector
+    // + 新 Sink + Route)+ Context::none;comemo memoize 按 (world 读取约束,
+    // library 内容, init) 缓存,依赖失效自动重求值(fill 同值幂等)
+rt::bind_module(library, name, module) -> LazyHash<Library>
+    // global 绑定 + 重建 std 绑定(std 持 global 的另一 Arc,写时复制
+    // 分叉)+ LazyHash 重包(comemo 哈希感知);返回新 library 由宿主换
+```
+
+InjectWorld 的 `init_native_module` 退化为这两个原语的薄包装(测试
+便利)。fletcher 的冒烟已改走 `install` 直连路径验证。
 
 ### 3. ~~FileId 预 intern 顺序约定~~ **已消除**(2026-10-22,span 自包含)
 
@@ -71,11 +81,10 @@ FileId,此前缺预 intern 会直接失败)。
 
 1. ~~**span 自包含,删除预 intern 约定**~~ **已完成**(见 §3):
    `rt::source_span` 首次使用自 intern,位置号照抄,产物自包含。
-2. **注入协议泛化**:把"驱动 + 绑定 + std 重建 + LazyHash 重包"
-   提成对任意 `&mut Library`(或宿主 World)的函数
-   `install(library)`;Engine 构造参数化(introspector/sink/route
-   由宿主给,module_init 只需 world 能服务包文件)。InjectWorld
-   退化为测试实现。此后 Rust 宿主接入 = 链接 + 一行调用。
+2. ~~**注入协议泛化**~~ **已完成**(见 §2):`rt::init_module` /
+   `rt::bind_module` + 产物 `install` 薄壳;InjectWorld 退化为测试
+   世界。Rust 宿主接入 = 链接 crate + 一行 `install`(注入宿主
+   library 用 `rt::bind_module`)。
 3. **包目录形态**:生成物同时产出一个可直接放置的包目录
    (`typst.toml` + 一行 shim 入口 `#import <name>: *`),让磁盘
    世界把它当**普通包** import——配合 2 的注入点,宿主体验

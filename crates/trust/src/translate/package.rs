@@ -809,7 +809,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n{{ITEMS}}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n\n\
+         /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
+         /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
+         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{{ITEMS}}"
     );
     PackageParts {
         header,

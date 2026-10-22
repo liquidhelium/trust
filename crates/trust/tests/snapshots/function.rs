@@ -49,6 +49,12 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     Ok(Module::new("function", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])).with_file_id(file_span().id().expect("file span id")))
 }
 
+/// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用
+/// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。
+pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {
+    rt::init_module(world, library, module_init)
+}
+
 #[allow(non_snake_case, dead_code, unused_variables)]
 fn f_v0_add(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {
     let span = __args.span;

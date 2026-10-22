@@ -352,6 +352,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
          /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。\n\
-         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = std::sync::Arc::new(__State::default());\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}).with_file_id(file_span().id().expect(\"file span id\")))\n}}\n{items}"
+         pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = std::sync::Arc::new(__State::default());\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}).with_file_id(file_span().id().expect(\"file span id\")))\n}}\n\n\
+         /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
+         /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
+         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{items}"
     ))
 }

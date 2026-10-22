@@ -4,14 +4,17 @@
 //! 的 `Value`,零私有值模型;所有语义函数与 `typst-eval` 的解释实现逐条
 //! 对照(报错文案与 span 行为一致),差分测试以此为验收。
 
-use comemo::Tracked;
+use comemo::{Track, Tracked};
+use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
-use typst::engine::Engine;
+use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Closure, ClosureNode, Content, Context, Func, IntoValue, Module, Scope,
-    Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Closure, ClosureNode, Content, Context, Func, IntoValue, Module,
+    Scope, Selector, Str, Transformation, Value, ops,
 };
+use typst::introspection::EmptyIntrospector;
+use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
 
@@ -52,6 +55,54 @@ pub fn source_span(path: &str, orig_raw: u64) -> Span {
         "span 布局与 typst 公开文档不符(版本漂移?),拒绝静默错位"
     );
     span
+}
+
+// --- 宿主接入协议(自包含;宿主无需 trust-world)---
+
+/// 生成物 `module_init` 的函数形态(每构建求值一次的模块装配入口)。
+pub type ModuleInit = fn(&mut Engine, Tracked<Context>) -> SourceResult<Module>;
+
+/// `module_init` 的驱动壳(对照 `typst_eval::eval` 的模块求值缓存):
+/// 构造 Engine(EmptyIntrospector + 新 Sink + Route)+ `Context::none`,
+/// comemo memoize 按 (world 读取约束, library 内容, init 函���) 缓存,
+/// 依赖变化自动失效,驱逐后重新求值(`rt::fill` 同值幂等,重入安全)。
+/// 只要求宿主 World 能服务外部包文件与 Project 根数据文件(wasm 插件)。
+#[comemo::memoize]
+pub fn init_module(
+    world: Tracked<'_, dyn World + '_>,
+    library: &LazyHash<Library>,
+    init: ModuleInit,
+) -> SourceResult<Module> {
+    let mut sink = Sink::new();
+    let traced = Traced::default();
+    let mut engine = Engine {
+        library,
+        world,
+        introspector: Protected::new(EmptyIntrospector.track()),
+        traced: traced.track(),
+        sink: sink.track_mut(),
+        route: Route::default(),
+    };
+    let context = Context::none();
+    init(&mut engine, context.track())
+}
+
+/// 把模块注入 library:global 绑定(bind 而非 define,允许替换同名
+/// 定义)+ **重建 std 绑定**(std 持有 global 的另一 Arc 副本,scope
+/// 写时复制会让两者分叉)+ 重包 `LazyHash`(comemo 缓存哈希感知)。
+/// 返回新 library,由宿主换进自己的世界。
+pub fn bind_module(
+    library: &LazyHash<Library>,
+    name: &'static str,
+    module: Module,
+) -> LazyHash<Library> {
+    let mut library: Library = (**library).clone();
+    library
+        .global
+        .scope_mut()
+        .bind(name.into(), Binding::detached(module));
+    library.std = Binding::detached(library.global.clone().into_value());
+    typst::utils::LazyHash::new(library)
 }
 
 /// 每构建状态(per-build 槽板)的存储与槽原语。

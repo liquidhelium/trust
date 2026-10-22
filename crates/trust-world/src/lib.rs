@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use comemo::{Track, Tracked};
+use comemo::Track;
 use typst::diag::{FileError, FileResult, SourceResult};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
@@ -43,8 +43,7 @@ use typst::{Library, LibraryExt, World};
 /// 这是 typst 模块求值的镜像(`_things/DESIGN-per-build.md`):
 /// 生成物内部用 per-build 槽板存顶层绑定,构建标识取 World 身份,
 /// 因此一个 World 实例 = 一次构建。
-pub type ModuleInit =
-    fn(&mut typst::engine::Engine, comemo::Tracked<Context>) -> SourceResult<Module>;
+pub type ModuleInit = trust_runtime::ModuleInit;
 
 pub struct InjectWorld {
     library: LazyHash<Library>,
@@ -58,30 +57,6 @@ pub struct InjectWorld {
     /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
     /// (如 wasm 插件等非源文件)。
     fs_root: Option<PathBuf>,
-}
-
-/// `module_init` 的驱动壳,comemo memoize 缓存(与 `typst_eval::eval`
-/// 的模块求值缓存同一机制):按 (world 读取约束, library 内容, init
-/// 函数) 缓存模块,依赖变化自动失效,驱逐后重新求值(`fill` 对同值
-/// 幂等,重入安全)。
-#[comemo::memoize]
-fn eval_native_module(
-    world: Tracked<'_, dyn World + '_>,
-    library: &LazyHash<Library>,
-    init: ModuleInit,
-) -> SourceResult<Module> {
-    let mut sink = Sink::new();
-    let traced = Traced::default();
-    let mut engine = typst::engine::Engine {
-        library,
-        world,
-        introspector: typst::utils::Protected::new(EmptyIntrospector.track()),
-        traced: traced.track(),
-        sink: sink.track_mut(),
-        route: Route::default(),
-    };
-    let context = Context::none();
-    init(&mut engine, context.track())
 }
 
 impl InjectWorld {
@@ -140,31 +115,24 @@ impl InjectWorld {
     /// 缓存(与 `typst_eval::eval` 同一机制):同 (world 读取约束,
     /// library 内容, init 函数) 不二次求值,依赖变化自动失效。
     pub fn init_native_module(&mut self, name: &'static str, init: ModuleInit) -> Module {
+        // 薄包装:协议本体在 trust_runtime(宿主接入协议,见
+        // rt::init_module / rt::bind_module);InjectWorld 只是测试世界。
         let world: &dyn World = self;
         let module =
-            eval_native_module(world.track(), &self.library, init).unwrap_or_else(|diags| {
-                panic!(
-                    "module_init 模块求值失败: {:?}",
-                    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-                )
-            });
-        self.inject_module(name, module.clone());
+            trust_runtime::init_module(world.track(), &self.library, init).unwrap_or_else(
+                |diags| {
+                    panic!(
+                        "module_init 模块求值失败: {:?}",
+                        diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+                    )
+                },
+            );
+        self.library = trust_runtime::bind_module(&self.library, name, module.clone());
         module
     }
 
     /// 以模块替换全局作用域中的同名定义并重建 Library。
-    fn inject_module(&mut self, name: &'static str, module: Module) {
-        let mut library = Clone::clone(&*self.library);
-        // bind 而非 define:允许替换同名定义(module_init 后的更新)。
-        library
-            .global
-            .scope_mut()
-            .bind(name.into(), Binding::detached(module));
-        library.std = Binding::detached(library.global.clone().into_value());
-        self.library = typst::utils::LazyHash::new(library);
-    }
-
-    /// 包 FileId 到磁盘仓库路径(仅 VirtualRoot::Package)。
+    /// 包路径 → 本地包仓库布局的磁盘路径(外部包回退)。
     fn package_path(&self, id: FileId) -> Option<PathBuf> {
         let root = self.packages_root.as_ref()?;
         let VirtualRoot::Package(spec) = id.root() else {
@@ -262,9 +230,6 @@ impl InjectWorld {
 
     /// 以代码模式求值一段字符串;`scope` 成为 VM 的顶层作用域,
     /// 可直接注入额外绑定(差分测试的执行口)。
-    /// 借出一个最小 Engine(空 introspector,库为本 World 的库),
-    /// 供探针/装配侧直接调用需要 `&mut Engine` 的运行时函数(如
-    /// 闭包构造的创建期捕获物化)。
     pub fn with_engine<R>(&self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let mut sink = Sink::new();
         let world: &dyn World = self;

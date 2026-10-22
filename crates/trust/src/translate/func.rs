@@ -25,9 +25,30 @@ impl Ctx {
         self.used_state = false;
         // 函数体上下文:return 编译为 Rust return,仅此上下文合法。
         self.in_fn += 1;
-        // sink 参数延后解包(take 收剩余,须在显式参数之后)。
-        let mut sinks: Vec<Option<String>> = Vec::new();
-
+        // 对照 eval_closure 的绑定协议(声明序逐参绑定,sink 特殊):
+        // - sink_size = 位置实参总数 − 显式位置参数数(saturating);
+        // - Spread 处按 sink_size 从**队首** consume 位置实参暂存;
+        // - 显式位置参数(含在其后的)从剩余里按序 expect;
+        // - 末尾 sink = take()(剩余全部,含具名)+ 暂存队首项 extend。
+        // 曾错为先绑显式参数再 take 全部剩余:`(..args, body)` 在
+        // 多配置实参下 body 错拿队首配置、内容落入 args.pos(),
+        // touying 的 merge-dicts 因此收到内容(add-dicts .keys() 崩,
+        // touying 驱动;gdb 断点错误构造处定位的调用链)。
+        let num_pos_params = closure
+            .params()
+            .children()
+            .filter(|p| matches!(p, ast::Param::Pos(_)))
+            .count();
+        let mut sink_stash: Vec<(Option<String>, String)> = Vec::new();
+        // 位置实参总数须在**任何绑定前**取(sink_size 的分母是全量;
+        // 在 Spread 处现算会被先声明的参数扣掉)。
+        let has_sink = closure
+            .params()
+            .children()
+            .any(|p| matches!(p, ast::Param::Spread(_)));
+        if has_sink {
+            let _ = writeln!(body, "    let __n_pos_args = __args.to_pos().len();");
+        }
         for param in closure.params().children() {
             match param {
                 ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
@@ -41,8 +62,7 @@ impl Ctx {
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
                     // 占位符消费一个位置实参(对照 eval_closure 的
-                    // `args.expect::<Value>("pattern parameter")`)——
-                    // 直调快路径实参不经 stub 规范化,序言必须自行消费。
+                    // `args.expect::<Value>("pattern parameter")`)。
                     let _ = writeln!(
                         body,
                         "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
@@ -70,25 +90,27 @@ impl Ctx {
                     );
                 }
                 ast::Param::Spread(spread) => {
-                    // sink 收**剩余**参数(对照 typst 调用协议:显式参数
-                    // 先匹配,sink 最后取走剩余)——延后到其余参数解包完
-                    // 再 take,否则吞掉后续具名参数的传值。
-                    let sink = match spread.sink_ident() {
-                        Some(ident) => {
-                            let name = ident.as_str().to_string();
-                            let rust = bind_local(&mut fn_env, &name);
-                            Some(rust)
-                        }
-                        None => None,
-                    };
-                    sinks.push(sink);
+                    let stash = format!("__sink_pos_{}", sink_stash.len());
+                    let _ = writeln!(
+                        body,
+                        "    let {stash} = __args.consume(__n_pos_args.saturating_sub({num_pos_params}))?;"
+                    );
+                    let sink = spread.sink_ident().map(|ident| {
+                        let name = ident.as_str().to_string();
+                        bind_local(&mut fn_env, &name)
+                    });
+                    sink_stash.push((sink, stash));
                 }
             }
         }
-        // sink 最后收剩余(typst 调用协议:显式参数先匹配)。
-        for sink in sinks {
+        // sink = take()(剩余,含具名)按声明序 + 暂存的队首位置项
+        // (对照 eval_closure 末尾 `remaining_args.items.extend(sink_pos)`)。
+        for (sink, stash) in sink_stash {
             let target = sink.as_deref().unwrap_or("_sink");
-            let _ = writeln!(body, "    let mut {target} = Value::Args(__args.take());");
+            let _ = writeln!(
+                body,
+                "    let mut {target} = Value::Args(__args.take());\n    if let Value::Args(__sink_inner) = &mut {target} {{ __sink_inner.items.extend({stash}.into_iter()); }}"
+            );
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
 
@@ -141,8 +163,22 @@ pub(super) fn gen_closure_fn(
     }
     // 参数绑定:位置/解构/sink 与顶层同款;命名参数 stub 已填齐,
     // 直接必取。
+    // 声明序绑定,sink 按队首 consume 暂存(与顶层函数序言同协议,
+    // 对照 eval_closure;详见顶层函数处的协议注释)。
     let mut params_code = String::new();
-    let mut sinks: Vec<Option<String>> = Vec::new();
+    let num_pos_params = closure
+        .params()
+        .children()
+        .filter(|p| matches!(p, ast::Param::Pos(_)))
+        .count();
+    let mut sink_stash: Vec<(Option<String>, String)> = Vec::new();
+    let has_sink = closure
+        .params()
+        .children()
+        .any(|p| matches!(p, ast::Param::Spread(_)));
+    if has_sink {
+        let _ = writeln!(params_code, "    let __n_pos_args = __args.to_pos().len();");
+    }
     for param in closure.params().children() {
         match param {
             ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
@@ -155,8 +191,7 @@ pub(super) fn gen_closure_fn(
                 );
             }
             ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
-                // 占位符消费一个位置实参(同顶层函数序言;直调快路径
-                // 实参不经 stub 规范化,序言必须自行消费)。
+                // 占位符消费一个位置实参(同顶层函数序言)。
                 let _ = writeln!(
                     params_code,
                     "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
@@ -176,21 +211,25 @@ pub(super) fn gen_closure_fn(
                 );
             }
             ast::Param::Spread(spread) => {
-                let sink = match spread.sink_ident() {
-                    Some(ident) => {
-                        let name = ident.as_str().to_string();
-                        let rust = bind_local(&mut fn_env, &name);
-                        Some(rust)
-                    }
-                    None => None,
-                };
-                sinks.push(sink);
+                let stash = format!("__sink_pos_{}", sink_stash.len());
+                let _ = writeln!(
+                    params_code,
+                    "    let {stash} = __args.consume(__n_pos_args.saturating_sub({num_pos_params}))?;"
+                );
+                let sink = spread.sink_ident().map(|ident| {
+                    let name = ident.as_str().to_string();
+                    bind_local(&mut fn_env, &name)
+                });
+                sink_stash.push((sink, stash));
             }
         }
     }
-    for sink in sinks {
+    for (sink, stash) in sink_stash {
         let target = sink.as_deref().unwrap_or("_sink");
-        let _ = writeln!(params_code, "    let mut {target} = Value::Args(__args.take());");
+        let _ = writeln!(
+            params_code,
+            "    let mut {target} = Value::Args(__args.take());\n    if let Value::Args(__sink_inner) = &mut {target} {{ __sink_inner.items.extend({stash}.into_iter()); }}"
+        );
     }
     let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
 

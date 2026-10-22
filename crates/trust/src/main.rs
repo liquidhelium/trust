@@ -4,6 +4,52 @@ use std::io::Write;
 
 /// 从 registry 下载并解包一个包到本地缓存(对照 typst CLI 的缺包
 /// 自动下载,KNOWN #49)。成功返回 true(缓存目录就位)。
+/// 诊断摘录:span → file:行:列 + 源码行(对照 typst CLI 的诊断
+/// 呈现;KNOWN #69)。span 的 FileId 按路径再 intern 即同源。
+fn diag_snippet(
+    diag: &trust::Diag,
+    files: &std::collections::BTreeMap<String, String>,
+) -> String {
+    use std::fmt::Write as _;
+    let Some(id) = diag.span.id() else {
+        return String::new();
+    };
+    let vpath = id.vpath().get_with_slash().to_string();
+    let Some(src) = files.get(&vpath).or_else(|| {
+        // 依赖合并键形态(@spec/rel):剥 spec 前缀再试。
+        vpath
+            .find('/')
+            .and_then(|i| files.get(&vpath[i + 1..]))
+            .or_else(|| files.get(vpath.trim_start_matches('/')))
+    }) else {
+        return format!(" @ {vpath}");
+    };
+    let source = typst_syntax::Source::new(id, src.clone());
+    let Some(node) = source.find(diag.span) else {
+        return format!(" @ {vpath}");
+    };
+    let range = node.range();
+    let (line, col) = source
+        .lines()
+        .byte_to_line_column(range.start)
+        .unwrap_or((0, 0));
+    let line_text = src.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    let mut out = String::new();
+    let _ = write!(out, " @ {vpath}:{}:{}", line + 1, col + 1);
+    if !line_text.trim().is_empty() {
+        let _ = write!(
+            out,
+            "\n    {}",
+            if line_text.len() > 110 {
+                format!("{}…", &line_text[..110])
+            } else {
+                line_text.to_string()
+            }
+        );
+    }
+    out
+}
+
 fn package_cache_root() -> std::path::PathBuf {
     std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
         .map(std::path::PathBuf::from)
@@ -92,7 +138,21 @@ fn main() {
                 },
                 Err(diags) => {
                     for diag in diags {
-                        eprintln!("{input}: {:?} @ {}: {}", diag.span, diag.file.as_deref().unwrap_or("?"), diag.message);
+                        let mut one = std::collections::BTreeMap::new();
+                        one.insert(
+                            std::path::Path::new(input)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(input)
+                                .to_string(),
+                            src.clone(),
+                        );
+                        eprintln!(
+                            "{input}: {:?}{}: {}",
+                            diag.span,
+                            diag_snippet(&diag, &one),
+                            diag.message
+                        );
                     }
                     std::process::exit(1);
                 }
@@ -229,7 +289,7 @@ fn main() {
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
+                            eprintln!("  {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
                         }
                         std::process::exit(1);
                     }
@@ -239,7 +299,7 @@ fn main() {
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
-                    eprintln!("降级 {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
+                    eprintln!("降级 {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
                 }
                 std::fs::write(output, &code).expect("write");
                 println!(
@@ -255,7 +315,7 @@ fn main() {
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?} @ {}: {}", d.span, d.file.as_deref().unwrap_or("?"), d.message);
+                            eprintln!("  {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
                         }
                         std::process::exit(1);
                     }

@@ -33,7 +33,8 @@ fn diag_snippet(
         .lines()
         .byte_to_line_column(range.start)
         .unwrap_or((0, 0));
-    let line_text = src.lines().nth(line.saturating_sub(1)).unwrap_or("");
+    // byte_to_line 为 0 基:第 L 行 = lines()[L]。
+    let line_text = src.lines().nth(line).unwrap_or("");
     let mut out = String::new();
     let _ = write!(out, " @ {vpath}:{}:{}", line + 1, col + 1);
     if !line_text.trim().is_empty() {
@@ -139,14 +140,10 @@ fn main() {
                 Err(diags) => {
                     for diag in diags {
                         let mut one = std::collections::BTreeMap::new();
-                        one.insert(
-                            std::path::Path::new(input)
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or(input)
-                                .to_string(),
-                            src.clone(),
-                        );
+                        // 单文件形态 span 的 vpath 是 /main.typ——
+                        // 双键插入保证命中。
+                        one.insert("main.typ".to_string(), src.clone());
+                        one.insert(input.to_string(), src.clone());
                         eprintln!(
                             "{input}: {:?}{}: {}",
                             diag.span,

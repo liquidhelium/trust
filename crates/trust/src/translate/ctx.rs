@@ -36,6 +36,9 @@ pub(super) struct Ctx {
     /// 闭包在多调用点膨胀。
     pub(super) closure_dedup:
         std::collections::HashMap<String, (String, bool)>,
+    /// 每调用点节点静态的发射区(`NODE_cN`,与闭包项同区发射到根)。
+    pub(super) closure_nodes: String,
+    pub(super) next_node_id: usize,
     pub(super) next_closure_id: usize,
     /// C2 闭包 f_/D_ 汇集(发射到产物根部——跨文件去重后同一定义只
     /// 此一份,根级可见 __State 与全部导入)。
@@ -86,6 +89,8 @@ impl Ctx {
             closure_dedup: std::collections::HashMap::new(),
             next_closure_id: 0,
             closure_items: String::new(),
+            closure_nodes: String::new(),
+            next_node_id: 0,
             span_table: Vec::new(),
             span_index: std::collections::HashMap::new(),
         }
@@ -95,6 +100,18 @@ impl Ctx {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    /// 为一个**编译期常量片段源**发射每调用点静态
+    /// `pub(crate) static NODE_cN: LazyLock<(SyntaxNode, usize)>`,
+    /// 返回静态名——热路径创建零锁零查找(静态即缓存)。
+    pub(super) fn closure_node_static(&mut self, src: &str) -> String {
+        let name = format!("NODE_c{}", self.next_node_id);
+        self.next_node_id += 1;
+        self.closure_nodes.push_str(&format!(
+            "pub(crate) static {name}: std::sync::LazyLock<(typst_syntax::SyntaxNode, usize)> = std::sync::LazyLock::new(|| rt::parse_closure_node({src:?}));\n"
+        ));
+        name
     }
 
     /// 登记一个源 span,返回生成物里的引用 `*S{idx}`(错误站点用,

@@ -243,11 +243,13 @@ pub(super) fn gen_closure_fn(
     }
     if let Some((name, rust)) = &self_binding {
         // 自引用绑定发射(绑定时机见上方 env 注入;序言在此)。
+        // 重建走每调用点静态节点(与创建点同一份,零查找零锁)。
+        let stub_src = trust_runtime::compose_stub(name, params_src);
+        let node_name = self.closure_node_static(&stub_src);
         let _ = writeln!(
             prologue,
-            "    let mut {rust} = Value::Func(rt::self_func(&__selfcell, &{data}, {params_src:?}, &__slot));"
+            "    let mut {rust} = Value::Func(rt::self_func_node(&__selfcell, &{data}, &{node_name}, &__slot));"
         );
-        let _ = name;
     }
 
     format!(

@@ -417,6 +417,38 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
 /// clone 节点引用,与原生同款"AST 定位一次、值可廉价重建"。
 /// 键为原始文本(包装/解析只在未命中时进行,命中路径零格式化)。
 /// 片段同时登记进 [`CLOSURE_SOURCES`](虚拟文件,span 可定位到片段行)。
+/// 一次性解析(**无全局缓存**):供生成物每调用点 `static
+/// LazyLock` 作初始化体——静态即缓存,热路径零锁零查找。片段登记
+/// 进 CLOSURE_SOURCES(诊断反查,冷路径)。
+pub fn parse_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
+    let trimmed = src.trim_start();
+    let text = if trimmed.starts_with("let ") {
+        format!("#{trimmed}")
+    } else {
+        format!("#let __trust_closure = ({trimmed})")
+    };
+    let n = CLOSURE_SOURCES.read().unwrap().len();
+    let id = typst::syntax::RootedPath::new(
+        typst::syntax::VirtualRoot::Project,
+        typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
+            .expect("valid closure path"),
+    )
+    .intern();
+    let source = typst::syntax::Source::new(id, text.clone());
+    CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
+    let node = find_closure_node(source.root())
+        .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
+        .clone();
+    let num_pos_params = node
+        .cast::<ast::Closure>()
+        .expect("closure node casts")
+        .params()
+        .children()
+        .filter(|p| matches!(p, ast::Param::Pos(_)))
+        .count();
+    (node, num_pos_params)
+}
+
 fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, (typst_syntax::SyntaxNode, usize)>>,
@@ -544,6 +576,32 @@ pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value
     args.expect::<Value>(name)
 }
 
+/// 每调用点静态版的解释闭包创建(节点来自调用点静态;pending
+/// 物化协议同 [`closure`])。
+pub fn closure_node_at(
+    node: &(typst_syntax::SyntaxNode, usize),
+    defaults: Vec<Value>,
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+) -> Func {
+    let (node, num_pos_params) = node.clone();
+    let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
+    resolve_pending(engine, &mut captured, pending);
+    let mut scope = Scope::new();
+    for (name, value) in &captured {
+        scope.define(name, value.clone());
+    }
+    let closure_span = node.span();
+    Func::from(Closure {
+        node: ClosureNode::Closure(node),
+        defaults,
+        captured: scope,
+        num_pos_params,
+    })
+    .spanned(closure_span)
+}
+
 /// 自递归闭包的自身函数缓存(每**实例**重建一次 stub):创建期携带
 /// defaults,首次自引用时用同一 StateSlot 重建签名保真 stub 并缓存
 /// ——递归深度 N 次调用只重建一次,且身份(槽 id)与原实例一致。
@@ -567,6 +625,18 @@ pub fn self_func(
 ) -> Func {
     cell.func
         .get_or_init(|| native_closure(data, params_src, cell.defaults.clone(), slot))
+        .clone()
+}
+
+/// 静态节点版(节点来自调用点静态,重建零查找零锁)。
+pub fn self_func_node(
+    cell: &SelfFuncCell,
+    data: &'static typst::foundations::NativeFuncData,
+    node: &(typst_syntax::SyntaxNode, usize),
+    slot: &StateSlot,
+) -> Func {
+    cell.func
+        .get_or_init(|| native_closure_node(data, node, cell.defaults.clone(), slot))
         .clone()
 }
 
@@ -1199,6 +1269,31 @@ impl std::hash::Hash for StateSlot {
 /// (对照 typst 闭包创建期求值默认值;调用期缺失参数从 defaults 取,
 /// AST 里的默认值表达式不会被求值)。状态随函数值走,生命周期与
 /// 函数值一致——全局注册表寻址(STATES 线)由此退场。
+/// 每调用点静态版的 stub 创建(节点已由调用点 `static LazyLock`
+/// 解析缓存,此处零查找零锁:Scope 构建 + define + Func::from)。
+pub fn native_closure_node(
+    data: &'static typst::foundations::NativeFuncData,
+    node: &(typst_syntax::SyntaxNode, usize),
+    defaults: Vec<Value>,
+    state: &StateSlot,
+) -> Func {
+    let (node, num_pos_params) = node.clone();
+    let mut scope = Scope::new();
+    scope.define("__trust_impl", Func::from(data));
+    scope.define(
+        "__trust_state",
+        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
+    );
+    let closure_span = node.span();
+    Func::from(Closure {
+        node: ClosureNode::Closure(node),
+        defaults,
+        captured: scope,
+        num_pos_params,
+    })
+    .spanned(closure_span)
+}
+
 pub fn native_closure(
     data: &'static typst::foundations::NativeFuncData,
     params_src: &str,
@@ -1223,6 +1318,14 @@ pub fn native_closure(
         num_pos_params,
     })
     .spanned(closure_span)
+}
+
+/// stub 源码组合(纯函数,无缓存):`stub_signature`(模式参数→
+/// 合成名,无名 sink 补名)+ `stub_source` 合并——供**翻译期**调用,
+/// 生成物把结果作为字面量嵌入每调用点静态。
+pub fn compose_stub(name: &str, params_src: &str) -> String {
+    let (params, args) = stub_signature(params_src);
+    stub_source(name, &params, &args)
 }
 
 /// stub 签名与转发实参表(按 `params_src` 文本缓存——stub 创建高频,

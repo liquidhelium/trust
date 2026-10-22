@@ -543,7 +543,9 @@ impl Ctx {
         } else {
             format!("&[{}]", captured.join(", "))
         };
-        format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}, {pending_lit}, engine))")
+        // 每调用点静态:parse 一次,创建零锁零查找。
+        let node = self.closure_node_static(&src_text);
+        format!("Value::Func(rt::closure_node_at(&{node}, {defaults}, {captured}, {pending_lit}, engine))")
     }
 
     /// C2:值位置闭包的原生路径。
@@ -662,8 +664,16 @@ impl Ctx {
                 "std::sync::Arc::new(rt::self_func_cell({defaults}))"
             ));
         }
+        // stub 源翻译期组合(纯函数),节点进每调用点静态——创建
+        // 零查找零锁(native_closure_node)。
+        let stub_name = closure
+            .name()
+            .map(|n| n.as_str().to_string())
+            .unwrap_or_else(|| "closure".to_string());
+        let stub_src = trust_runtime::compose_stub(&stub_name, &params_src);
+        let node_name = self.closure_node_static(&stub_src);
         format!(
-            "{{ let __slot_{id} = std::sync::Arc::new(({})); Value::Func(rt::native_closure(&D_{id}, {params_src:?}, {defaults}, &rt::StateSlot::new(__slot_{id}))) }}",
+            "{{ let __slot_{id} = std::sync::Arc::new(({})); Value::Func(rt::native_closure_node(&D_{id}, &{node_name}, {defaults}, &rt::StateSlot::new(__slot_{id}))) }}",
             tuple.join(", ")
         )
     }

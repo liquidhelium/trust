@@ -10,3 +10,4 @@ publish = false
 typst-syntax = "0.15.1"
 # 包 manifest(entrypoint 解析)
 toml = "0.8"
+trust-runtime = { path = "../trust-runtime" }

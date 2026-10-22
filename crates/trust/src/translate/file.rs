@@ -326,8 +326,12 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
 
     // 模块 body:顶层内容按源序折叠(规则包装后续内容,逐项可见性)。
     let body = cx.content_seq_top(&content_items);
-    // C2 值位置闭包的原生体(根级发射)。
-    let closure_items = std::mem::take(&mut cx.closure_items);
+    // C2 值位置闭包的原生体与每调用点节点静态(根级发射)。
+    let closure_items = format!(
+        "{}{}",
+        std::mem::take(&mut cx.closure_items),
+        std::mem::take(&mut cx.closure_nodes)
+    );
 
     if !cx.diags.is_empty() {
         return Err(cx.diags);

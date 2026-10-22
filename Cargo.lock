@@ -2011,6 +2011,7 @@ name = "trust"
 version = "0.1.0"
 dependencies = [
  "toml",
+ "trust-runtime",
  "typst-syntax",
 ]
 

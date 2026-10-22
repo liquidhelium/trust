@@ -19,18 +19,26 @@ impl Ctx {
         match pattern {
             ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
                 let name = ident.as_str().to_string();
-                match env.locals.iter().rev().find(|(n, _)| *n == name) {
-                    // 已有同名:解构叶子写入既有变量(遮蔽在可见性上等价)。
-                    Some((_, rust)) => format!("{rust} = {value};\n"),
-                    None => {
-                        if assign {
-                            self.diag(ident.span(), format!("解构赋值目标 `{name}` 不是局部变量"));
+                if assign {
+                    // 解构赋值:目标是既有局部,直接写入。
+                    match env.locals.iter().rev().find(|(n, _)| *n == name) {
+                        Some((_, rust)) => format!("{rust} = {value};\n"),
+                        None => {
+                            self.diag(
+                                ident.span(),
+                                format!("解构赋值目标 `{name}` 不是局部变量"),
+                            );
                             String::new()
-                        } else {
-                            let rust = bind_local(env, &name);
-                            format!("let mut {rust} = {value};\n")
                         }
                     }
+                } else {
+                    // `let` 恒为**遮蔽**:typst 块内 let 不影响外层同名
+                    // 绑定(块作用域退出即失效)。复用外层变量会让块内
+                    // let 泄漏写穿外层——fletcher 分支内 `let result =
+                    // ...` 曾把外层累积数组覆盖成字典,后续 push 报
+                    // "type dictionary has no method `push`"。
+                    let rust = bind_local(env, &name);
+                    format!("let mut {rust} = {value};\n")
                 }
             }
             ast::Pattern::Placeholder(_) => format!("let _ = {value};\n"),
@@ -42,9 +50,11 @@ impl Ctx {
                 let n_items = d.items().count();
                 let mut out = format!("let {tmp} = {value};\n");
                 // 预分配全部绑定名并提升声明到 match 外:数组/字典两分支
-                // 以赋值形式写入同一批变量。
+                // 以赋值形式写入同一批变量。`let`(assign=false)恒为
+                // 遮蔽——同名也绑定新名,不复用外层(见 Ident 臂);
+                // 解构赋值(assign=true)写入既有目标。
                 for ident in pattern.bindings() {
-                    if env.locals.iter().any(|(n, _)| *n == ident.as_str()) {
+                    if assign && env.locals.iter().any(|(n, _)| *n == ident.as_str()) {
                         continue;
                     }
                     let rust = bind_local(env, ident.as_str());

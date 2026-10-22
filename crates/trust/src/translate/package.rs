@@ -360,24 +360,72 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         escape(field)
                     );
                 }
+                // 绑定进**槽**(eval 期填充 + 模块作用域转出):与外部包
+                // import 同款形态——下游 `import "本文件": 名字` 可达
+                // (对照原生:模块作用域含 import 引入的名字)。此前绑定
+                // 为即时表达式,文件内可用但不可转出,fletcher 0.5.9 的
+                // `#import cetz: vector`(外部模块的子模块值)踩中此缺口。
                 match &edge.items {
                     ImportItems::Bare => {
                         let name = fields.last().cloned().unwrap_or_else(|| root.clone());
-                        env.module.push((name, Ref::Value(expr)));
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&name)
+                        );
+                        state_fields.push(slot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {expr})?;"
+                        );
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&name)
+                        );
                     }
                     ImportItems::Rename(name) => {
-                        env.module.push((name.clone(), Ref::Value(expr)));
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&name)
+                        );
+                        state_fields.push(slot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {expr})?;"
+                        );
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&name)
+                        );
                     }
                     ImportItems::List(list) => {
                         for (item, rename) in list {
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            env.module.push((
-                                as_name,
-                                Ref::ModuleField {
-                                    expr: expr.clone(),
-                                    name: item.clone(),
-                                },
-                            ));
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize(&plan.mod_name),
+                                sanitize(&as_name)
+                            );
+                            state_fields.push(slot.clone());
+                            let item_expr = format!(
+                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                                escape(item)
+                            );
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::fill(&__st.{slot}, {item_expr})?;"
+                            );
+                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                escape(&as_name)
+                            );
                         }
                     }
                     ImportItems::Wildcard => {
@@ -673,7 +721,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             let _ = writeln!(decls, "        let mut {slot} = Value::None;");
                         }
                         let stmts =
-                            cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, false);
+                            cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
                         let mut fills = String::new();
                         for (name, slot) in &bound {
                             let _ =

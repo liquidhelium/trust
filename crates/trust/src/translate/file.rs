@@ -218,8 +218,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 init,
                 pattern: Some(pattern),
             } => {
-                // 顶层解构:槽名预绑为临时局部,destructure 写回这些
-                // 名字,再逐槽填充注册。
+                // 顶层解构:槽名预绑为临时局部,destructure 经
+                // assign=true(写既有目标)写回这些名字,再逐槽填充
+                // 注册——块的 let 遮蔽语义不适用于此(名字即槽别名)。
                 let expr = cx.expr(*init, &init_env);
                 let mut tmp_env = init_env.clone();
                 let mut decls = String::new();
@@ -227,7 +228,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     tmp_env.locals.push((name.clone(), slot.clone()));
                     let _ = writeln!(decls, "        let mut {slot} = Value::None;");
                 }
-                let stmts = cx.destructure(*pattern, "v.clone()".to_string(), &mut tmp_env, false);
+                let stmts = cx.destructure(*pattern, "v.clone()".to_string(), &mut tmp_env, true);
                 let mut fills = String::new();
                 for (name, slot) in &top.names {
                     let _ = writeln!(

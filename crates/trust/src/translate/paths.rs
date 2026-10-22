@@ -17,7 +17,10 @@ pub(super) fn parse_module_access(expr: ast::Expr) -> Option<(String, Vec<String
     }
     let mut fields = Vec::new();
     let root = walk(expr, &mut fields)?;
-    fields.reverse();
+    // walk 的 push 发生在递归返回之后,天然按源序(inner 先 outer 后:
+    // `deps.cetz.draw` → [cetz, draw])——**不要**再 reverse(单字段链
+    // 看不出颠倒,两条以上如 fletcher 的 `import deps.cetz.draw` 会把
+    // 字段读反)。
     Some((root, fields))
 }
 

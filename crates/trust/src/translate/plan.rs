@@ -138,7 +138,39 @@ pub(super) fn build_export_table(
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &plan.imports {
-            if edge.is_include || edge.module_access.is_some() {
+            if edge.is_include {
+                continue;
+            }
+            // 模块值 import(`import cetz: vector`)的绑定同样转出:
+            // 槽名与 package.rs 的生成规则逐字一致(eval 期填充)。
+            if let Some((root, fields)) = &edge.module_access {
+                match &edge.items {
+                    ImportItems::Bare | ImportItems::Rename(_) => {
+                        let bound = match &edge.items {
+                            ImportItems::Rename(name) => name.clone(),
+                            _ => fields.last().cloned().unwrap_or_else(|| root.clone()),
+                        };
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&bound)
+                        );
+                        exports.entry(bound).or_insert(slot);
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name =
+                                rename.clone().unwrap_or_else(|| item.clone());
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize(&plan.mod_name),
+                                sanitize(&as_name)
+                            );
+                            exports.entry(as_name).or_insert(slot);
+                        }
+                    }
+                    ImportItems::Wildcard => {}
+                }
                 continue;
             }
             // 外部包 bare/rename:转出绑定到外部模块槽(package.rs 的

@@ -492,9 +492,14 @@ pub fn closure(
     let (node, num_pos_params) = cached_closure_node(src);
     let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
     resolve_pending(engine, &mut captured, pending);
+    // 调试开关一次性探测(此前**每次闭包创建**都 getenv——glibc 的
+    // getenv 还要拿 environ 锁,是 gen 侧冷编译每轮 ~5ms 的纯税,
+    // perf 剖析定位,2026-10-22)。
+    static DEBUG_CAPTURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let debug = *DEBUG_CAPTURE.get_or_init(|| std::env::var_os("TRUST_DEBUG_CAPTURE").is_some());
     let mut scope = Scope::new();
     for (name, value) in &captured {
-        if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() && src.contains("ctx => {") {
+        if debug && src.contains("ctx => {") {
             let brief = format!("{value:?}");
             eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
         }

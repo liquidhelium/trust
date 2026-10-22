@@ -102,13 +102,13 @@ pub(super) fn collect_idents(
             };
             collect_idents(access.target().to_untyped(), bound, out);
         }
-        // 数学字段访问(`$arrow.t$` / 三段链 `$arrow.t.twohead$`,
-        // commute 驱动):字段名不是自由变量(数学体经 eval_expr 解释、
-        // 名字自解析)——只收目标(首个非 Dot 子节点,可能是嵌套的
-        // 字段链),其余 MathIdent 是字段名,不进捕获名单。
+        // 数学字段访问(`$arrow.t$` / 三段链 `$arrow.t.twohead$`):
+        // **对照 typst-eval CapturesVisitor 同名分支逐字同形**——只访
+        // 问目标(access.target()),字段名不算捕获(commute 驱动:
+        // `$arrow.t$` 的 t 被当变量,调用期报 unknown variable)。
         K::MathFieldAccess => {
-            if let Some(target) = node.children().find(|c| c.kind() != K::Dot) {
-                collect_idents(target, bound, out);
+            if let Some(access) = node.cast::<ast::MathFieldAccess>() {
+                collect_idents(access.target().to_untyped(), bound, out);
             }
         }
         K::Named => {

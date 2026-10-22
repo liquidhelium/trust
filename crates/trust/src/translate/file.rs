@@ -253,9 +253,31 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let mut g_code = String::new();
                 let mut g_seen = std::collections::HashSet::new();
                 let mut names = Vec::new();
+                // 先注入闭包自身绑定(名字/参数/sink)再收集——参数不是
+                // 自由名(codly 驱动:`__merge(base, …)` 的 base 曾被
+                // 收成全局槽,调用期报 unknown variable;对照
+                // CapturesVisitor 的 Closure 分支先 bind 后访体)。
+                let mut g_bound: Vec<String> = Vec::new();
+                if let Some(name) = closure.name() {
+                    g_bound.push(name.as_str().to_string());
+                }
+                for param in closure.params().children() {
+                    match param {
+                        ast::Param::Pos(pattern) => g_bound
+                            .extend(pattern.bindings().into_iter().map(|i| i.as_str().to_string())),
+                        ast::Param::Named(named) => {
+                            g_bound.push(named.name().as_str().to_string())
+                        }
+                        ast::Param::Spread(spread) => {
+                            if let Some(ident) = spread.sink_ident() {
+                                g_bound.push(ident.as_str().to_string());
+                            }
+                        }
+                    }
+                }
                 super::captures::collect_idents(
                     closure.body().to_untyped(),
-                    &mut Vec::new(),
+                    &mut g_bound,
                     &mut names,
                 );
                 for gname in names {

@@ -2,6 +2,39 @@
 
 use std::io::Write;
 
+/// 从 registry 下载并解包一个包到本地缓存(对照 typst CLI 的缺包
+/// 自动下载,KNOWN #49)。成功返回 true(缓存目录就位)。
+fn package_cache_root() -> std::path::PathBuf {
+    std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".cache/typst/packages")
+        })
+}
+
+fn fetch_package(ns: &str, name: &str, version: &str) -> bool {
+    if ns != "preview" {
+        return false; // 只认官方 preview 命名空间
+    }
+    let url = format!("https://packages.typst.org/preview/{name}-{version}.tar.gz");
+    let Ok(resp) = ureq::get(&url).call() else {
+        return false;
+    };
+    let reader = std::io::BufReader::new(resp.into_reader());
+    let gz = flate2::read::GzDecoder::new(reader);
+    let cache = package_cache_root();
+    let dir = cache.join(ns).join(name).join(version);
+    let parent = dir.parent().map(std::path::Path::to_path_buf);
+    if let Some(p) = parent
+        && std::fs::create_dir_all(&p).is_err()
+    {
+        return false;
+    }
+    let mut archive = tar::Archive::new(gz);
+    archive.unpack(&dir).is_ok()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -453,9 +486,24 @@ fn collect_translatable_deps(
             let dir = cache_root.join(ns).join(name).join(
                 rest.split_once(':').map(|(_, v)| v).unwrap_or(""),
             );
-            let Ok(manifest) = std::fs::read_to_string(dir.join("typst.toml")) else {
-                eprintln!("依赖未在本地包缓存命中(运行时解释回退): {spec}");
-                continue;
+            // 缺包自动拉取(对照 typst CLI 的 registry 下载,
+            // KNOWN #49):registry 形态 {name}-{version}.tar.gz;
+            // TRUST_NO_FETCH=1 禁用。失败才回退运行时解释。
+            if !dir.join("typst.toml").exists() {
+                let ok = std::env::var_os("TRUST_NO_FETCH").is_none()
+                    && fetch_package(ns, name, rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
+                if !ok {
+                    eprintln!("依赖未在本地包缓存命中(运行时解释回退): {spec}");
+                    continue;
+                }
+                eprintln!("依赖缺包已自动拉取: {spec}");
+            }
+            let manifest = match std::fs::read_to_string(dir.join("typst.toml")) {
+                Ok(m) => m,
+                Err(_) => {
+                    eprintln!("依赖 manifest 读取失败: {spec}");
+                    continue;
+                }
             };
             let Ok(table) = manifest.parse::<toml::Table>() else {
                 eprintln!("依赖 manifest 解析失败: {spec}");

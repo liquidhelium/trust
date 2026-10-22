@@ -728,9 +728,40 @@ pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value
 
 /// markup 智能引号(`'` / `"`):构造 smartquote 元素(开合/语言相关
 /// 的解析语义留给 layout 期,对照 eval_markup 的 SmartQuoteElem)。
-pub fn smartquote(double: bool) -> Value {
+pub fn smartquote(double: bool) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    Value::Content(typst::text::SmartQuoteElem::new().with_double(double).pack())
+    typst::text::SmartQuoteElem::new().with_double(double).pack()
+}
+
+/// markup 序列折叠(对照 eval_markup 的逐项分派):**label 项贴到
+/// 序列中最后一个可贴元素**(`labelled`,独立 label 内容项在查询里
+/// 不可见——glossarium 驱动:`<glossarium:make-glossary>` 查询空致
+/// "make-glossary not called"),其余值经 display 入序,末按
+/// Content::sequence 折叠。
+pub fn attach_labels(items: Vec<Value>) -> typst::foundations::Content {
+    let mut seq: Vec<typst::foundations::Content> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Value::Label(label) = item {
+            if let Some(elem) = seq
+                .iter_mut()
+                .rev()
+                .find(|n| !n.can::<dyn typst::foundations::Unlabellable>())
+            {
+                *elem = std::mem::take(elem).labelled(label);
+            }
+        } else {
+            seq.push(item.display());
+        }
+    }
+    typst::foundations::Content::sequence(seq)
+}
+
+/// markup 转义/简写:对照原版 `Value::Symbol(runtime_char)`(注意
+/// **不是**文本元素——两者 repr 同形但不同型,等值判断可区分;
+/// physica 驱动:`[\[]` 曾被翻成 text,`== [\[]` 恒假致 pdv 走错
+/// 分支)。进内容序列时由调用侧 display 物化为符号元素。
+pub fn symbol_value(c: char) -> Value {
+    Value::Symbol(typst::foundations::Symbol::runtime_char(c))
 }
 
 /// 代码位 Raw:行表 + 语言 + 块标记构造 RawElem(对照 typst-eval

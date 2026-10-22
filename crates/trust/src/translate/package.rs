@@ -200,34 +200,63 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             None => ImportItems::Bare,
                         },
                         Some(ast::Imports::Wildcard) => ImportItems::Wildcard,
-                        Some(ast::Imports::Items(items)) => ImportItems::List(
-                            items
-                                .iter()
-                                .map(|item| {
-                                    // 完整名字含点号路径(`a.b as c`):
-                                    // original_name() 只给末段,这里按
-                                    // 段连出全名(hydra 驱动);未改名时
-                                    // 绑定名= 末段(typst 语义)。
-                                    let original = item
-                                        .path()
-                                        .iter()
-                                        .map(|seg| seg.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(".");
-                                    let bound = match item {
-                                        ast::ImportItem::Simple(_) => original
-                                            .rsplit('.')
-                                            .next()
-                                            .unwrap_or(&original)
-                                            .to_string(),
-                                        ast::ImportItem::Renamed(renamed) => {
-                                            renamed.new_name().as_str().to_string()
-                                        }
-                                    };
-                                    (original, Some(bound))
-                                })
-                                .collect(),
-                        ),
+                        // 模块改名 + 成员列表:双绑定(elembic 驱动,
+                        // `import "base.typ" as base: ok, err`)。
+                        Some(ast::Imports::Items(items)) => match import.new_name() {
+                            Some(new_name) => ImportItems::RenameList(
+                                new_name.as_str().to_string(),
+                                items
+                                    .iter()
+                                    .map(|item| {
+                                        let original = item
+                                            .path()
+                                            .iter()
+                                            .map(|seg| seg.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(".");
+                                        let bound = match item {
+                                            ast::ImportItem::Simple(_) => original
+                                                .rsplit('.')
+                                                .next()
+                                                .unwrap_or(&original)
+                                                .to_string(),
+                                            ast::ImportItem::Renamed(renamed) => {
+                                                renamed.new_name().as_str().to_string()
+                                            }
+                                        };
+                                        (original, Some(bound))
+                                    })
+                                    .collect(),
+                            ),
+                            None => ImportItems::List(
+                                items
+                                    .iter()
+                                    .map(|item| {
+                                        // 完整名字含点号路径(`a.b as c`):
+                                        // original_name() 只给末段,这里按
+                                        // 段连出全名(hydra 驱动);未改名时
+                                        // 绑定名= 末段(typst 语义)。
+                                        let original = item
+                                            .path()
+                                            .iter()
+                                            .map(|seg| seg.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(".");
+                                        let bound = match item {
+                                            ast::ImportItem::Simple(_) => original
+                                                .rsplit('.')
+                                                .next()
+                                                .unwrap_or(&original)
+                                                .to_string(),
+                                            ast::ImportItem::Renamed(renamed) => {
+                                                renamed.new_name().as_str().to_string()
+                                            }
+                                        };
+                                        (original, Some(bound))
+                                    })
+                                    .collect(),
+                            ),
+                        },
                     };
                     imports.push(ImportEdge {
                         span: expr.span(),
@@ -455,16 +484,37 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
-                    // 全局名创建期物化(对照 typst 闭包捕获)。
+                    // 全局名创建期物化(对照 typst 闭包捕获)。先注入
+                    // 闭包自身绑定(名字/参数/sink)——参数不是自由名
+                    // (codly 驱动:`__merge(base, …)` 的 base 曾被收成
+                    // 全局槽;对照 CapturesVisitor 的 Closure 分支)。
                     let mut g_env = env2.clone();
                     let mut names = Vec::new();
+                    let mut g_bound: Vec<String> = Vec::new();
+                    if let Some(cname) = closure.name() {
+                        g_bound.push(cname.as_str().to_string());
+                    }
+                    for param in closure.params().children() {
+                        match param {
+                            ast::Param::Pos(pattern) => g_bound
+                                .extend(pattern.bindings().into_iter().map(|i| i.as_str().to_string())),
+                            ast::Param::Named(named) => {
+                                g_bound.push(named.name().as_str().to_string())
+                            }
+                            ast::Param::Spread(spread) => {
+                                if let Some(ident) = spread.sink_ident() {
+                                    g_bound.push(ident.as_str().to_string());
+                                }
+                            }
+                        }
+                    }
                     super::captures::collect_idents(
                         closure.body().to_untyped(),
-                        &mut Vec::new(),
+                        &mut g_bound,
                         &mut names,
                     );
                     let mut g_seen = std::collections::HashSet::new();
-                    for gname in names {
+                for gname in names {
                         if !g_seen.insert(gname.clone()) {
                             continue;
                         }
@@ -986,6 +1036,31 @@ impl Ctx {
                             escape(&name)
                         );
                     }
+                    // 模块改名 + 成员列表:双绑定(elembic 驱动)。
+                    ImportItems::RenameList(mname, list) => {
+                        env.module.push((mname.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(mname)
+                        );
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name.clone(),
+                                Ref::ModuleField {
+                                    expr: format!("rt::read(&__st.{slot})?"),
+                                    name: item.clone(),
+                                },
+                            ));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                escape(&as_name),
+                                escape(item)
+                            );
+                        }
+                    }
                     ImportItems::List(list) => {
                         for (item, rename) in list {
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
@@ -1095,6 +1170,48 @@ impl Ctx {
                             escape(&name)
                         );
                     }
+                    // 模块改名 + 成员列表:双绑定(elembic 驱动)。
+                    ImportItems::RenameList(mname, list) => {
+                        let mslot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(mname)
+                        );
+                        state_fields.push(mslot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{mslot}, {expr})?;"
+                        );
+                        env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
+                            escape(mname)
+                        );
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize(&plan.mod_name),
+                                sanitize(&as_name)
+                            );
+                            state_fields.push(slot.clone());
+                            let item_expr = format!(
+                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                                escape(item)
+                            );
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::fill(&__st.{slot}, {item_expr})?;"
+                            );
+                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                escape(&as_name)
+                            );
+                        }
+                    }
                     ImportItems::List(list) => {
                         for (item, rename) in list {
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
@@ -1166,6 +1283,50 @@ impl Ctx {
                         "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
                         escape(&bound)
                     );
+                }
+                // 模块改名 + 成员列表:模块槽绑定 + 逐成员字段访问
+                // (elembic 驱动:`import "base.typ" as base: ok, err`)。
+                ImportItems::RenameList(mname, list) => {
+                    let mslot = match import_slots.get(&edge.target) {
+                        Some(slot) => slot.clone(),
+                        None => format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(mname)
+                        ),
+                    };
+                    let existed = import_slots
+                        .insert(edge.target.clone(), mslot.clone())
+                        .is_some();
+                    if !existed {
+                        state_fields.push(mslot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{mslot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                        );
+                    }
+                    env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
+                        escape(mname)
+                    );
+                    for (name, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| name.clone());
+                        env.module.push((
+                            as_name.clone(),
+                            Ref::ModuleField {
+                                expr: format!("rt::read(&__st.{mslot})?"),
+                                name: name.clone(),
+                            },
+                        ));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                            escape(&as_name),
+                            escape(name)
+                        );
+                    }
                 }
                 ImportItems::List(list) => {
                     for (name, rename) in list {

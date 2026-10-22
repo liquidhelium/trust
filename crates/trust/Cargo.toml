@@ -6,6 +6,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+flate2 = "1"
+tar = "0.4"
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 # 前端与手翻基线(typst 0.15.1)同版,保证 AST/语义对齐
 typst-syntax = "0.15.1"
 # 包 manifest(entrypoint 解析)

@@ -1,0 +1,48 @@
+              none,
+            )
+          } else {
+            (
+              auto-cast-check(dictionary, fields: fields, parse-args: parse-args),
+              auto-cast(dictionary, fields: fields, constructor: default-constructor),
+              auto-cast-error(dictionary, fields: fields, parse-args: parse-args),
+            )
+          }
+        } else {
+          assert(
+            false,
+            message: "elembic: types.declare: cast 'with' can only be omitted for 'from: dictionary'. It must receive the default constructor and return a function 'casted value => your type'."
+          )
+        }
+
+        if type(with) != function {
+          assert(
+            false,
+            message: "elembic: types.declare: cast 'with' must receive the default constructor and return a function 'casted value => your type'. Received " + base.typename(with)
+          )
+        }
+
+        let from-cast = from.cast
+
+        types.wrap(
+          from,
+          check: from-check => if from-check == none {
+            if cast-check == none {
+              none
+            } else if from.cast == none {
+              cast-check
+            } else {
+              value => cast-check(from-cast(value))
+            }
+          } else if cast-check == none {
+            from-check
+          } else if from.cast == none {
+            value => from-check(value) and cast-check(value)
+          } else {
+            value => from-check(value) and cast-check(from-cast(value))
+          },
+
+          output: (typeid,),
+
+          cast: from-cast => if from-cast == none {
+            with
+          } else {

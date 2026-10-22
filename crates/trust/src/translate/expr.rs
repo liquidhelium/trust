@@ -803,24 +803,37 @@ impl Ctx {
             }
             ContentItem::Part(ast::Expr::Space(_)) => "rt::space()".into(),
             ContentItem::Part(ast::Expr::Shorthand(s)) => {
-                // markup 简写:`~` nbsp、`--` en、`---` em、`...`、`-?`
-                // (对照 eval_markup 直接产 text 节点)。
-                format!("rt::text({:?})", s.get().to_string())
+                // markup 简写(`~` nbsp、`--` en 等):对照原版
+                // `Value::Symbol(runtime_char)`,经 display 进序列
+                // (Symbol 元素与文本元素不同型——等值判断可区分)。
+                format!("rt::symbol_value({:?})", s.get())
             }
             ContentItem::Part(ast::Expr::SmartQuote(q)) => {
                 // 智能引号:构造 smartquote 元素,解析留给 layout 期。
                 format!("rt::smartquote({})", q.double())
             }
+            ContentItem::Part(ast::Expr::Label(l)) => {
+                // label 不 embed:以 Value::Label 入序,由 attach_labels
+                // 贴到末个可贴元素(对照 eval_markup 的 Label 分支)。
+                format!("rt::label({:?})", l.get())
+            }
             ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
             ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),
             ContentItem::Part(ast::Expr::Escape(e)) => {
-                format!("rt::text({:?})", e.get().to_string())
+                // 转义 `\[`:对照原版 `Value::Symbol(runtime_char)`
+                // (不是 text——physica 的 `== [\[]` 靠类型区分)。
+                format!("rt::symbol_value({:?})", e.get())
             }
             ContentItem::Part(ast::Expr::LetBinding(_))
             | ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
             ContentItem::Part(other) => {
-                let value = self.expr(*other, env);
-                format!("rt::embed({value})")
+                // 值**不经 embed** 直接入序:attach_labels 里的
+                // display 与 eval_markup 的 value.display() 同形;
+                // 尤其 `#label(表达式)`(函数调用,计算名)产出
+                // Value::Label,由 attach_labels 贴附而非独立内容项
+                // (glossarium 驱动:`#label(prefix + key)` 曾被 embed,
+                // 词条标签查询不到)。
+                self.expr(*other, env)
             }
             ContentItem::Set(_) | ContentItem::Show(_) => {
                 unreachable!("rules handled by content_seq_top")
@@ -832,7 +845,14 @@ impl Ctx {
         if parts.is_empty() {
             "Content::sequence(Vec::new())".into()
         } else {
-            format!("rt::content_sequence(vec![{}])", parts.join(", "))
+            // 对照 eval_markup:label 贴到末个可贴元素(attach_labels),
+            // 其余值 display 入序(glossarium 驱动的查询语义)。
+            let items = parts
+                .iter()
+                .map(|p| format!("({p}).into_value()"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("rt::attach_labels(vec![{items}])")
         }
     }
 
@@ -861,7 +881,16 @@ impl Ctx {
             }
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
                 captured.push((name.clone(), format!("{rust}.clone()")));
-            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
+            } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name)
+                // 全局物化名(G_ 槽/GlobalFallback):创建期可能不可见
+                // ——走 pending 协议(resolve_pending 的 capture_opt 软物
+                // 化,空则 None,调用期才报;与 typst 捕获时机一致。
+                // elembic 驱动:`from-error => value => … from-check(…)`
+                // 的 from-check 是兄弟闭包参数,真自由名,创建期必空,
+                // 曾经 read_or 急切报错)。
+                && !matches!(module_ref, super::ctx::Ref::GlobalFallback { .. })
+                && !matches!(module_ref, super::ctx::Ref::Slot(s) if s.starts_with("G_"))
+            {
                 let value = self.ref_value(module_ref);
                 captured.push((name.clone(), value));
             } else {

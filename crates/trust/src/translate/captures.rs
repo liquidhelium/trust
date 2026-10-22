@@ -8,7 +8,7 @@
 
 use typst_syntax::ast::{self, AstNode};
 
-pub(super) fn collect_idents(
+pub(super) fn collect_idents(  // WALK 计数供 TRUST_TRACE_CAPS 调试
     node: &typst_syntax::SyntaxNode,
     bound: &mut Vec<String>,
     out: &mut Vec<String>,
@@ -26,6 +26,12 @@ pub(super) fn collect_idents(
                 }
             }
             let mut pushed = 0;
+            if std::env::var_os("TRUST_TRACE_CAPS").is_some() {
+                static WALK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let w = WALK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let has_fc = cl.params().children().any(|p| matches!(p, ast::Param::Pos(pat) if pat.bindings().into_iter().any(|i| i.as_str() == "from-check")));
+                if has_fc { eprintln!("[closure#{w}] from-check 闭包入 Closure 分支,参数绑定后 in-bound=TBD"); }
+            }
             if let Some(name) = cl.name() {
                 bound.push(name.as_str().to_string());
                 pushed += 1;
@@ -156,6 +162,103 @@ pub(super) fn collect_idents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_closure_params_not_collected() {
+        let src = "#let outer(a) = { call(c: from-check => if from-check == none { none } else { from-check(1) }, d: 2); a }";
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.contains(&"from-check".to_string()),
+            "内联闭包参数不应被收集: {out:?}"
+        );
+    }
+
+    #[test]
+    fn multiline_inline_closure_not_collected() {
+        let src = r#"#let declare(from, cast-check) = {
+  let from-cast = from.cast
+
+  types.wrap(
+    from,
+    check: from-check => if from-check == none {
+      if cast-check == none { none } else { from.cast }
+    } else {
+      from-check(1)
+    },
+  )
+  from
+}"#;
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.contains(&"from-check".to_string()),
+            "多行内联闭包参数不应被收集: {out:?}"
+        );
+    }
+
+    #[test]
+    fn elembic_real_closure_shape() {
+        let src = "            false,
+            message: \"elembic: types.declare: cast 'with' can only be omitted for 'from: dictionary'. It must receive the default constructor and return a function 'casted value => your type'.\"
+          )
+        }
+
+        if type(with) != function {
+          assert(
+            false,
+            message: \"elembic: types.declare: cast 'with' must receive the default constructor and return a function 'casted value => your type'. Received \" + base.typename(with)
+          )
+        }
+
+        let from-cast = from.cast
+
+        types.wrap(
+          from,
+          check: from-check => if from-check == none {
+            if cast-check == none {
+              none
+            } else if from.cast == none {
+              cast-check
+            } else {
+              value => cast-check(from-cast(value))
+            }
+          } else if cast-check == none {
+            from-check
+          } else if from.cast == none {
+            value => from-check(value) and cast-check(value)
+          } else {
+            value => from-check(value) and cast-check(from-cast(value))
+          },
+
+          output: (typeid,),
+
+          cast: from-cast => if from-cast == none {
+            with
+          } else {
+";
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.contains(&"from-check".to_string()) && !out.contains(&"from-cast".to_string()),
+            "elembic 真实形态:内联闭包参数不应被收集: {out:?}"
+        );
+    }
+
+    #[test]
+    fn elembic_declare_slice() {
+        let src = include_str!("../../tests/fixtures/elembic-declare.txt");
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.contains(&"from-check".to_string()),
+            "declare 切片:from-check 不应被收集: {out:?}"
+        );
+    }
 
     #[test]
     fn math_field_names_not_collected() {

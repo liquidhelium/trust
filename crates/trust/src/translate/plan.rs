@@ -32,6 +32,9 @@ pub(super) struct ImportEdge {
 pub(super) enum ImportItems {
     Bare,
     Rename(String),
+    /// 模块改名 + 成员列表(`import x as m: a, b`,elembic 驱动):
+    /// 绑定 m = 模块本身,以及各成员。
+    RenameList(String, Vec<(String, Option<String>)>),
     /// (名字, rename)。
     List(Vec<(String, Option<String>)>),
     Wildcard,
@@ -157,6 +160,24 @@ pub(super) fn build_export_table(
                         );
                         exports.entry(bound).or_insert(slot);
                     }
+                    ImportItems::RenameList(mname, list) => {
+                        exports.entry(mname.clone()).or_insert_with(|| {
+                            format!(
+                                "IMPORT_{}_{}",
+                                sanitize_key(&plan.mod_name),
+                                sanitize_key(mname)
+                            )
+                        });
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize_key(&plan.mod_name),
+                                sanitize_key(&as_name)
+                            );
+                            exports.entry(as_name).or_insert(slot);
+                        }
+                    }
                     ImportItems::List(list) => {
                         for (item, rename) in list {
                             let as_name =
@@ -206,6 +227,23 @@ pub(super) fn build_export_table(
                 continue;
             }
             match &edge.items {
+                ImportItems::RenameList(mname, list) => {
+                    let slot = format!(
+                        "IMPORT_{}_{}",
+                        sanitize_key(&plan.mod_name),
+                        sanitize_key(mname)
+                    );
+                    exports.entry(mname.clone()).or_insert(slot);
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(&as_name)
+                        );
+                        exports.entry(as_name).or_insert(slot);
+                    }
+                }
                 ImportItems::Bare | ImportItems::Rename(_) => {
                     let bound = match &edge.items {
                         ImportItems::Rename(name) => name.clone(),

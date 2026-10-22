@@ -28,9 +28,10 @@ pub(super) struct Ctx {
     /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
     /// 仅在该上下文合法——外层 Rust 函数返回类型不同)。
     pub(super) in_fn: usize,
-    /// 错误站点 span 表:AST span 的原始 u64 → 站点索引(生成物以
-    /// `s(idx)` 引用,常数表运行时一次构建)。
-    pub(super) span_table: Vec<u64>,
+    /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
+    /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
+    /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
+    pub(super) span_table: Vec<(String, u64)>,
     span_index: std::collections::HashMap<u64, usize>,
 }
 
@@ -77,16 +78,21 @@ impl Ctx {
         id
     }
 
-    /// 登记一个源 span,返回生成物里的常量名 `S{idx}`(错误站点用,
-    /// 对照原版:错误的定位指向源表达式;生成物里是编译期常量)。
+    /// 登记一个源 span,返回生成物里的引用 `*S{idx}`(错误站点用,
+    /// 对照原版:错误的定位指向源表达式;生成物里是首次使用时按
+    /// 当前进程 FileId 物化的 LazyLock——见 `rt::source_span`)。
     pub(super) fn span_of(&mut self, span: typst_syntax::Span) -> String {
         let raw = span.into_raw().get();
         let next = self.span_table.len();
         let idx = *self.span_index.entry(raw).or_insert(next);
         if idx == next {
-            self.span_table.push(raw);
+            let path = span
+                .id()
+                .map(|id| id.vpath().get_with_slash().trim_start_matches('/').to_string())
+                .unwrap_or_default();
+            self.span_table.push((path, raw));
         }
-        format!("S{idx}")
+        format!("*S{idx}")
     }
 
     /// 登记源 span 并以其常量名填充格式串中的 `{at}` 占位。
@@ -95,17 +101,16 @@ impl Ctx {
         fmt.replace("{at}", &at)
     }
 
-    /// 生成错误站点 span 常量块(源定位,编译期构造;无站点则空)。
+    /// 生成错误站点 span 块(首次使用时以当前进程 FileId 物化——
+    /// 自包含,无宿主预 intern 约定;无站点则空)。
     pub(super) fn span_consts(&self) -> String {
         if self.span_table.is_empty() {
             return String::new();
         }
-        let mut out = String::from(
-            "\nconst fn nz(n: u64) -> std::num::NonZeroU64 {\n    match std::num::NonZeroU64::new(n) {\n        Some(v) => v,\n        None => panic!(\"span 常量非法:0\"),\n    }\n}\n",
-        );
-        for (idx, raw) in self.span_table.iter().enumerate() {
+        let mut out = String::new();
+        for (idx, (path, raw)) in self.span_table.iter().enumerate() {
             out.push_str(&format!(
-                "const S{idx}: Span = Span::from_raw(nz({raw}));\n"
+                "static S{idx}: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span({path:?}, {raw}));\n"
             ));
         }
         out

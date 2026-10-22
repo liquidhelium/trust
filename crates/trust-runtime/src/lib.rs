@@ -18,6 +18,42 @@ use typst::syntax::{Span, Spanned, SyntaxKind};
 use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::diag::{Hint, SourceDiagnostic, Trace};
 
+/// 生成物 span 的**自包含物化**:以运行进程自己的 FileId 编号替换
+/// 翻译进程的编号,文件内位置号(低 48 位,对同一文本确定性)原样
+/// 保留。
+///
+/// 背景:产物里的 `S{n}` 常量原本直接烤翻译进程 interner 的绝对序号
+/// ——span 的高 16 位是 FileId 编号、低 48 位是位置号(FileId/位置
+/// 划分是 `Span` 的公开文档约定),FileId 编号只在产生它的进程里有
+/// 意义。此函数在**首次使用**时把路径在当前进程 intern(`intern`
+/// 对同路径幂等),换上当前进程的编号;宿主不再需要"预 intern 同
+/// 序重放"约定(KNOWN-ISSUES #29 由此消解)。以 `id()` 相等性自检
+/// 布局漂移。
+pub fn source_span(path: &str, orig_raw: u64) -> Span {
+    /// 低 48 位掩码(位置号);文件号在高位(公开文档约定:
+    /// | 16 bits file id | 48 bits number |)。
+    const NUMBER_MASK: u64 = (1 << 48) - 1;
+    if path.is_empty() {
+        return Span::detached();
+    }
+    let id = typst::syntax::RootedPath::new(
+        typst::syntax::VirtualRoot::Project,
+        typst::syntax::VirtualPath::new(path).unwrap_or_else(|_| panic!("invalid path {path}")),
+    )
+    .intern();
+    let file_num = id.into_raw().get() as u64;
+    let number = orig_raw & NUMBER_MASK;
+    let raw = std::num::NonZeroU64::new((file_num << 48) | number)
+        .expect("file id 与位置号组合非零");
+    let span = Span::from_raw(raw);
+    assert_eq!(
+        span.id(),
+        Some(id),
+        "span 布局与 typst 公开文档不符(版本漂移?),拒绝静默错位"
+    );
+    span
+}
+
 /// 每构建状态(per-build 槽板)的存储与槽原语。
 ///
 /// 见 `_things/DESIGN-per-build.md`:typst 运行时 = 有限命名槽 + 每次

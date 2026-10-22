@@ -15,21 +15,14 @@ use trust_runtime as rt;
 
 /// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
-
-const fn nz(n: u64) -> std::num::NonZeroU64 {
-    match std::num::NonZeroU64::new(n) {
-        Some(v) => v,
-        None => panic!("span 常量非法:0"),
-    }
-}
-const S0: Span = Span::from_raw(nz(288344138459499));
-const S1: Span = Span::from_raw(nz(288375944433528));
-const S2: Span = Span::from_raw(nz(288378614278059));
-const S3: Span = Span::from_raw(nz(288333923402147));
-const S4: Span = Span::from_raw(nz(288235487394932));
-const S5: Span = Span::from_raw(nz(288287491323272));
-const S6: Span = Span::from_raw(nz(288027471681572));
-const S7: Span = Span::from_raw(nz(290479085446172));
+static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288344138459499));
+static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288375944433528));
+static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288378614278059));
+static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288333923402147));
+static S4: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288235487394932));
+static S5: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288287491323272));
+static S6: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288027471681572));
+static S7: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 290479085446172));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -69,22 +62,22 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(&(items.clone()), S4)? {
+  for __it1 in rt::iter_values(&(items.clone()), *S4)? {
       let mut x = __it1;
 
       let __v = { let mut __out = Value::None;
-    __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(S0)?, std::cmp::Ordering::Greater)), S3)? { { let mut __out = Value::None;
-    __out = rt::join(__out, { rt::check_call_depth(engine, S1)?; let __mut_args = { let mut __call_args_v = Args::new(S1, std::iter::empty::<Value>()); __call_args_v.push(S2, x.clone()); __call_args_v }; rt::method_mut(engine, rt::place_mut(&mut out, &[], S1)?, "push", __mut_args, S1)? }, S1)?;
+    __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(*S0)?, std::cmp::Ordering::Greater)), *S3)? { { let mut __out = Value::None;
+    __out = rt::join(__out, { rt::check_call_depth(engine, *S1)?; let __mut_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); __call_args_v.push(*S2, x.clone()); __call_args_v }; rt::method_mut(engine, rt::place_mut(&mut out, &[], *S1)?, "push", __mut_args, *S1)? }, *S1)?;
     let _ = &__out;
     __out
-} } else { Value::None }, S3)?;
+} } else { Value::None }, *S3)?;
     let _ = &__out;
     __out
 };
-      __out = rt::join(__out, __v, S5)?;
+      __out = rt::join(__out, __v, *S5)?;
   }
-  __out }, S6)?;
-    __out = rt::join(__out, out.clone(), S7)?;
+  __out }, *S6)?;
+    __out = rt::join(__out, out.clone(), *S7)?;
     let _ = &__out;
     __out
 })

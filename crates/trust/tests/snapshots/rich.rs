@@ -15,17 +15,10 @@ use trust_runtime as rt;
 
 /// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
-
-const fn nz(n: u64) -> std::num::NonZeroU64 {
-    match std::num::NonZeroU64::new(n) {
-        Some(v) => v,
-        None => panic!("span 常量非法:0"),
-    }
-}
-const S0: Span = Span::from_raw(nz(289662109446693));
-const S1: Span = Span::from_raw(nz(329176865792586));
-const S2: Span = Span::from_raw(nz(329312190300619));
-const S3: Span = Span::from_raw(nz(329532092626172));
+static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 289662109446693));
+static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329176865792586));
+static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329312190300619));
+static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329532092626172));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 fn file_span() -> Span {
@@ -82,7 +75,7 @@ fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args)
         None => rt::read(&__st.DEF_V0_scale_k)?,
     };
     rt::finish(__args, span)?;
-    Ok(ops::mul(x.clone(), k.clone()).at(S0)?)
+    Ok(ops::mul(x.clone(), k.clone()).at(*S0)?)
 }
 
 #[allow(non_snake_case, dead_code)]
@@ -112,7 +105,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut f = rt::param_pos(__args, "f", span)?;
     let mut rest = Value::Args(__args.take());
     rt::finish(__args, span)?;
-    Ok({ rt::check_call_depth(engine, S1)?; let __callee = rt::callee(f.clone(), S2)?; let __call_args = { let mut __call_args_v = Args::new(S1, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, S3, rest.clone())?; __call_args_v }; rt::call_with(__callee, None, S1, __call_args, engine, context)? })
+    Ok({ rt::check_call_depth(engine, *S1)?; let __callee = rt::callee(f.clone(), *S2)?; let __call_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, *S3, rest.clone())?; __call_args_v }; rt::call_with(__callee, None, *S1, __call_args, engine, context)? })
 }
 
 #[allow(non_snake_case, dead_code)]

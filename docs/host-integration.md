@@ -24,21 +24,17 @@
   持有 global 的另一 Arc 副本,scope 写时复制会让两者分叉),最后
   重包 `LazyHash<Library>`(否则 comemo 缓存哈希不感知注入)。
 
-### 3. FileId 预 intern 顺序约定(唯一"静默错"项)
+### 3. ~~FileId 预 intern 顺序约定~~ **已消除**(2026-10-22,span 自包含)
 
-生成物里 `S{n}` span 常量是**翻译进程** FileId interner 的**绝对
-序号**(span 原始 u64 直接 `Span::from_raw` 进产物)。宿主进程必须
-在**创建任何 World / intern 任何 FileId 之前**,按翻译期同序
-(entry 所在源树、路径字典序)预 intern:
-
-```rust
-InjectWorld::preintern_package_files(&pkg_root.join("src"));
-```
-
-错了**不报错**:span 静默解码到错误文件——plugin 的相对路径解析
-(按实参值 span 的 FileId 定位)、错误诊断定位全部指错地方
-(KNOWN-ISSUES #29,render-diff 曾因缺它报 "would escape the
-project root")。
+生成物里 `S{n}` 原先是翻译进程 interner 的绝对序号(span 高 16 位
+= FileId 编号,只在产生它的进程里有意义),要求宿主在创建任何
+World 之前按同序预 intern,错了还**静默**。现在 `S{n}` 是
+`LazyLock<Span>`,首次使用经 `rt::source_span(路径, 原始位置号)`
+在**当前进程** intern 路径并换上当前编号(低 48 位位置号对同一
+文本确定性,原样保留;以 `id()` 相等性自检布局漂移)。宿主无任何
+interner 义务。验证:cetz/fletcher 全部宿主在**零预 intern**下
+26/26 值对拍、18/25 渲染逐字节一致(plugin 路径解析依赖 span 的
+FileId,此前缺预 intern 会直接失败)。
 
 ### 4. 文件服务(InjectWorld 三条回退)
 
@@ -73,13 +69,8 @@ project root")。
 
 ## 三、演进路线(按性价比排序)
 
-1. **span 自包含,删除预 intern 约定**(优先级最高,唯一静默错项)。
-   方案:生成物内嵌 `(路径, 原文)` 与 `(file 序号, byte range)`
-   表;首次使用时自 intern + `Source::new(path, text)` 重解析物化
-   span(同文本解析确定性地产出同 range 的 span)。降级选项:span
-   常数改为**文件级锚 span**(保文件身份、丢行级精度,KNOWN #4
-   部分回退)——plugin/路径类用途只需要文件身份。完成即可把 §3
-   从契约里删掉。
+1. ~~**span 自包含,删除预 intern 约定**~~ **已完成**(见 §3):
+   `rt::source_span` 首次使用自 intern,位置号照抄,产物自包含。
 2. **注入协议泛化**:把"驱动 + 绑定 + std 重建 + LazyHash 重包"
    提成对任意 `&mut Library`(或宿主 World)的函数
    `install(library)`;Engine 构造参数化(introspector/sink/route

@@ -170,8 +170,10 @@ pub fn trust_eval_closure(
 }
 
 /// 取 stub 捕获作用域里的直调例程(命中判定;非 stub 闭包只花一次
-/// 作用域查找)。
-fn stub_routine(closure: &LazyHash<Closure>) -> Option<(TrustRoutine, StateSlot)> {
+/// 作用域查找)。**全程借用**——克隆 TrustRoutine(含缺省值 Vec)
+/// 是热路径纯税:判定只需引用,直调体内也只需引用(状态句柄仅在
+/// 插入实参时克隆一次 Arc,协议要求)。
+fn stub_routine(closure: &LazyHash<Closure>) -> Option<(&TrustRoutine, &StateSlot)> {
     let (routine, state) = (
         closure.captured.get("__trust_routine")?,
         closure.captured.get("__trust_state")?,
@@ -179,7 +181,7 @@ fn stub_routine(closure: &LazyHash<Closure>) -> Option<(TrustRoutine, StateSlot)
     match (routine.read(), state.read()) {
         (Value::Dyn(routine), Value::Dyn(state)) => {
             match (routine.downcast::<TrustRoutine>(), state.downcast::<StateSlot>()) {
-                (Some(cell), Some(slot)) => Some((cell.clone(), slot.clone())),
+                (Some(cell), Some(slot)) => Some((cell, slot)),
                 _ => None,
             }
         }
@@ -238,7 +240,7 @@ fn eval_stub_native(
             );
         }
     }
-    args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot)));
+    args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot.clone())));
     (cell.f)(&mut engine, context, &mut args)
 }
 /// 把 `Library.routines.eval_closure` 换成 [`trust_eval_closure`]。

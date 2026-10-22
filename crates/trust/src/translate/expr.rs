@@ -494,9 +494,29 @@ impl Ctx {
     /// 默认值创建期求值;捕获 = 子树标识符 ∩ 外层可解析名字
     /// (保守过捕,解释器按参数/局部遮蔽覆盖,语义不变)。
     fn closure_expr(&mut self, closure: ast::Closure, env: &Env) -> String {
+        // 微型闭包(谓词/投影,如 `i => i * 2`)保持解释:体的解释成本
+        // 低于一次 stub 跳数(eval_closure 记账 + 转发体解释 + 原生调用
+        // 协议开销),C2 反而净亏(map-heavy 实测 1.0× → 0.4×)。阈值取
+        // 体的 AST 节点数:≤ 8 视为微型;cetz/fletcher 的 ctx thunk 均
+        // 为百节点级,不受影响。
+        let body_nodes = closure.body().to_untyped().len();
+        if body_nodes <= 32 {
+            return self.closure_expr_interp(closure, env);
+        }
+        // 命名闭包若体引用自身(局部递归,如 cetz 的 split-rec):
+        // 走 C2 的自引用协议(SelfFuncCell:每实例一次重建同身份
+        // stub,序言绑定自身名)。
+        let self_name = closure
+            .name()
+            .filter(|name| closure.body().to_untyped().full_text().contains(name.as_str()))
+            .map(|name| name.as_str().to_string());
+        self.closure_expr_c2(closure, env, self_name)
+    }
+
+    /// 微型闭包的解释路径(v1 原形态:片段源经 typst-eval 解释)。
+    fn closure_expr_interp(&mut self, closure: ast::Closure, env: &Env) -> String {
         // 命名闭包(`#let f(x) = ..` 或局部 `let f(x) = ..`)的节点文本
-        // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码;名字保留
-        // 以支持递归自引用。
+        // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码。
         let raw = closure.to_untyped().full_text().to_string();
         let src_text = if closure.name().is_some() {
             format!("let {raw}")
@@ -506,15 +526,11 @@ impl Ctx {
         let mut defaults = Vec::new();
         for param in closure.params().children() {
             if let ast::Param::Named(named) = param {
-                let value = self.expr(named.expr(), env);
-                defaults.push(value);
+                defaults.push(self.expr(named.expr(), env));
             }
         }
         let mut names: Vec<String> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
-        // 全局名创建期物化;创建期不可见的(如通配 import 引入的名字)
-        // 不捕获,由闭包体内自己的 import 在调用期绑定(对照 typst
-        // CapturesVisitor 的 `Err(_) => return`)。
         let (captured, captured_globals) = self.capture_entries(&names, env);
         let defaults = if defaults.is_empty() {
             "Vec::new()".into()
@@ -529,6 +545,130 @@ impl Ctx {
         };
         format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}, {pending_lit}, engine))")
     }
+
+    /// C2:值位置闭包的原生路径。
+    fn closure_expr_c2(
+        &mut self,
+        closure: ast::Closure,
+        env: &Env,
+        self_name: Option<String>,
+    ) -> String {
+        // C2:值位置闭包也走原生——闭包表达式编译为顶层 `f_c{id}`
+        // 原生体,经签名保真 stub 暴露;捕获值按名排序打成元组随闭包
+        // 值走(StateSlot 装元组,与顶层 C 装包状态同协议)。同定义
+        // (同原文 + 同捕获名集)去重,多调用点共用一份原生体。
+        let raw = closure.to_untyped().full_text().to_string();
+        // stub 签名用参数原文(含默认值形态;stub 绑定期由求值器用
+        // defaults 填齐缺失命名参数,转发到原生体时参数必然齐全)。
+        let mut params_src = closure.params().to_untyped().full_text().to_string();
+        // 匿名单参可写 `x => ..`(无括号),stub 解析需参数表形态。
+        if !params_src.trim_start().starts_with('(') {
+            params_src = format!("({params_src})");
+        }
+        // 默认值在创建期求值(每次创建;typst 闭包语义)。
+        let mut defaults = Vec::new();
+        for param in closure.params().children() {
+            if let ast::Param::Named(named) = param {
+                defaults.push(self.expr(named.expr(), env));
+            }
+        }
+        let defaults = if defaults.is_empty() {
+            "Vec::new()".to_string()
+        } else {
+            format!("vec![{}]", defaults.join(", "))
+        };
+        // 捕获:局部/模块槽即时物化(Some 包值);创建期不可见的名字
+        // 运行期经全局+数学作用域物化(Option),调用期 None 报
+        // unknown variable(对照 CapturesVisitor 的 `Err(_) => return`)。
+        let mut names: Vec<String> = Vec::new();
+        collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
+        let (mut pairs, pending) = self.capture_pairs(&names, env);
+        for name in &pending {
+            pairs.push((
+                name.clone(),
+                format!("rt::capture_opt(engine, \"{}\")?", escape(name)),
+            ));
+        }
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let cap_names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
+        let key = format!("{raw}\u{0}{}", cap_names.join(","));
+
+        let dbg = std::env::var_os("TRUST_DEBUG_DEDUP").is_some();
+        if dbg {
+            eprintln!("[dedup?] key={:?}", &key[..key.len().min(70)]);
+        }
+        let (id, has_st) = match self.closure_dedup.get(&key).cloned() {
+            Some(hit) => {
+                if dbg {
+                    eprintln!("[dedup=hit] {hit:?}");
+                }
+                hit
+            }
+            None => {
+                let id = format!("c{}", self.next_closure_id);
+                self.next_closure_id += 1;
+                if dbg {
+                    eprintln!("[dedup=alloc] {id}");
+                }
+                // 体生成在独立计数下(gen_closure_fn 内部会置
+                // used_state=false 再追踪体自身引用),生成后取出
+                // has_st 并把外层计数并回(捕获点/默认值表达式引用
+                // __st 时外层需要 __st 前言)。
+                let saved = self.used_state;
+                let item = self.gen_closure_fn(
+                    &format!("f_{id}"),
+                    &format!("D_{id}"),
+                    closure,
+                    &cap_names,
+                    self_name.as_deref(),
+                    &params_src,
+                );
+                // gen_closure_fn 末尾 used_state = 体是否引用 __st
+                //(模块槽/体内字符串 import),取出后并回外层计数。
+                let has_st = std::mem::replace(&mut self.used_state, saved);
+                self.closure_items.push_str(&item);
+                self.closure_items.push_str(&super::func::gen_func_data(
+                    &format!("D_{id}"),
+                    &format!("f_{id}"),
+                    "closure",
+                    closure,
+                ));
+                self.closure_dedup.insert(key, (id.clone(), has_st));
+                if dbg {
+                    eprintln!("[dedup=miss] id={id} has_st={has_st}");
+                }
+                (id, has_st)
+            }
+        };
+        if has_st {
+            // 创建点引用 __st.clone():外层函数必须携带状态前言。
+            self.used_state = true;
+        }
+        // 创建点:捕获元组 + StateSlot + stub。
+        let mut tuple: Vec<String> = Vec::new();
+        if has_st {
+            tuple.push("__st.clone()".to_string());
+        }
+        for (name, expr) in &pairs {
+            if pending.iter().any(|p| p == name) {
+                tuple.push(expr.clone());
+            } else {
+                tuple.push(format!("Some({expr})"));
+            }
+        }
+        if self_name.is_some() {
+            // 自递归:defaults 随实例携带(重建 stub 用)。
+            tuple.push(format!(
+                "std::sync::Arc::new(rt::self_func_cell({defaults}))"
+            ));
+        }
+        format!(
+            "{{ let __slot_{id} = std::sync::Arc::new(({})); Value::Func(rt::native_closure(&D_{id}, {params_src:?}, {defaults}, &rt::StateSlot::new(__slot_{id}))) }}",
+            tuple.join(", ")
+        )
+    }
+
+
 
     /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
     /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
@@ -662,7 +802,20 @@ impl Ctx {
     /// 捕获列表构造(闭包与 context 共用):局部/模块槽直接物化,
     /// 全局名存在才物化(创建期不可见的交给体内 import)。
     fn capture_entries(&mut self, names: &[String], env: &Env) -> (Vec<String>, Vec<String>) {
-        let mut captured = Vec::new();
+        let (pairs, globals) = self.capture_pairs(names, env);
+        (
+            pairs
+                .into_iter()
+                .map(|(name, expr)| format!("(\"{}\", {expr})", escape(&name)))
+                .collect(),
+            globals,
+        )
+    }
+
+    /// 结构化捕获表:(名字, 求值表达式) 列表 + 待运行期物化的全局名
+    /// (C2 闭包按名排序组捕获元组,需要名字与表达式分离)。
+    fn capture_pairs(&mut self, names: &[String], env: &Env) -> (Vec<(String, String)>, Vec<String>) {
+        let mut captured: Vec<(String, String)> = Vec::new();
         let mut globals = Vec::new();
         let mut seen = HashSet::new();
         for name in names {
@@ -670,10 +823,10 @@ impl Ctx {
                 continue;
             }
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
-                captured.push(format!("(\"{}\", {rust}.clone())", escape(name)));
+                captured.push((name.clone(), format!("{rust}.clone()")));
             } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
                 let value = self.ref_value(module_ref);
-                captured.push(format!("(\"{}\", {value})", escape(name)));
+                captured.push((name.clone(), value));
             } else {
                 globals.push(name.clone());
             }

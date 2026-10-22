@@ -326,6 +326,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
 
     // 模块 body:顶层内容按源序折叠(规则包装后续内容,逐项可见性)。
     let body = cx.content_seq_top(&content_items);
+    // C2 值位置闭包的原生体(根级发射)。
+    let closure_items = std::mem::take(&mut cx.closure_items);
 
     if !cx.diags.is_empty() {
         return Err(cx.diags);
@@ -356,6 +358,6 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = std::sync::Arc::new(__State::default());\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}).with_file_id(file_span().id().expect(\"file span id\")))\n}}\n\n\
          /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
          /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
-         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{items}"
+         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{closure_items}{items}"
     ))
 }

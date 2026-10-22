@@ -100,6 +100,160 @@ impl Ctx {
             "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{body}}}\n"
         )
     }
+pub(super) fn gen_closure_fn(
+    &mut self,
+    fun: &str,
+    data: &str,
+    closure: ast::Closure,
+    capture_names: &[String],
+    self_name: Option<&str>,
+    params_src: &str,
+) -> String {
+    // 闭包体的求值环境 = 自身参数 + 捕获(全部自由名都已入捕获元组,
+    // 不继承外层 env)。has_st(体引用 __st:模块槽读取或体内字符串
+    // import)在体生成后判定——序言与元组类型随后组。
+    let mut fn_env = super::ctx::Env {
+        locals: Vec::new(),
+        module: Vec::new(),
+    };
+    let saved = self.used_state;
+    self.used_state = false;
+    self.in_fn += 1;
+
+    // 先绑定捕获名(体的自由名解析到这些局部)。
+    for name in capture_names {
+        bind_local(&mut fn_env, name);
+    }
+    // 自引用名在体生成**前**注入 env(此前在序言构造段才绑定,
+    // 体生成时名字不可见,递归点落到 global 回退——unknown variable)。
+    let mut self_binding: Option<(String, String)> = None;
+    if let Some(name) = self_name {
+        let rust = bind_local(&mut fn_env, name);
+        self_binding = Some((name.to_string(), rust));
+    }
+    // 参数绑定:位置/解构/sink 与顶层同款;命名参数 stub 已填齐,
+    // 直接必取。
+    let mut params_code = String::new();
+    let mut sinks: Vec<Option<String>> = Vec::new();
+    for param in closure.params().children() {
+        match param {
+            ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
+                let name = ident.as_str().to_string();
+                let rust = bind_local(&mut fn_env, &name);
+                let _ = writeln!(
+                    params_code,
+                    "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;",
+                    escape(&name)
+                );
+            }
+            ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
+            ast::Param::Pos(pattern) => {
+                let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
+                params_code.push_str(&self.destructure(pattern, value, &mut fn_env, false));
+            }
+            ast::Param::Named(named) => {
+                let name = named.name().as_str().to_string();
+                let rust = bind_local(&mut fn_env, &name);
+                let _ = writeln!(
+                    params_code,
+                    "    let mut {rust} = rt::param_named(__args, \"{}\", span)?;",
+                    escape(&name)
+                );
+            }
+            ast::Param::Spread(spread) => {
+                let sink = match spread.sink_ident() {
+                    Some(ident) => {
+                        let name = ident.as_str().to_string();
+                        let rust = bind_local(&mut fn_env, &name);
+                        Some(rust)
+                    }
+                    None => None,
+                };
+                sinks.push(sink);
+            }
+        }
+    }
+    for sink in sinks {
+        let target = sink.as_deref().unwrap_or("_sink");
+        let _ = writeln!(params_code, "    let mut {target} = Value::Args(__args.take());");
+    }
+    let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
+
+    let value = self.expr(closure.body(), &fn_env);
+    let body_code = format!("    Ok({value})\n");
+
+    // has_st 判定(体/参数代码生成期间的标记),恢复外层计数并留下
+    // 本闭包的判定给调用方读取。
+    // has_st = 体自身判定;used_state 留给调用方读取后恢复外层计数
+    //(勿在此恢复——外层再读会被污染,创建元组与序言形态不一致)。
+    let has_st = self.used_state;
+    self.in_fn -= 1;
+
+    // 状态元组与解包序言(has_st 后置判定)。自递归闭包:���部追加
+    // SelfFuncCell(自身 stub 的每实例一次重建缓存),序言保留槽。
+    let mut tuple_t: Vec<&str> = Vec::new();
+    let mut destruct: Vec<String> = Vec::new();
+    if has_st {
+        tuple_t.push("std::sync::Arc<__State>");
+        destruct.push("__st".to_string());
+    }
+    for i in 0..capture_names.len() {
+        tuple_t.push("Option<Value>");
+        destruct.push(format!("__c{i}"));
+    }
+    let self_destruct;
+    if self_name.is_some() {
+        tuple_t.push("std::sync::Arc<rt::SelfFuncCell>");
+        self_destruct = "__selfcell".to_string();
+        destruct.push(self_destruct.clone());
+    }
+    let tuple_t = if tuple_t.is_empty() {
+        "()".to_string()
+    } else {
+        tuple_t.join(", ")
+    };
+    let mut prologue = if self_name.is_some() {
+        format!(
+            "    let (({}), __slot) = rt::take_caps_self::<({tuple_t})>(__args)?;\n",
+            destruct.join(", ")
+        )
+    } else if destruct.is_empty() {
+        "    rt::take_caps::<()>(__args)?;\n".to_string()
+    } else {
+        format!(
+            "    let ({}) = rt::take_caps::<({tuple_t})>(__args)?;\n",
+            destruct.join(", ")
+        )
+    };
+    // 捕获按名解包(None 即创建期不可见名字,调用期报 unknown
+    // variable,与原生捕获语义一致)。按 env 绑定序取局部名。
+    for (i, name) in capture_names.iter().enumerate() {
+        let rust = fn_env
+            .locals
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| format!("__cap_{i}"));
+        let _ = writeln!(
+            prologue,
+            "    let mut {rust} = rt::cap(__c{i}, \"{}\", span)?;",
+            escape(name)
+        );
+    }
+    if let Some((name, rust)) = &self_binding {
+        // 自引用绑定发射(绑定时机见上方 env 注入;序言在此)。
+        let _ = writeln!(
+            prologue,
+            "    let mut {rust} = Value::Func(rt::self_func(&__selfcell, &{data}, {params_src:?}, &__slot));"
+        );
+        let _ = name;
+    }
+
+    format!(
+        "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{params_code}{body_code}}}\n"
+    )
+}
 }
 
 /// `NativeParamInfo` 字面量(元数据按闭包参数形态推导)。
@@ -111,7 +265,6 @@ fn format_param(name: &str, named: bool, positional: bool, variadic: bool) -> St
     )
 }
 
-/// 生成函数的 `NativeFuncData` 静态(手写字段,不经宏)。
 pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Closure) -> String {
     let mut params = Vec::new();
     for param in closure.params().children() {

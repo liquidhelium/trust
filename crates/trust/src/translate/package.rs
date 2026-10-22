@@ -66,6 +66,8 @@ struct PackageParts {
     eval_flat: String,
     eval_tree: String,
     files: Vec<FileOut>,
+    /// C2 值位置闭包的原生体汇集(去重后跨文件共用,发射到产物根部)。
+    closure_items: String,
 }
 
 /// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
@@ -713,6 +715,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         eval_flat,
         eval_tree,
         files,
+        closure_items: std::mem::take(&mut cx.closure_items),
     }
 }
 
@@ -728,6 +731,8 @@ fn render_single(parts: &PackageParts) -> String {
         items.push_str(&f.body);
         items.push_str("}\n");
     }
+    // C2 闭包原生体(根级,可见 __State 与导入)。
+    items.push_str(&parts.closure_items);
     parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_flat)
@@ -782,10 +787,20 @@ fn tree_impl(
     for seg in &root_segs {
         let _ = writeln!(root_decls, "mod {seg};");
     }
-    let root = parts
+    let mut root = parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_tree)
         .replace("{ITEMS}", &root_decls);
+    // C2 闭包段与文件体同款:体内对其他文件的扁平模块引用
+    // (`{flat}::module(`)换为树路径。
+    let mut closure_items = parts.closure_items.clone();
+    for g in &parts.files {
+        closure_items = closure_items.replace(
+            &format!("{}::module(", g.flat_name),
+            &format!("{}::module(", g.tree_full.join("::")),
+        );
+    }
+    root.push_str(&closure_items);
     tree.insert("mod.rs".to_string(), root);
 
     // 目录 → 直接子段(有序去重);根为空段,深度 = 段下标。

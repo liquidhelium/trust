@@ -544,6 +544,86 @@ pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value
     args.expect::<Value>(name)
 }
 
+/// 自递归闭包的自身函数缓存(每**实例**重建一次 stub):创建期携带
+/// defaults,首次自引用时用同一 StateSlot 重建签名保真 stub 并缓存
+/// ——递归深度 N 次调用只重建一次,且身份(槽 id)与原实例一致。
+pub struct SelfFuncCell {
+    defaults: Vec<Value>,
+    func: std::sync::OnceLock<Func>,
+}
+
+pub fn self_func_cell(defaults: Vec<Value>) -> SelfFuncCell {
+    SelfFuncCell {
+        defaults,
+        func: std::sync::OnceLock::new(),
+    }
+}
+
+pub fn self_func(
+    cell: &SelfFuncCell,
+    data: &'static typst::foundations::NativeFuncData,
+    params_src: &str,
+    slot: &StateSlot,
+) -> Func {
+    cell.func
+        .get_or_init(|| native_closure(data, params_src, cell.defaults.clone(), slot))
+        .clone()
+}
+
+/// 带槽解包(自递归闭包序言用):返回(捕获元组, 槽克隆)。
+pub fn take_caps_self<T: std::any::Any + Send + Sync + Clone>(
+    args: &mut Args,
+) -> SourceResult<(T, StateSlot)> {
+    let value: Value = args.expect("__trust_state")?;
+    match value {
+        Value::Dyn(dynamic) => match dynamic.downcast::<StateSlot>() {
+            Some(slot) => {
+                let caps = slot
+                    .inner
+                    .clone()
+                    .downcast::<T>()
+                    .map(|arc| (*arc).clone())
+                    .map_err(|_| {
+                        state_error(&format!(
+                            "状态句柄类型不符(生成器 bug):期望 {}",
+                            std::any::type_name::<T>()
+                        ))
+                    })?;
+                Ok((caps, slot.clone()))
+            }
+            None => Err(state_error("首个位置参数不是状态句柄(生成器 bug)")),
+        },
+        _ => Err(state_error("首个位置参数不是状态句柄(生成器 bug)")),
+    }
+}
+
+/// C2 闭包的捕获元组解包(StateSlot 装的是捕获元组而非包状态;
+/// take_state 返回 Arc,元组按值解构需一次克隆——元组小,代价可忽略)。
+pub fn take_caps<T: std::any::Any + Send + Sync + Clone>(
+    args: &mut Args,
+) -> SourceResult<T> {
+    let arc: std::sync::Arc<T> = take_state(args)?;
+    Ok((*arc).clone())
+}
+
+/// C2 闭包捕获解包:创建期不可见的名字(Option 为 None)在调用期
+/// 报 unknown variable(与原生捕获语义一致)。
+pub fn cap(value: Option<Value>, name: &str, span: Span) -> SourceResult<Value> {
+    match value {
+        Some(value) => Ok(value),
+        None => bail!(span, "unknown variable: {name}"),
+    }
+}
+
+/// C2 闭包命名参数绑定:stub 绑定期已用 defaults 填齐,此处必取
+/// (对照 `args.named`,缺失报 missing argument——仅裸调用才会触发)。
+pub fn param_named(args: &mut Args, name: &str, span: Span) -> SourceResult<Value> {
+    match args.named::<Value>(name)? {
+        Some(value) => Ok(value),
+        None => bail!(span, "missing argument: {name}"),
+    }
+}
+
 /// 参数绑定完成后检查剩余参数(对照 `Args::finish`)。
 pub fn finish(args: &mut Args, _span: Span) -> SourceResult<()> {
     if let Some(arg) = args.items.first() {
@@ -1048,12 +1128,23 @@ fn access_dict_error(value: &mut Value, span: Span) -> SourceResult<&mut Value> 
 /// typst 值世界(`Value::Dyn`),随函数值传递(对照 typst 闭包的
 /// captured 数据布局);native 体经 [`take_state`] 从首个位置参数解包。
 #[derive(Clone)]
-pub struct StateSlot(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+pub struct StateSlot {
+    /// 单调实例 id(全局计数器):身份语义。**不可用指针哈希**——槽
+    /// 释放后分配器复用同地址(ABA),两个不同实例会被判等,comemo
+    /// 的 memo 键随之相撞,跨实例串答案(差分实测:后一调用的闭包
+    /// 返回前一实例的缓存结果)。
+    id: u64,
+    inner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
 
 impl StateSlot {
-    /// 包装一份 per-build 状态(`Arc<__State>` 自动协变为 `Arc<dyn Any>`)。
-    pub fn new(state: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {
-        Self(state)
+    /// 包装一份状态/捕获元组。
+    pub fn new<T: std::any::Any + Send + Sync>(state: std::sync::Arc<T>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            inner: state,
+        }
     }
 }
 
@@ -1092,13 +1183,13 @@ impl typst::foundations::NativeType for StateSlot {
 
 impl PartialEq for StateSlot {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
+        self.id == other.id
     }
 }
 
 impl std::hash::Hash for StateSlot {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (std::sync::Arc::as_ptr(&self.0) as *const u8 as usize).hash(state);
+        self.id.hash(state);
     }
 }
 
@@ -1114,6 +1205,7 @@ pub fn native_closure(
     defaults: Vec<Value>,
     state: &StateSlot,
 ) -> Func {
+
     let (params, arg_list) = stub_signature(params_src);
     let src = stub_source(data.name, &params, &arg_list);
     let (node, num_pos_params) = cached_closure_node(&src);
@@ -1231,9 +1323,12 @@ pub fn take_state<T: std::any::Any + Send + Sync>(
     let value: Value = args.expect("__trust_state")?;
     match value {
         Value::Dyn(dynamic) => match dynamic.downcast::<StateSlot>() {
-            Some(slot) => match slot.0.clone().downcast::<T>() {
+            Some(slot) => match slot.inner.clone().downcast::<T>() {
                 Ok(arc) => Ok(arc),
-                Err(_) => Err(state_error("状态句柄类型不符(生成器 bug)")),
+                Err(_) => Err(state_error(&format!(
+                    "状态句柄类型不符(生成器 bug):期望 {}",
+                    std::any::type_name::<T>()
+                ))),
             },
             None => Err(state_error("首个位置参数不是状态句柄(生成器 bug)")),
         },

@@ -59,3 +59,25 @@
 #let eq-simple() = $1 + 1$
 #let eq-sym() = $arrow$
 #let eq-captured(x) = $x + 1$
+
+// C2 值位置闭包(体 > 32 节点走原生):多捕获 + 算术混合。
+#let base-scale = 1pt
+#let big-closure(a, b) = {
+  let f = (x) => {
+    let acc = a * x + b
+    let res = acc * 2 + b - a
+    let more = res + acc - b + a
+    let s1 = more * 3 + acc - res + b * b - a
+    let s2 = s1 + more - acc + res * 2 - b + a
+    s2 + s1 + more + acc + res + a + b
+  }
+  f(2) + f(3)
+}
+
+// C2 自递归闭包:命名闭包体引用自身(原生路径,SelfFuncCell)。
+#let self-rec(n) = {
+  let countdown(k) = {
+    if k <= 0 { 0 } else if k == 1 { 1 } else { k + countdown(k - 1) }
+  }
+  countdown(n)
+}

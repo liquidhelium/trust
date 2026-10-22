@@ -30,6 +30,16 @@ pub(super) struct Ctx {
     >,
     /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
     pub(super) used_state: bool,
+    /// 值位置闭包(C2:闭包表达式也编译为原生体 + 签名保真 stub)的
+    /// 去重表:键 = (闭包原文, 规范化捕获名集) → (id, 是否携带 __st)。
+    /// 体代码是 (AST, 捕获名集) 的纯函数,同键必然同码;去重防同定义
+    /// 闭包在多调用点膨胀。
+    pub(super) closure_dedup:
+        std::collections::HashMap<String, (String, bool)>,
+    pub(super) next_closure_id: usize,
+    /// C2 闭包 f_/D_ 汇集(发射到产物根部——跨文件去重后同一定义只
+    /// 此一份,根级可见 __State 与全部导入)。
+    pub(super) closure_items: String,
     /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
     /// 仅在该上下文合法——外层 Rust 函数返回类型不同)。
     pub(super) in_fn: usize,
@@ -73,6 +83,9 @@ impl Ctx {
             export_table: None,
             used_state: false,
             in_fn: 0,
+            closure_dedup: std::collections::HashMap::new(),
+            next_closure_id: 0,
+            closure_items: String::new(),
             span_table: Vec::new(),
             span_index: std::collections::HashMap::new(),
         }

@@ -151,6 +151,14 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             // B10 深度护栏内的自递归。
             "m.down(0)",
             "m.down(40)",
+            // C2 自递归闭包(命名,体引用自身)。
+            "m.self-rec(0)",
+            "m.self-rec(1)",
+            "m.self-rec(5)",
+            "m.self-rec(30)",
+            // C2 值位置闭包(多捕获 + 复合算术)。
+            "m.big-closure(3, 4)",
+            "m.big-closure(1, -2)",
             // Equation 经源码片段解释求值。
             "m.eq-simple()",
             "m.eq-sym()",

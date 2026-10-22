@@ -4,7 +4,7 @@
 //! 的 `Value`,零私有值模型;所有语义函数与 `typst-eval` 的解释实现逐条
 //! 对照(报错文案与 span 行为一致),差分测试以此为验收。
 
-use comemo::{Track, Tracked};
+use comemo::{Track, Tracked, TrackedMut};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
@@ -13,7 +13,7 @@ use typst::foundations::{
     Arg, Args, Array, Binding, Closure, ClosureNode, Content, Context, Func, IntoValue, Module,
     Scope, Selector, Str, Transformation, Value, ops,
 };
-use typst::introspection::EmptyIntrospector;
+use typst::introspection::{EmptyIntrospector, Introspector};
 use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
@@ -120,7 +120,155 @@ pub fn bind_module(
         .scope_mut()
         .bind(name.into(), Binding::detached(module));
     library.std = Binding::detached(library.global.clone().into_value());
+    install_stub_fast_path(&mut library);
     typst::utils::LazyHash::new(library)
+}
+
+/// `Routines.eval_closure` 的 stub 直调快路径。命中本产物 stub(捕获
+/// 作用域携带 `__trust_routine`)时,跳过 memoized 解释:组装 Engine、
+/// 把状态句柄插为首个位置实参、直调原生体。语义与 stub 路径逐条同构
+/// ——typst 0.15 的绑定:位置实参按声明序 `args.expect`,命名参数仅经
+/// `args.named`(位置实参不填命名参数)、缺省取创建期物化值,原生体
+/// 序言即按此生成;差别仅是绕过 comemo 记账(对确定性函数透明,重执行
+/// 代替缓存)。未命中原样回落 typst-eval 默认例程。
+/// `Routines.eval_closure` 的 stub 直调分派。命中本产物 stub(捕获
+/// 作用域携带 `__trust_routine`)时走 [`eval_stub_native`]——
+/// **comemo 记账保留**(键与 typst-eval `eval_closure` 同构:同型同序
+/// 输入,去重粒度一致),仅把"解释 stub 体"换成直调原生体。
+/// 实测教训:无 memo 的裸直连会同时拆掉并行去重(50 线程同参调用
+/// 只执行一次),冷编译 0.43×——记账是承重墙,不是税。未命中原样
+/// 回落 typst-eval 默认例程。
+pub fn trust_eval_closure(
+    func: &Func,
+    closure: &LazyHash<Closure>,
+    world: Tracked<'_, dyn World + '_>,
+    library: &LazyHash<Library>,
+    introspector: Tracked<'_, dyn Introspector + '_>,
+    traced: Tracked<'_, Traced>,
+    sink: TrackedMut<'_, Sink>,
+    route: Tracked<'_, Route<'_>>,
+    context: Tracked<'_, Context>,
+    args: Args,
+) -> SourceResult<Value> {
+    if stub_routine(closure).is_some() {
+        return eval_stub_native(
+            func, closure, world, library, introspector, traced, sink, route, context, args,
+        );
+    }
+    typst_eval::eval_closure(
+        func,
+        closure,
+        world,
+        library,
+        introspector,
+        traced,
+        sink,
+        route,
+        context,
+        args,
+    )
+}
+
+/// 取 stub 捕获作用域里的直调例程(命中判定;非 stub 闭包只花一次
+/// 作用域查找)。
+fn stub_routine(closure: &LazyHash<Closure>) -> Option<(TrustRoutine, StateSlot)> {
+    let (routine, state) = (
+        closure.captured.get("__trust_routine")?,
+        closure.captured.get("__trust_state")?,
+    );
+    match (routine.read(), state.read()) {
+        (Value::Dyn(routine), Value::Dyn(state)) => {
+            match (routine.downcast::<TrustRoutine>(), state.downcast::<StateSlot>()) {
+                (Some(cell), Some(slot)) => Some((cell.clone(), slot.clone())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// memoized 的 stub 直调体(输入集与 typst-eval `eval_closure` 完全
+/// 一致,comemo 键同构——同型同序;内部把缺省注入 + 状态句柄 +
+/// 原生体调用一次完成,跳过 stub 体的解释与内层分发)。
+#[comemo::memoize]
+fn eval_stub_native(
+    func: &Func,
+    closure: &LazyHash<Closure>,
+    world: Tracked<'_, dyn World + '_>,
+    library: &LazyHash<Library>,
+    introspector: Tracked<'_, dyn Introspector + '_>,
+    traced: Tracked<'_, Traced>,
+    sink: TrackedMut<'_, Sink>,
+    route: Tracked<'_, Route<'_>>,
+    context: Tracked<'_, Context>,
+    mut args: Args,
+) -> SourceResult<Value> {
+    let _ = func;
+    let Some((cell, slot)) = stub_routine(closure) else {
+        return Err(eco_vec![SourceDiagnostic::error(
+            Span::detached(),
+            Str::from("stub 直调缺少例程标记(生成器 bug)"),
+        )]);
+    };
+    let mut engine = Engine {
+        library,
+        world,
+        introspector: Protected::from_raw(introspector),
+        traced,
+        sink,
+        route: Route::extend(route),
+    };
+    // 命名参数缺省注入(对照 eval_closure 绑定期的 default.clone()):
+    // 仅补调用方未提供的项,且插在调用方实参**之前**——
+    // `Args::named` 的"同名取最后"语义保证调用方优先。位置实参
+    // 绑定(eat 跳过命名项)不受注入位置影响。
+    for (name, value) in &cell.defaults {
+        if !args
+            .items
+            .iter()
+            .any(|arg| arg.name.as_deref() == Some(name.as_str()))
+        {
+            args.items.insert(
+                0,
+                Arg {
+                    span: args.span,
+                    name: Some(name.clone()),
+                    value: Spanned::new(value.clone(), args.span),
+                },
+            );
+        }
+    }
+    args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot)));
+    (cell.f)(&mut engine, context, &mut args)
+}
+/// 把 `Library.routines.eval_closure` 换成 [`trust_eval_closure`]。
+/// 例程表是 `&'static` 共享引用,不可原地改(会波及同进程其他 Library
+/// ——含对照侧):拷贝一份仅替换该指针,`Box::leak` 为本产物静态;
+/// `Routines` 的 Hash 是空实现,替换不影响 LazyHash 键。仅在当前例程
+/// 为 typst-eval 默认时替换(宿主自定义例程不被覆盖;重复 install 幂等)。
+fn install_stub_fast_path(library: &mut Library) {
+    static FAST: std::sync::OnceLock<&'static typst::routines::Routines> =
+        std::sync::OnceLock::new();
+    let current = library.routines;
+    if std::ptr::eq(
+        current.eval_closure as *const (),
+        trust_eval_closure as *const (),
+    ) {
+        return; // 已安装(重复 install)
+    }
+    if !std::ptr::eq(
+        current.eval_closure as *const (),
+        typst_eval::eval_closure as *const (),
+    ) {
+        return; // 宿主自定义例程:尊重,不覆盖
+    }
+    let fast = FAST.get_or_init(|| {
+        Box::leak(Box::new(typst::routines::Routines {
+            eval_closure: trust_eval_closure,
+            ..*current
+        }))
+    });
+    library.routines = fast;
 }
 
 /// 每构建状态(per-build 槽板)的存储与槽原语。
@@ -1263,6 +1411,130 @@ impl std::hash::Hash for StateSlot {
     }
 }
 
+/// stub 直调例程:stub 捕获作用域的第三条绑定 `__trust_routine` 携带
+/// 的原生体入口(与 `NativeFuncData.function` 同型:`&'static dyn Fn`)
+/// 及命名参数缺省表(参数名 × 创建期物化值,对照 typst 闭包
+/// `closure.defaults`)。[`trust_eval_closure`] 快路径据此识别本产物
+/// stub 并为缺失的命名参数注入缺省(对照 `eval_closure` 绑定期的
+/// `default.clone()`),跳过 memoized 解释直调原生体。
+#[derive(Clone)]
+pub struct TrustRoutine {
+    pub f: &'static (dyn Fn(
+        &mut Engine,
+        Tracked<'_, Context>,
+        &mut Args,
+    ) -> SourceResult<Value>
+        + Send
+        + Sync),
+    /// (命名参数名, 创建期缺省值),按声明序。快路径仅注入调用方
+    /// 未提供的项;已提供的跳过(注入项置于调用方实参之前,
+    /// `Args::named` 的"同名取最后"语义保证调用方优先)。
+    pub defaults: Vec<(Str, Value)>,
+}
+
+impl std::fmt::Debug for TrustRoutine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("trust routine")
+    }
+}
+
+impl typst::foundations::Repr for TrustRoutine {
+    fn repr(&self) -> EcoString {
+        "trust routine".into()
+    }
+}
+
+impl typst::foundations::NativeType for TrustRoutine {
+    const NAME: &'static str = "routine";
+    fn data() -> &'static typst::foundations::NativeTypeData {
+        static DATA: std::sync::OnceLock<typst::foundations::NativeTypeData> =
+            std::sync::OnceLock::new();
+        DATA.get_or_init(|| typst::foundations::NativeTypeData {
+            name: "routine",
+            long_name: "routine",
+            title: "Routine",
+            docs: "internal stub direct-call routine",
+            def_site: typst::utils::DefSite {
+                path: "trust-runtime",
+                key: "TrustRoutine",
+            },
+            keywords: &[],
+            constructor: std::sync::LazyLock::new(|| None),
+            scope: std::sync::LazyLock::new(typst::foundations::Scope::new),
+        })
+    }
+}
+
+impl PartialEq for TrustRoutine {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(
+            self.f as *const _ as *const (),
+            other.f as *const _ as *const (),
+        ) && self.defaults == other.defaults
+    }
+}
+
+impl std::hash::Hash for TrustRoutine {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.f as *const _ as *const () as usize).hash(state);
+        self.defaults.hash(state);
+    }
+}
+
+/// 从 stub 节点按声明序提取命名参数名,与创建期物化的缺省值表
+/// (对照 typst 闭包 `closure.defaults`)配对;数量不符(生成器形态
+/// 变化)返回空表——快路径不注入,语义回落 stub 绑定。
+fn stub_named_defaults(
+    node: &typst_syntax::SyntaxNode,
+    defaults: &[Value],
+) -> Vec<(Str, Value)> {
+    let Some(closure_node) = find_closure_node(node) else {
+        return Vec::new();
+    };
+    let Some(closure) = closure_node.cast::<ast::Closure>() else {
+        return Vec::new();
+    };
+    let names: Vec<&str> = closure
+        .params()
+        .children()
+        .filter_map(|param| match param {
+            ast::Param::Named(named) => Some(named.name().as_str()),
+            _ => None,
+        })
+        .collect();
+    if names.len() != defaults.len() {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .zip(defaults.iter().cloned())
+        .map(|(name, value)| (Str::from(name), value))
+        .collect()
+}
+
+/// stub 捕获作用域(三个协议绑定:原生体函数值 + 直调例程 + 状态句柄)。
+fn stub_scope(
+    data: &'static typst::foundations::NativeFuncData,
+    node: &typst_syntax::SyntaxNode,
+    defaults: &[Value],
+    state: &StateSlot,
+) -> Scope {
+    let mut scope = Scope::new();
+    scope.define("__trust_impl", Func::from(data));
+    scope.define(
+        "__trust_routine",
+        Value::Dyn(typst::foundations::Dynamic::new(TrustRoutine {
+            f: data.function.0,
+            defaults: stub_named_defaults(node, defaults),
+        })),
+    );
+    scope.define(
+        "__trust_state",
+        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
+    );
+    scope
+}
+
 /// 签名保真的 stub 闭包(原生闭包 C 方案):`{name}{params}` 原签名
 /// 保留(参数检查/`params()`/repr/默认值自省全保真),转发体把状态
 /// 句柄作为首个位置参数传给 native 实现。`defaults` 为创建期物化值
@@ -1278,12 +1550,7 @@ pub fn native_closure_node(
     state: &StateSlot,
 ) -> Func {
     let (node, num_pos_params) = node.clone();
-    let mut scope = Scope::new();
-    scope.define("__trust_impl", Func::from(data));
-    scope.define(
-        "__trust_state",
-        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
-    );
+    let scope = stub_scope(data, &node, &defaults, state);
     let closure_span = node.span();
     Func::from(Closure {
         node: ClosureNode::Closure(node),
@@ -1304,12 +1571,7 @@ pub fn native_closure(
     let (params, arg_list) = stub_signature(params_src);
     let src = stub_source(data.name, &params, &arg_list);
     let (node, num_pos_params) = cached_closure_node(&src);
-    let mut scope = Scope::new();
-    scope.define("__trust_impl", Func::from(data));
-    scope.define(
-        "__trust_state",
-        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
-    );
+    let scope = stub_scope(data, &node, &defaults, state);
     let closure_span = node.span();
     Func::from(Closure {
         node: ClosureNode::Closure(node),

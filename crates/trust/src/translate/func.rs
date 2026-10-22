@@ -39,7 +39,15 @@ impl Ctx {
                         escape(&name)
                     );
                 }
-                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
+                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
+                    // 占位符消费一个位置实参(对照 eval_closure 的
+                    // `args.expect::<Value>("pattern parameter")`)——
+                    // 直调快路径实参不经 stub 规范化,序言必须自行消费。
+                    let _ = writeln!(
+                        body,
+                        "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
+                    );
+                }
                 ast::Param::Pos(pattern) => {
                     // 解构参数(对照 eval_closure:"pattern parameter")。
                     let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
@@ -146,7 +154,14 @@ pub(super) fn gen_closure_fn(
                     escape(&name)
                 );
             }
-            ast::Param::Pos(ast::Pattern::Placeholder(_)) => {}
+            ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
+                // 占位符消费一个位置实参(同顶层函数序言;直调快路径
+                // 实参不经 stub 规范化,序言必须自行消费)。
+                let _ = writeln!(
+                    params_code,
+                    "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
+                );
+            }
             ast::Param::Pos(pattern) => {
                 let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
                 params_code.push_str(&self.destructure(pattern, value, &mut fn_env, false));

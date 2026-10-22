@@ -507,6 +507,14 @@ fn collect_translatable_deps(
         let mut specs: Vec<String> = Vec::new();
         for text in files.values() {
             let bytes = text.as_bytes();
+            // 跳过文档注释行(///)——README 示例的 @spec 会当依赖误报
+            // (pinit 的 fletcher 依赖扫描噪声驱动)。
+            let text = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("///"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let bytes = text.as_bytes();
             let mut i = 0;
             while i < bytes.len() {
                 if bytes[i] == b'"' && i + 1 < bytes.len() && bytes[i + 1] == b'@' {

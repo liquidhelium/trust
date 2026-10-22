@@ -357,6 +357,47 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let export_table = build_export_table(&plans, &order);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
+    // 槽名→文件索引(第二遍开始前一次性构建,体内模块值链通配用):
+    // 槽名→文件索引(一次性构建,体内模块值链通配用):
+    // V{i}_{name} → plans[i].path;IMPORT_{mod}_{bound} → 边目标。
+    if cx.slot_files.is_none() {
+    let mut idx = std::collections::BTreeMap::new();
+    for (i, p) in plans.iter().enumerate() {
+    for (name, slot) in &p.tops {
+    let _ = slot;
+    idx.insert(
+    format!("V{i}_{}", sanitize_key(name)),
+    p.path.clone(),
+    );
+    }
+    for edge in &p.imports {
+    if edge.is_include {
+    continue;
+    }
+    let bound = if edge.external {
+    match &edge.items {
+    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => {
+    n.clone()
+    }
+    _ => spec_name(&edge.target),
+    }
+    } else {
+    match &edge.items {
+    ImportItems::Bare => module_stem_pub(&edge.target),
+    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => {
+    n.clone()
+    }
+    _ => continue,
+    }
+    };
+    idx.insert(
+    format!("IMPORT_{}_{}", p.mod_name, bound),
+    edge.target.clone(),
+    );
+    }
+    }
+    cx.slot_files = Some(std::rc::Rc::new(idx));
+    }
     // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
     let mut top_defines = String::new();
     let mut state_fields: Vec<String> = Vec::new();
@@ -982,11 +1023,71 @@ pub(super) fn spec_name(spec: &str) -> String {
         .to_string()
 }
 
+/// 槽名→所属文件(`V{i}_…` 的 i 是 plan 序号;`IMPORT_{mod}_…`
+/// 反查该 mod 的内部 import 边目标)。模块值链通配解析用。
+fn slot_target_file(
+    slot: &str,
+    plans: &[super::plan::FilePlan],
+) -> Option<String> {
+    if let Some(rest) = slot.strip_prefix('V')
+        && let Some((idx, _)) = rest.split_once('_')
+        && let Ok(i) = idx.parse::<usize>()
+        && i < plans.len()
+    {
+        return Some(plans[i].path.clone());
+    }
+    if let Some(rest) = slot.strip_prefix("IMPORT_") {
+        // mod_name 自身含下划线(m55_anchors)——按"plan 前缀 + _"剥离。
+        let plan = plans.iter().find(|p| {
+            rest.strip_prefix(&p.mod_name)
+                .and_then(|r| r.strip_prefix('_'))
+                .is_some()
+        })?;
+        let plan = &plans[plans.iter().position(|p| std::ptr::eq(p, plan)).unwrap()];
+        for edge in &plan.imports {
+            if edge.is_include {
+                continue;
+            }
+            // 外部包(含已并入翻译的依赖):绑定名按 spec 名或改名。
+            let bound = if edge.external {
+                match &edge.items {
+                    super::plan::ImportItems::Rename(name)
+                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
+                    _ => spec_name(&edge.target),
+                }
+            } else {
+                match &edge.items {
+                    super::plan::ImportItems::Bare => module_stem_pub(&edge.target),
+                    super::plan::ImportItems::Rename(name)
+                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
+                    _ => continue,
+                }
+            };
+            if format!("IMPORT_{}_{}", plan.mod_name, bound) == *slot {
+                return Some(edge.target.clone());
+            }
+        }
+    }
+    None
+}
+
+/// module_stem 的模块级可达副本(plan.rs 内为 pub(super))。
+fn module_stem_pub(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .unwrap_or("m")
+        .split('.')
+        .next()
+        .unwrap_or("m")
+        .to_string()
+}
+
 impl Ctx {
     /// 单条顶层 import 边的处理(env 注入 + 槽填充 + 导出面;由第二遍
     /// 的**源序流水**在 ModuleImport 语句位置调用——import 在 let 之前
     /// 还是之后影响名字解析,与原生逐语句求值一致,不能整体前置)。
     #[allow(clippy::too_many_arguments)]
+
     fn process_import_edge(
         &mut self,
         edge: &super::plan::ImportEdge,
@@ -1218,7 +1319,7 @@ impl Ctx {
                         continue;
                     }
                 };
-                let mut expr = base;
+                let mut expr = base.clone();
                 for field in fields {
                     expr = format!(
                         "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
@@ -1336,7 +1437,58 @@ impl Ctx {
                         }
                     }
                     ImportItems::Wildcard => {
-                        cx.diag(edge.span, "模块值表达式的通配 import 暂不支持".into());
+                        // 模块值链的通配:静态解析链(root→文件,逐字段
+                        // 经导出表到目标文件)后按其导出表展开
+                        // (alchemist 的 `import cetz.draw: *` 等)。
+                        let mut cur: Option<String> = None;
+                        if let Some((_, r#ref)) =
+                            env.module.iter().rev().find(|(n, _)| n == root)
+                        {
+                            if let super::ctx::Ref::Slot(slot) = r#ref {
+                                cur = slot_target_file(slot, &plans);
+                                if std::env::var_os("TRUST_TRACE_WILD").is_some() {
+                                    eprintln!("[wild] root={root} slot={slot} → {cur:?}");
+                                }
+                            }
+                        }
+                        for field in fields {
+                            let next = cur
+                                .as_ref()
+                                .and_then(|f| export_table.get(f.as_str()))
+                                .and_then(|exports| exports.get(field))
+                                .and_then(|slot| slot_target_file(slot, &plans));
+                            match next {
+                                Some(f) => cur = Some(f),
+                                None => {
+                                    cur = None;
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(target) = cur
+                            && let Some(exports) = export_table.get(target.as_str())
+                        {
+                            for (wname, _wslot) in exports {
+                                if env.module.iter().any(|(n, _)| n == wname) {
+                                    continue;
+                                }
+                                env.module.push((
+                                    wname.clone(),
+                                    Ref::ModuleField {
+                                        expr: base.clone(),
+                                        name: wname.clone(),
+                                    },
+                                ));
+                                let _ = writeln!(
+                                    file_defines,
+                                    "    scope.define(\"{}\", rt::field(&({base}), \"{}\", engine, context, SPAN)?);",
+                                    escape(wname),
+                                    escape(wname)
+                                );
+                            }
+                        } else {
+                            cx.diag(edge.span, "模块值表达式的通配 import 暂不支持(链未静态解析)".into());
+                        }
                     }
                 }
                 continue;

@@ -23,6 +23,8 @@ pub(super) struct Ctx {
     pub(super) package_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
     /// 包模式:文件路径 �� 生成 mod 名(体内字符串 import 取模块值)。
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
+    /// 槽名→所属文件(模块值链通配解析:体内 import cetz.draw: *)。
+    pub(super) slot_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
     /// 包模式:导出表(路径 → 名字 → 槽;体内**通配** import 的静态
     /// 展开用——目标为已翻译文件时其导出面在翻译期已知)。
     pub(super) export_table: Option<
@@ -83,6 +85,7 @@ impl Ctx {
             current_file: None,
             package_files: None,
             package_mods: None,
+            slot_files: None,
             export_table: None,
             used_state: false,
             in_fn: 0,

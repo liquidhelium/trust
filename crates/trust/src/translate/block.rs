@@ -240,9 +240,45 @@ impl Ctx {
                         let _ = writeln!(out, "    let mut {rust} = {module_expr};");
                     }
                     Some(ast::Imports::Wildcard) => {
-                        let expanded = internal_target.as_ref().and_then(|target| {
+                        let mut expanded = internal_target.as_ref().and_then(|target| {
                             self.export_table.as_ref().and_then(|t| t.get(target).cloned())
                         });
+                        // 模块值源(import cetz.draw: *,alchemist 驱动):
+                        // 槽→文件索引 + 导出表链式解析到目标文件。
+                        if expanded.is_none()
+                            && let Some((root, fields)) =
+                                parse_module_access(source)
+                        {
+                            let mut cur = env
+                                .module
+                                .iter()
+                                .rev()
+                                .find(|(n, _)| *n == root)
+                                .and_then(|(_, r)| match r {
+                                    super::ctx::Ref::Slot(slot) => {
+                                        self.slot_files.as_ref().and_then(|m| m.get(slot).cloned())
+                                    }
+                                    _ => None,
+                                });
+                            for field in &fields {
+                                cur = cur
+                                    .as_ref()
+                                    .and_then(|f| {
+                                        self.export_table.as_ref().and_then(|t| t.get(f))
+                                    })
+                                    .and_then(|exports| exports.get(field))
+                                    .and_then(|slot| {
+                                        self.slot_files
+                                            .as_ref()
+                                            .and_then(|m| m.get(slot).cloned())
+                                    });
+                            }
+                            expanded = cur
+                                .as_ref()
+                                .and_then(|f| {
+                                    self.export_table.as_ref().and_then(|t| t.get(f).cloned())
+                                });
+                        }
                         match expanded {
                             Some(exports) => {
                                 for (name, slot) in exports {

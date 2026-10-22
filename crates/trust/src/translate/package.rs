@@ -129,7 +129,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             .split('.')
             .next()
             .unwrap_or("f");
-        let mod_name = format!("m{idx}_{}", sanitize(stem));
+        // 复合模块名(槽前缀/路径引用):sanitize_key——裸 sanitize 对
+            // 关键字产出 r# 前缀,嵌在复合里是词法错(hy-dro-gen 的
+            // mod.typ → m21_r#mod,touying 驱动)。
+            let mod_name = format!("m{idx}_{}", sanitize_key(stem));
         let mut tops = Vec::new();
         let mut imports = Vec::new();
         for expr in markup.exprs() {
@@ -137,6 +140,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 ast::Expr::Space(_) | ast::Expr::Parbreak(_) => {}
                 // (其内的 <Label> 等标记不是代码)。
                 ast::Expr::ModuleImport(import) => {
+                    let mut source_node: Option<typst_syntax::SyntaxNode> = None;
                     let (raw, external, module_access) = match import.source() {
                         // 字符串路径:外部包或包内相对/绝对路径。
                         ast::Expr::Str(path_expr) => {
@@ -145,14 +149,15 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             (raw, external, None)
                         }
                         // 模块值表达式 import(`import deps.oxifmt: x`)。
+                        // 其余任意表达式(如 `import plugin("…")`,
+                        // touying/hy-dro-gen 驱动)存源节点,二遍求值
+                        // 为模块值再绑定(对照 typst-eval:源求值为模块
+                        // 即可 import)。
                         other => match parse_module_access(other) {
                             Some(access) => (String::new(), false, Some(access)),
                             None => {
-                                cx.diag(
-                                    expr.span(),
-                                    "import 源须为字符串路径或模块字段访问".into(),
-                                );
-                                continue;
+                                source_node = Some(other.to_untyped().clone());
+                                (String::new(), false, None)
                             }
                         },
                     };
@@ -187,7 +192,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         }
                         target
                     };
-                    if module_access.is_none() && !external && !input.files.contains_key(&target) {
+                    if module_access.is_none() && source_node.is_none() && !external
+                        && !input.files.contains_key(&target)
+                    {
                         cx.diag(
                             expr.span(),
                             format!("包内 import \"{raw}\" 解析到 {target},不在文件集中"),
@@ -264,6 +271,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         items,
                         external,
                         module_access,
+                        source_node,
                         is_include: false,
                     });
                 }
@@ -288,6 +296,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         items: ImportItems::Bare,
                         external: false,
                         module_access: None,
+                        source_node: None,
                         is_include: true,
                     });
                 }
@@ -675,7 +684,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // 文件体:file_span 锚点 + 函数体 + eval(填槽)+ module(导出面);
         // 单文件形态包进 `mod` 块,目录形态独立成文件(镜像源码树)。
         let mut body = format!(
-            "\n    #[allow(non_snake_case, dead_code)]\n    fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
+            "\n    #[allow(non_snake_case, dead_code)]\n    pub(crate) fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
             plan.path
         );
         let _ = writeln!(
@@ -862,12 +871,17 @@ fn tree_impl(
         .replace("{ITEMS}", &root_decls);
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
     // C2 闭包段与文件体同款:体内对其他文件的扁平模块引用
-    // (`{flat}::module(`)换为树路径。
+    // (`{flat}::module(` 与提升体限定的 `{flat}::file_span(`)
+    // 换为树路径。
     let mut closure_items = parts.closure_items.clone();
     for g in &parts.files {
         closure_items = closure_items.replace(
             &format!("{}::module(", g.flat_name),
             &format!("{}::module(", g.tree_full.join("::")),
+        );
+        closure_items = closure_items.replace(
+            &format!("{}::file_span(", g.flat_name),
+            &format!("{}::file_span(", g.tree_full.join("::")),
         );
     }
     root.push_str(&closure_items);
@@ -1108,6 +1122,90 @@ impl Ctx {
                 }
                 continue;
             }
+            // 任意表达式源(`import plugin("…") as hypher`,
+            // touying/hy-dro-gen 驱动):源翻译求值为模块值,后续绑定
+            // 与模块值 import 同款(对照 typst-eval:import 源求值为
+            // 模块即可)。
+            if let Some(node) = &edge.source_node
+                && let Some(expr_node) = node.cast::<ast::Expr>()
+            {
+                let value = cx.expr(expr_node, &env);
+                let base_name = match &edge.items {
+                    ImportItems::Rename(name) | ImportItems::RenameList(name, _) => name.clone(),
+                    ImportItems::Bare => "trust-source".to_string(),
+                    _ => "trust-source".to_string(),
+                };
+                let mslot = format!(
+                    "IMPORT_{}_{}",
+                    sanitize_key(&plan.mod_name),
+                    sanitize_key(&base_name)
+                );
+                state_fields.push(mslot.clone());
+                let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
+                match &edge.items {
+                    // 裸表达式源无名可绑(typst 语义须 `as`;hy-dro-gen
+                    // 即 `as hypher`)——不产生绑定。
+                    ImportItems::Bare => {}
+                    ImportItems::Rename(name) => {
+                        env.module.push((name.clone(), Ref::Slot(mslot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
+                            escape(name)
+                        );
+                    }
+                    ImportItems::RenameList(mname, list) => {
+                        env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
+                            escape(mname)
+                        );
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name.clone(),
+                                Ref::ModuleField {
+                                    expr: format!("rt::read(&__st.{mslot})?"),
+                                    name: item.clone(),
+                                },
+                            ));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                                escape(&as_name),
+                                escape(item)
+                            );
+                        }
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name.clone(),
+                                Ref::ModuleField {
+                                    expr: format!("rt::read(&__st.{mslot})?"),
+                                    name: item.clone(),
+                                },
+                            ));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                                escape(&as_name),
+                                escape(item)
+                            );
+                        }
+                    }
+                    ImportItems::Wildcard => {
+                        // 任意表达式源的通配:运行时按模块作用域展开——
+                        // 槽里存模块值,define 后由 scope 镜像(此处以
+                        // 模块值本身导出,binding 靠字段访问;纯通配场景
+                        // 罕见,降级为模块绑定 + 诊断提示)。
+                        cx.diag(edge.span, "任意表达式源的通配 import 暂不支持".into());
+                    }
+                }
+                continue;
+            }
             // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
             if let Some((root, fields)) = &edge.module_access {
                 let base = match env.module.iter().rev().find(|(n, _)| n == root) {
@@ -1265,7 +1363,7 @@ impl Ctx {
                     };
                     let slot = match import_slots.get(&edge.target) {
                         Some(slot) => slot.clone(),
-                        None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&bound)),
+                        None => format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&bound)),
                     };
                     let existed = import_slots
                         .insert(edge.target.clone(), slot.clone())

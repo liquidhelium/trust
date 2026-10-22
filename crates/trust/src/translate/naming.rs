@@ -19,7 +19,7 @@ pub(super) fn sanitize(name: &str) -> String {
         "fn", "let", "if", "else", "while", "for", "in", "loop", "match", "return", "break",
         "continue", "struct", "enum", "impl", "trait", "type", "mod", "pub", "use", "as", "const",
         "static", "mut", "ref", "move", "true", "false", "self", "super", "crate", "dyn", "where",
-        "unsafe", "async", "await", "box", "union",
+        "unsafe", "async", "await", "box", "union", "extern", "try", "gen",
     ];
     // r# 不适用的保留字(self/Self/super/crate 禁作 raw ident):
     // 加下划线后缀(cmarker 驱动:`super` 生成 `r#super` 被 rustc 拒)。

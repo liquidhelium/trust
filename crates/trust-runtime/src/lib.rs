@@ -756,6 +756,18 @@ pub fn attach_labels(items: Vec<Value>) -> typst::foundations::Content {
     typst::foundations::Content::sequence(seq)
 }
 
+/// `*body*`:对照 eval_markup 的 `StrongElem::new(body).pack()`。
+pub fn strong(body: typst::foundations::Content) -> typst::foundations::Content {
+    use typst::foundations::NativeElement;
+    typst::model::StrongElem::new(body).pack()
+}
+
+/// `_body_`:对照 eval_markup 的 `EmphElem::new(body).pack()`。
+pub fn emph(body: typst::foundations::Content) -> typst::foundations::Content {
+    use typst::foundations::NativeElement;
+    typst::model::EmphElem::new(body).pack()
+}
+
 /// markup 转义/简写:对照原版 `Value::Symbol(runtime_char)`(注意
 /// **不是**文本元素——两者 repr 同形但不同型,等值判断可区分;
 /// physica 驱动:`[\[]` 曾被翻成 text,`== [\[]` 恒假致 pdv 走错

@@ -100,7 +100,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     return;
                 };
                 let id = cx.fresh_id();
-                let slot = format!("V{id}_{}", sanitize(name.as_str()));
+                let slot = format!("V{id}_{}", sanitize_key(name.as_str()));
                 tops.push(TopBinding {
                     names: vec![(name.as_str().to_string(), slot)],
                     kind: TopKind::Fn { closure },
@@ -124,7 +124,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         let id = cx.fresh_id();
                         (
                             ident.as_str().to_string(),
-                            format!("V{id}_{}", sanitize(ident.as_str())),
+                            format!("V{id}_{}", sanitize_key(ident.as_str())),
                         )
                     })
                     .collect();
@@ -376,7 +376,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
 \
          /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。\n\
          #[allow(non_snake_case, dead_code)]\n\
-         fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\
+         pub(crate) fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\
          /// 本模块的求值状态:每个顶层绑定一个写一次槽(每构建一份)。\n\
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\

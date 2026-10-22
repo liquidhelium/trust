@@ -371,9 +371,46 @@ impl World for InjectWorld {
         self.fonts.get(index).cloned()
     }
 
-    fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
-        None
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        // 系统当前时间(带时区偏移;测试世界两侧同源,touying 的
+        // `sys.datetime` 等日期访问曾因 None 报 "unable to get the
+        // current date")。
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let offset_secs = offset
+            .map(|d| {
+                let [w, dd, h, m, s] = d.decompose();
+                w * 604_800 + dd * 86_400 + h * 3_600 + m * 60 + s
+            })
+            .unwrap_or(0);
+        let secs = now.as_secs() as i64 + offset_secs;
+        let days = secs.div_euclid(86_400);
+        let rem = secs.rem_euclid(86_400);
+        let (y, m, d) = civil_from_days(days);
+        Datetime::from_ymd_hms(
+            y as i32,
+            m as u8,
+            d as u8,
+            (rem / 3600) as u8,
+            ((rem % 3600) / 60) as u8,
+            (rem % 60) as u8,
+        )
     }
+}
+
+/// 天数→公历(Howard Hinnant 算法)。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[cfg(test)]

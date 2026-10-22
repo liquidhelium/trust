@@ -25,6 +25,10 @@ pub(super) struct ImportEdge {
     pub(super) external: bool,
     /// 模块值表达式 import(`deps.oxifmt`):根绑定名 + 字段链。
     pub(super) module_access: Option<(String, Vec<String>)>,
+    /// 任意表达式源(`import plugin("…") as m`,touying/hy-dro-gen
+    /// 驱动):源节点,二遍经 Ctx 翻译求值为模块值,绑定走模块值
+    /// 同款机制(对照 typst-eval:import 源求值为模块即可)。
+    pub(super) source_node: Option<typst_syntax::SyntaxNode>,
     /// `#include` 边:参与依赖图,不产生名字绑定。
     pub(super) is_include: bool,
 }

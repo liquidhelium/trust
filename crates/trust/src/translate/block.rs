@@ -140,6 +140,25 @@ impl Ctx {
                             );
                             continue;
                         };
+                        // 外部包 spec(`@preview/meander:0.4.4`,touying
+                        // 驱动):已并入翻译的依赖在合并模块表里按
+                        // `{spec}/` 前缀查入口文件,静态装配;未并入的
+                        // 回退运行时 import_external 解释。
+                        if raw.starts_with('@') {
+                            if let Some((entry, _)) = mods
+                                .iter()
+                                .find(|(k, _)| k.starts_with(&format!("{raw}/")))
+                            {
+                                self.used_state = true;
+                                return format!(
+                                    "Value::Module({}::module(&__st, engine, context)?)",
+                                    mods.get(entry).unwrap_or(&String::new())
+                                );
+                            }
+                            return format!(
+                                "Value::Module(rt::import_external(engine, \"{raw}\", SPAN)?)"
+                            );
+                        }
                         let mut target = normalize_import(&file, &raw);
                         // 依赖包内的绝对 import 限定在该包合并键空间
                         // (同顶层 import 的处理)。

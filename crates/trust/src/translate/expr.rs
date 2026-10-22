@@ -646,6 +646,18 @@ impl Ctx {
                 // gen_closure_fn 末尾 used_state = 体是否引用 __st
                 //(模块槽/体内字符串 import),取出后并回外层计数。
                 let has_st = std::mem::replace(&mut self.used_state, saved);
+                // 提升到产物根的闭包体:file_span 引用按来源文件模块限定
+                //(根作用域不可见;树/扁平两形态的文件模块都是根的兄弟,
+                // `{mod}::file_span()` 同构可达)。
+                let item = match (&self.current_file, &self.package_mods) {
+                    (Some(path), Some(mods)) => match mods.get(path.as_str()) {
+                        Some(mod_name) => {
+                            item.replace("file_span()", &format!("{mod_name}::file_span()"))
+                        }
+                        None => item,
+                    },
+                    _ => item,
+                };
                 self.closure_items.push_str(&item);
                 self.closure_items.push_str(&super::func::gen_func_data(
                     &format!("D_{id}"),
@@ -816,6 +828,33 @@ impl Ctx {
                 // label 不 embed:以 Value::Label 入序,由 attach_labels
                 // 贴到末个可贴元素(对照 eval_markup 的 Label 分支)。
                 format!("rt::label({:?})", l.get())
+            }
+            ContentItem::Part(ast::Expr::Strong(strong)) => {
+                // `*body*`(对照 eval_markup:StrongElem::new(body)),
+                // 体按嵌套 markup 序列翻译。
+                let items: Vec<ContentItem> = strong
+                    .body()
+                    .exprs()
+                    .map(|e| match e {
+                        ast::Expr::SetRule(set) => ContentItem::Set(set),
+                        ast::Expr::ShowRule(show) => ContentItem::Show(show),
+                        other => ContentItem::Part(other),
+                    })
+                    .collect();
+                format!("rt::strong({})", self.content_seq(&items, env))
+            }
+            ContentItem::Part(ast::Expr::Emph(emph)) => {
+                // `_body_`(对照 eval_markup:EmphElem::new(body))。
+                let items: Vec<ContentItem> = emph
+                    .body()
+                    .exprs()
+                    .map(|e| match e {
+                        ast::Expr::SetRule(set) => ContentItem::Set(set),
+                        ast::Expr::ShowRule(show) => ContentItem::Show(show),
+                        other => ContentItem::Part(other),
+                    })
+                    .collect();
+                format!("rt::emph({})", self.content_seq(&items, env))
             }
             ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
             ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),

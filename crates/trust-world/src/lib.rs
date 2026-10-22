@@ -57,6 +57,11 @@ pub struct InjectWorld {
     /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
     /// (如 wasm 插件等非源文件)。
     fs_root: Option<PathBuf>,
+    /// 包回退源的**解析缓存**(FileId → Source):没有它,每次
+    /// `source()` 回退都 `Source::new` 完整重解析——comemo 命中校验
+    /// 重放读取时也不例外,稳态编译会每轮重解析全部外部包文件
+    /// (基准"热稳态不对称"的主要制品,2026-10-22 基准剖析发现)。
+    package_sources: std::sync::RwLock<HashMap<FileId, Source>>,
 }
 
 impl InjectWorld {
@@ -106,6 +111,7 @@ impl InjectWorld {
             files: HashMap::new(),
             packages_root,
             fs_root,
+            package_sources: std::sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -285,11 +291,19 @@ impl World for InjectWorld {
         if let Some(source) = self.sources.get(&id) {
             return Ok(source.clone());
         }
-        // 包路径回退:磁盘上的包仓库。
+        // 包路径回退:磁盘上的包仓库;解析一次进缓存(见字段注释)。
+        if let Some(cached) = self.package_sources.read().unwrap().get(&id) {
+            return Ok(cached.clone());
+        }
         if let Some(path) = self.package_path(id) {
             let text =
                 std::fs::read_to_string(&path).map_err(|_| FileError::NotFound(path.clone()))?;
-            return Ok(Source::new(id, text));
+            let source = Source::new(id, text);
+            self.package_sources
+                .write()
+                .unwrap()
+                .insert(id, source.clone());
+            return Ok(source);
         }
         Err(FileError::NotFound(PathBuf::from("not in this world")))
     }

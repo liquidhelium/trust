@@ -108,10 +108,12 @@ pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
 /// 拿到 grouping 转出的 `intersection`)。
 ///
 /// 按拓扑序增量并入:被依赖者的导出面先定型,list/wildcard 引用的
-/// 目标槽随之递归可达。bare/rename 的 IMPORT 槽名与 `package.rs`
-/// 的生成规则逐字一致(同出现序、同 dedup)。已有名字(本地绑定或
-/// 先前的 import)优先,后到不覆盖。外部包与模块值 import 引入的
-/// 名字无槽形态,暂不转出(见 KNOWN-ISSUES)。
+/// 目标槽随之递归可达。bare/rename 与**外部包** import 的 IMPORT 槽名
+/// 与 `package.rs` 的生成规则逐字一致(外部包每边独立槽、无 dedup;
+/// 内部同 target 复用首个槽;`deps.typ` 一行裸外部 import 转出 `cetz`
+/// 即此形态,fletcher 的跨文件传递依赖靠它)。已有名字(本地绑定或
+/// 先前的 import)优先,后到不覆盖。模块值 import(`import
+/// deps.oxifmt: strfmt`)引入的名字无槽形态,暂不转出。
 pub(super) fn build_export_table(
     plans: &[FilePlan],
     order: &[usize],
@@ -136,7 +138,25 @@ pub(super) fn build_export_table(
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &plan.imports {
-            if edge.is_include || edge.external || edge.module_access.is_some() {
+            if edge.is_include || edge.module_access.is_some() {
+                continue;
+            }
+            // 外部包 bare/rename:转出绑定到外部模块槽(package.rs 的
+            // 外部 import 每边独立生成 IMPORT_{mod}_{name} 槽并运行时
+            // 装配,此处按同规则登记,下游 import 即可达)。
+            if edge.external {
+                if let ImportItems::Bare | ImportItems::Rename(_) = &edge.items {
+                    let bound = match &edge.items {
+                        ImportItems::Rename(name) => name.clone(),
+                        _ => super::package::spec_name(&edge.target),
+                    };
+                    let slot = format!(
+                        "IMPORT_{}_{}",
+                        sanitize(&plan.mod_name),
+                        sanitize(&bound)
+                    );
+                    exports.entry(bound).or_insert(slot);
+                }
                 continue;
             }
             match &edge.items {

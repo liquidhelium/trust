@@ -8,3 +8,5 @@ publish = false
 [dependencies]
 # 前端与手翻基线(typst 0.15.1)同版,保证 AST/语义对齐
 typst-syntax = "0.15.1"
+# 包 manifest(entrypoint 解析)
+toml = "0.8"

@@ -2,16 +2,18 @@
 //! 字符串转义、大小写变形。
 
 pub(super) fn sanitize(name: &str) -> String {
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            // 非 ASCII(如希腊字母参数名 `θ`)与符号:按码点编码,
+            // 保名单射(`θ`→`u03b8`,不与 ASCII 名冲突、不同
+            // unicode 名互异),而非折叠成 `_`(会撞名且 `mut _`
+            // 非法)。
+            out.push_str(&format!("u{:04x}", c as u32));
+        }
+    }
     // Rust 关键字加原始标识符前缀(typst 允许 `fn` 等作参数名)。
     const KEYWORDS: &[&str] = &[
         "fn", "let", "if", "else", "while", "for", "in", "loop", "match", "return", "break",

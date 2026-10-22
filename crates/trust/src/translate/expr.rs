@@ -173,12 +173,15 @@ impl Ctx {
                             );
                         }
                         ast::DictItem::Keyed(keyed) => {
-                            let ast::Expr::Str(key) = keyed.key() else {
-                                unreachable!("keyed pair key is a string")
-                            };
-                            let key = key.get();
+                            // 键是表达式:求值后 cast 到字符串(对照
+                            // `Eval for ast::Dict::Keyed`)。
+                            let key = self.expr(keyed.key(), env);
+                            let key_at = self.span_of(keyed.key().span());
                             let value = self.expr(keyed.expr(), env);
-                            let _ = write!(out, " rt::dict_put(&mut __d, {key:?}, {value});");
+                            let _ = write!(
+                                out,
+                                " rt::dict_put_key(&mut __d, {key}, {value}, {key_at})?;"
+                            );
                         }
                         ast::DictItem::Spread(spread) => {
                             let value = self.expr(spread.expr(), env);
@@ -609,7 +612,7 @@ impl Ctx {
     /// set 规则的样式求值代码(条件假 → 空样式;条件先于目标与实参
     /// 求值,对照 `Eval for ast::SetRule`)。`call_at` 为调用点 span
     /// (Args.span 与规则 span 同源)。set/show-set 两臂共用。
-    fn set_styles_code(&mut self, set: ast::SetRule, env: &Env, call_at: &str) -> String {
+    pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &Env, call_at: &str) -> String {
         let args = self.gen_args(set.args(), env, call_at);
         let target = self.expr(set.target(), env);
         match set.condition() {

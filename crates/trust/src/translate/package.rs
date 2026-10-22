@@ -848,11 +848,29 @@ pub fn translate_package_tree(
     input: &PackageInput,
     module_name: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Vec<Diag>> {
-    let mut cx = Ctx::new(false);
-    let parts = translate_package_parts(input, module_name, &mut cx);
-    if !cx.diags.is_empty() {
-        return Err(cx.diags);
+    let (tree, diags) = tree_impl(input, module_name, false);
+    if !diags.is_empty() {
+        return Err(diags);
     }
+    Ok(tree)
+}
+
+/// 宽松目录形态:缺口降级为占位,返回 (文件树, 诊断清单)。
+pub fn translate_package_tree_lenient(
+    input: &PackageInput,
+    module_name: &str,
+) -> (std::collections::BTreeMap<String, String>, Vec<Diag>) {
+    tree_impl(input, module_name, true)
+}
+
+fn tree_impl(
+    input: &PackageInput,
+    module_name: &str,
+    _lenient: bool,
+) -> (std::collections::BTreeMap<String, String>, Vec<Diag>) {
+    let mut cx = Ctx::new(_lenient);
+    let parts = translate_package_parts(input, module_name, &mut cx);
+
     let mut tree = std::collections::BTreeMap::new();
 
     // 根 `mod.rs`:header(树形态 eval 驱动)+ 顶层模块声明。
@@ -928,7 +946,7 @@ pub fn translate_package_tree(
         }
         tree.insert(format!("{}/mod.rs", dir.join("/")), content);
     }
-    Ok(tree)
+    (tree, cx.diags)
 }
 
 /// 目录形态剥掉单文件 `mod` 块的一层缩进(每行前导 4 空格,不足则原样)。
@@ -941,7 +959,7 @@ fn dedent4(s: &str) -> String {
 }
 
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
-fn spec_name(spec: &str) -> String {
+pub(super) fn spec_name(spec: &str) -> String {
     spec.split('/')
         .nth(1)
         .unwrap_or("pkg")

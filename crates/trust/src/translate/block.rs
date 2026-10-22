@@ -24,9 +24,58 @@ impl Ctx {
         // `output = ops::join(output, value).at(span)?`(每个表达式的
         // 值都 join,错误站点为该表达式自身 span)。
         let mut last: Option<(String, String)> = None;
-        for stmt in stmts {
+        let mut iter = stmts;
+        while let Some(stmt) = iter.next() {
             if let Some((prev, prev_at)) = last.take() {
                 let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
+            }
+            // 代码块内的 set/show 规则:样式/规则先求值,**剩余全部**
+            // 语句作为代码块求值、display 成内容后挂上(对照
+            // `eval_code` 的 SetRule/ShowRule 特例——规则包装块尾)。
+            if let ast::Expr::SetRule(set) = stmt {
+                let rest: Vec<ast::Expr> = iter.collect();
+                let tail = self.block(rest.into_iter(), &env);
+                let rule_at = self.span_of(set.span());
+                let styles = self.set_styles_code(set, &env, &rule_at);
+                let at = self.span_of(stmt.span());
+                last = Some((
+                    format!("Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"),
+                    at,
+                ));
+                break;
+            }
+            if let ast::Expr::ShowRule(show) = stmt {
+                let rest: Vec<ast::Expr> = iter.collect();
+                let tail = self.block(rest.into_iter(), &env);
+                let show_at = self.span_of(show.span());
+                let (sel_arg, sel_at) = match show.selector() {
+                    Some(sel) => {
+                        let sel_at = self.span_of(sel.span());
+                        (format!("Some({})", self.expr(sel, &env)), sel_at)
+                    }
+                    None => ("None".to_string(), show_at.clone()),
+                };
+                let recipe = match show.transform() {
+                    ast::Expr::SetRule(set) => {
+                        let set_at = self.span_of(set.span());
+                        let styles = self.set_styles_code(set, &env, &set_at);
+                        format!(
+                            "rt::show_rule_style({sel_arg}, {sel_at}, {styles}, {show_at}, engine)?"
+                        )
+                    }
+                    transform => format!(
+                        "rt::show_rule({sel_arg}, {sel_at}, {}, {show_at}, engine)?",
+                        self.expr(transform, &env)
+                    ),
+                };
+                let at = self.span_of(stmt.span());
+                last = Some((
+                    format!(
+                        "Value::Content({{ let __recipe = {recipe}; rt::styled_with_recipe(engine, context, ({tail}).display(), __recipe)? }})"
+                    ),
+                    at,
+                ));
+                break;
             }
             if let ast::Expr::LetBinding(lets) = stmt {
                 let init = match lets.init() {

@@ -108,12 +108,33 @@ fn main() {
                     }
                 }
             }
-            let entry = files
-                .keys()
-                .filter(|k| k.ends_with("lib.typ"))
-                .min_by_key(|k| k.split('/').count())
-                .cloned()
-                .expect("entry lib.typ");
+            // 入口:按包规范读 typst.toml 的 entrypoint(相对包根,
+            // 发布包必备;不假设任何特定入口名)。
+            let entry = std::fs::read_to_string(root.join("typst.toml"))
+                .map_err(|e| format!("读 typst.toml 失败: {e}"))
+                .and_then(|text| {
+                    let manifest: toml::Table =
+                        toml::from_str(&text).map_err(|e| e.to_string())?;
+                    let entry = manifest
+                        .get("package")
+                        .and_then(|p| p.get("entrypoint"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| "typst.toml 缺 package.entrypoint".to_string())?
+                        .trim_start_matches('/')
+                        .to_string();
+                    if files.contains_key(&entry) {
+                        Ok(entry)
+                    } else {
+                        Err(format!("entrypoint `{entry}` 不在文件集"))
+                    }
+                });
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(msg) => {
+                    eprintln!("入口解析失败: {msg}");
+                    std::process::exit(2);
+                }
+            };
             // 只收 entry 所在的包源树(docs/tests 等不入包)。
             let src_root = entry
                 .rsplit_once('/')
@@ -123,14 +144,29 @@ fn main() {
                 files.retain(|k, _| k.starts_with(&src_root));
             }
             let pkg = trust::PackageInput { files, entry };
-            let name = root.file_name().and_then(|s| s.to_str()).unwrap_or("pkg");
+            // 模块名取 manifest 的 package.name(而非目录名——包缓存
+            // 目录名是版本号)。
+            let name = std::fs::read_to_string(root.join("typst.toml"))
+                .ok()
+                .and_then(|text| {
+                    let manifest: toml::Table = toml::from_str(&text).ok()?;
+                    manifest.get("package")?.get("name")?.as_str().map(str::to_string)
+                })
+                .or_else(|| root.file_name().and_then(|s| s.to_str()).map(str::to_string))
+                .unwrap_or_else(|| "pkg".into());
             // `-o 目录/`(尾斜杠):目录形态,镜像源码树的多文件产物。
             if let Some(dir) = output.strip_suffix('/') {
-                if lenient {
-                    eprintln!("目录形态暂不支持 --lenient");
-                    std::process::exit(2);
-                }
-                match trust::translate_package_tree(&pkg, name) {
+                let tree_result = if lenient {
+                    let (tree, diags) = trust::translate_package_tree_lenient(&pkg, &name);
+                    if tree.is_empty() {
+                        Err(diags)
+                    } else {
+                        Ok(tree)
+                    }
+                } else {
+                    trust::translate_package_tree(&pkg, &name)
+                };
+                match tree_result {
                     Ok(tree) => {
                         let out_root = std::path::Path::new(dir);
                         std::fs::create_dir_all(out_root).expect("create output dir");
@@ -154,7 +190,7 @@ fn main() {
                 return;
             }
             if lenient {
-                let (code, diags) = trust::translate_package_lenient(&pkg, name);
+                let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
                     eprintln!("降级 {:?}: {}", d.span, d.message);
                 }
@@ -165,7 +201,7 @@ fn main() {
                     diags.len()
                 );
             } else {
-                match trust::translate_package(&pkg, name) {
+                match trust::translate_package(&pkg, &name) {
                     Ok(code) => {
                         std::fs::write(output, &code).expect("write");
                         println!("已生成 {output}({} 字节)", code.len());

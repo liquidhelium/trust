@@ -44,6 +44,7 @@ mod plan;
 pub use file::translate;
 pub use package::{
     PackageInput, translate_package, translate_package_lenient, translate_package_tree,
+    translate_package_tree_lenient,
 };
 
 /// 翻译诊断:语法 span + 消息 + 所属文件(包模式)。

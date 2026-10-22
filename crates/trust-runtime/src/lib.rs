@@ -446,6 +446,19 @@ pub fn dict_put(dict: &mut typst::foundations::Dict, key: &str, value: Value) {
     dict.insert(key.into(), value);
 }
 
+/// 表达式键的字典项(`("a" + x: v)`,对照 `Eval for ast::DictItem::Keyed`:
+/// 键求值后 cast 到字符串,报错站点为键表达式 span)。
+pub fn dict_put_key(
+    dict: &mut typst::foundations::Dict,
+    key: Value,
+    value: Value,
+    span: Span,
+) -> SourceResult<()> {
+    let key: Str = key.cast().at(span)?;
+    dict.insert(key, value);
+    Ok(())
+}
+
 /// 字典展开 `(..other)`(对照 `Eval for ast::DictItem::Spread`)。
 pub fn dict_spread(
     dict: &mut typst::foundations::Dict,
@@ -460,7 +473,7 @@ pub fn dict_spread(
             }
             Ok(())
         }
-        other => bail!(span, "cannot spread {}", other.ty()),
+        other => bail!(span, "cannot spread {} into dictionary", other.ty()),
     }
 }
 
@@ -486,7 +499,7 @@ pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> Source
             values.extend(args.items.into_iter().map(|arg| arg.value.v));
             Ok(())
         }
-        other => bail!(span, "cannot spread {}", other.ty()),
+        other => bail!(span, "cannot spread {} into array", other.ty()),
     }
 }
 

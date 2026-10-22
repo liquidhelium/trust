@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use comemo::{Track, Tracked};
 use typst::diag::{FileError, FileResult, SourceResult};
-use typst::engine::{Route, Sink, Traced};
+use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
     Binding, Bytes, Context, Datetime, Dict, Duration, IntoValue, Module, Scope, StyleChain, Value,
 };
@@ -300,6 +300,26 @@ impl InjectWorld {
 
     /// 以代码模式求值一段字符串;`scope` 成为 VM 的顶层作用域,
     /// 可直接注入额外绑定(差分测试的执行口)。
+    /// 借出一个最小 Engine(空 introspector,库为本 World 的库),
+    /// 供探针/装配侧直接调用需要 `&mut Engine` 的运行时函数(如
+    /// 闭包构造的创建期捕获物化)。
+    pub fn with_engine<R>(&self, f: impl FnOnce(&mut Engine) -> R) -> R {
+        let mut sink = Sink::new();
+        let world: &dyn World = self;
+        let traced = Traced::default();
+        let mut engine = Engine {
+            world: world.track(),
+            library: &self.library,
+            introspector: typst::utils::Protected::from_raw(
+                typst::introspection::EmptyIntrospector.track(),
+            ),
+            traced: traced.track(),
+            sink: sink.track_mut(),
+            route: Route::default(),
+        };
+        f(&mut engine)
+    }
+
     pub fn eval_code(&self, code: &str, scope: Scope) -> SourceResult<Value> {
         let mut sink = Sink::new();
         let world: &dyn World = self;

@@ -565,7 +565,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         let gname_escaped = escape(&gname);
                         let _ = writeln!(
                             binding_code,
-                            "    if let Some(v) = rt::global_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                            "    if let Some(v) = rt::capture_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
                         );
                         g_env.module.push((
                             gname,

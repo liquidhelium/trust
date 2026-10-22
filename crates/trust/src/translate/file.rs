@@ -269,7 +269,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     let gname_escaped = escape(&gname);
                     let _ = writeln!(
                         g_code,
-                        "    if let Some(v) = rt::global_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                        "    if let Some(v) = rt::capture_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
                     );
                     g_env.module.push((
                         gname,

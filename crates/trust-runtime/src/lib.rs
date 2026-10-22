@@ -89,6 +89,24 @@ pub fn global(engine: &mut Engine, name: &str, span: Span) -> SourceResult<Value
     }
 }
 
+/// **捕获路径**的创建期物化查找:全局 → 数学作用域 → `std`
+/// (对照原生 CapturesVisitor 的 `get` / `get_in_math`——函数体内的
+/// 数学名如 `$arrow$` 经创建点作用域捕获;普通解析用 [`global`],
+/// 不查数学作用域)。
+pub fn capture_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
+    Ok(
+        if let Some(binding) = engine.library.global.scope().get(name) {
+            Some(binding.read_checked((engine, Span::detached())).clone())
+        } else if let Some(binding) = engine.library.math.scope().get(name) {
+            Some(binding.read_checked((engine, Span::detached())).clone())
+        } else if name == "std" {
+            Some(engine.library.std.read().clone())
+        } else {
+            None
+        },
+    )
+}
+
 /// 全局查找,不存在返回 `None`(对照 typst 捕获语义:创建期不可见的
 /// 名字不捕获,由闭包体内自己的 import 在调用期绑定;`std` 特判
 /// 与 [`global`] 同款)。
@@ -339,10 +357,38 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     (node, num_pos_params)
 }
 
-pub fn closure(src: &str, defaults: Vec<Value>, captured: &[(&'static str, Value)]) -> Func {
+/// 创建期物化未捕获名:先全局作用域,再数学作用域(对照原生闭包
+/// 创建——CapturesVisitor 以创建点作用域解析,`get` 与 `get_in_math`
+/// 都带 library base;解释片段的 captured 无 base,这里补齐),
+/// `std` 特判同 [`global_opt`]。仍未命中则不捕获(调用期报
+/// unknown variable,与原生一致)。
+fn resolve_pending(
+    engine: &mut Engine,
+    captured: &mut Vec<(&'static str, Value)>,
+    pending: &[&'static str],
+) {
+    for name in pending {
+        if captured.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        if let Some(value) = capture_opt(engine, name).ok().flatten() {
+            captured.push((name, value));
+        }
+    }
+}
+
+pub fn closure(
+    src: &str,
+    defaults: Vec<Value>,
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+) -> Func {
     let (node, num_pos_params) = cached_closure_node(src);
+    let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
+    resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();
-    for (name, value) in captured {
+    for (name, value) in &captured {
         if std::env::var_os("TRUST_DEBUG_CAPTURE").is_some() && src.contains("ctx => {") {
             let brief = format!("{value:?}");
             eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
@@ -1211,19 +1257,26 @@ pub fn styled_with_recipe(
 
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
-pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Func {
+pub fn context_closure(
+    body_src: &str,
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+) -> Func {
     // 定位缓存(**原始片段文本**为键,命中零格式化)。context 体是
     // **表达式**(代码块或单一表达式),用 `parse_code` 取 Code 根下
     // 的首个表达式——不能用 `#let` 包装源(其根下首个可 cast 节点是
     // LetBinding 本身:求值会执行体,但返回值是 let 的 none,
     // ContextElem 显示 none = 空内容,cetz 画布因此整体消失)。
+    // 解析与登记文本一律 trim(前后 trivia 会让"首个表达式节点"
+    // 取到 Space)。
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, typst_syntax::SyntaxNode>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
     let node = if let Some(hit) = CACHE.read().unwrap().get(body_src) {
         hit.clone()
     } else {
-        let text = body_src.to_string();
+        let text = body_src.trim().to_string();
         let root = typst_syntax::parse_code(&text);
         let node = root
             .children()
@@ -1244,8 +1297,10 @@ pub fn context_closure(body_src: &str, captured: &[(&'static str, Value)]) -> Fu
             .insert(body_src.to_string(), node.clone());
         node
     };
+    let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
+    resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();
-    for (name, value) in captured {
+    for (name, value) in &captured {
         scope.define(name, value.clone());
     }
     Func::from(Closure {
@@ -1264,4 +1319,19 @@ pub fn context_body(func: Func) -> typst::foundations::Content {
         typst::foundations::Value::Content(content) => content,
         _ => unreachable!("ContextElem packs to content"),
     }
+}
+
+/// v1 语言子集外的**math 表达式**(Equation):体量大、几乎不构成
+/// 性能问题——按源码片段经 typst-eval **解释求值**(与解释闭包同一
+/// 保真路径:ContextNode 闭包 + 捕获作用域,片段按文本缓存 parse)。
+/// 其余缺口不适用本路径,仍走翻译期诊断降级。
+pub fn eval_expr(
+    src: &str,
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+    context: Tracked<Context>,
+) -> SourceResult<Value> {
+    let func = context_closure(src, captured, pending, engine);
+    func.call::<[Value; 0]>(engine, context, [])
 }

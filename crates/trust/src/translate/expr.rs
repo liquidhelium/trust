@@ -118,26 +118,19 @@ impl Ctx {
                 let body = ctx.body().to_untyped().full_text().to_string();
                 let mut names: Vec<String> = Vec::new();
                 collect_idents(ctx.body().to_untyped(), &mut Vec::new(), &mut names);
-                let (captured, globals) = self.capture_entries(&names, env);
-                if captured.is_empty() && globals.is_empty() {
-                    format!("Value::Content(rt::context_body(rt::context_closure({body:?}, &[])))")
+                let (captured, pending) = self.capture_entries(&names, env);
+                // pending(局部/模块槽之外的名字)运行期经全局+数学
+                // 作用域物化(对照原生 CapturesVisitor 的 get/get_in_math)。
+                let pending_lit = pending_list(&pending);
+                if captured.is_empty() {
+                    format!(
+                        "Value::Content(rt::context_body(rt::context_closure({body:?}, &[], {pending_lit}, engine)))"
+                    )
                 } else {
                     // 块内构造、块内消费(&__caps 不逃出块)。
-                    let init = if captured.is_empty() {
-                        "Vec::new()".to_string()
-                    } else {
-                        format!("vec![{}]", captured.join(", "))
-                    };
-                    let mut pushes = String::new();
-                    for name in &globals {
-                        pushes.push_str(&format!(
-                            " if let Some(v) = rt::global_opt(engine, \"{}\")? {{ __caps.push((\"{}\", v)); }}",
-                            escape(name),
-                            escape(name)
-                        ));
-                    }
+                    let init = format!("vec![{}]", captured.join(", "));
                     format!(
-                        "{{ let mut __caps: Vec<(&'static str, Value)> = {init};{pushes} Value::Content(rt::context_body(rt::context_closure({body:?}, &__caps))) }}"
+                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; Value::Content(rt::context_body(rt::context_closure({body:?}, &__caps, {pending_lit}, engine))) }}"
                     )
                 }
             }
@@ -313,6 +306,25 @@ impl Ctx {
                      }}\n  \
                      __out }}"
                 )
+            }
+            // math/Equation:体量大、几乎不构成性能问题——源码片段
+            // 经 typst-eval 解释求值(与解释闭包同一保真路径,不是
+            // 缺口;其余子集外表达式仍走诊断降级)。自由标识符(含
+            // 数学名)按闭包同款捕获分析物化。
+            ast::Expr::Equation(_) => {
+                let src = expr.to_untyped().full_text().trim().to_string();
+                let mut names: Vec<String> = Vec::new();
+                collect_idents(expr.to_untyped(), &mut Vec::new(), &mut names);
+                let (captured, pending) = self.capture_entries(&names, env);
+                let pending_lit = pending_list(&pending);
+                if captured.is_empty() {
+                    format!("rt::eval_expr({src:?}, &[], {pending_lit}, engine, context)?")
+                } else {
+                    let init = format!("vec![{}]", captured.join(", "));
+                    format!(
+                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; rt::eval_expr({src:?}, &__caps, {pending_lit}, engine, context)? }}"
+                    )
+                }
             }
             other => {
                 let kind = other.to_untyped().kind();
@@ -508,32 +520,13 @@ impl Ctx {
         } else {
             format!("vec![{}]", defaults.join(", "))
         };
-        if captured_globals.is_empty() {
-            let captured = if captured.is_empty() {
-                "&[]".into()
-            } else {
-                format!("&[{}]", captured.join(", "))
-            };
-            format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}))")
+        let pending_lit = pending_list(&captured_globals);
+        let captured = if captured.is_empty() {
+            "&[]".into()
         } else {
-            let init = if captured.is_empty() {
-                "Vec::new()".to_string()
-            } else {
-                format!("vec![{}]", captured.join(", "))
-            };
-            let mut pushes = String::new();
-            for name in &captured_globals {
-                let _ = write!(
-                    pushes,
-                    " if let Some(v) = rt::global_opt(engine, \"{}\")? {{ __caps.push((\"{}\", v)); }}",
-                    escape(name),
-                    escape(name)
-                );
-            }
-            format!(
-                "{{ let mut __caps: Vec<(&'static str, Value)> = {init};{pushes} Value::Func(rt::closure({src_text:?}, {defaults}, &__caps)) }}"
-            )
-        }
+            format!("&[{}]", captured.join(", "))
+        };
+        format!("Value::Func(rt::closure({src_text:?}, {defaults}, {captured}, {pending_lit}, engine))")
     }
 
     /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
@@ -700,6 +693,23 @@ fn is_invariant(expr: &typst_syntax::SyntaxNode) -> bool {
             is_invariant(call.callee().to_untyped()) && is_invariant(call.args().to_untyped())
         }
         _ => expr.children().all(is_invariant),
+    }
+}
+
+/// pending 名单的字面量形态(`&["a", "b"]`;创建期经全局+数学作用域
+/// 物化,见 rt::resolve_pending)。
+fn pending_list(names: &[String]) -> String {
+    if names.is_empty() {
+        "&[]".to_string()
+    } else {
+        format!(
+            "&[{}]",
+            names
+                .iter()
+                .map(|n| format!("{:?}", n))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 

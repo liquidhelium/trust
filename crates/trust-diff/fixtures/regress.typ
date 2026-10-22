@@ -53,3 +53,9 @@
 
 // B6:元素函数字段的样式链取值(context 内)。
 #let size-of() = context text.size
+
+// Equation:math 按源码片段解释求值(仅此一类走 eval;符号与外层
+// 变量捕获两种形态)。
+#let eq-simple() = $1 + 1$
+#let eq-sym() = $arrow$
+#let eq-captured(x) = $x + 1$

@@ -122,7 +122,10 @@ pub(super) fn collect_idents(
             }
             bound.truncate(mark);
         }
-        K::Ident => {
+        K::Ident | K::MathIdent => {
+            // 对照原生 CapturesVisitor:Ident 与 MathIdent 都是潜在
+            // 捕获(数学名先查常规作用域再查数学作用域;仅存于数学
+            // 作用域的符号名捕获落空,调用期由数学作用域解析)。
             let name = node.full_text().to_string();
             if !bound.contains(&name) {
                 out.push(name);

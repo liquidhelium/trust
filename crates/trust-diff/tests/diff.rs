@@ -151,6 +151,10 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             // B10 深度护栏内的自递归。
             "m.down(0)",
             "m.down(40)",
+            // Equation 经源码片段解释求值。
+            "m.eq-simple()",
+            "m.eq-sym()",
+            "m.eq-captured(2)",
         ],
         _ => vec![],
     }

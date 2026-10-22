@@ -50,8 +50,8 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = std::sync::Arc::new(__State::default());
     let _ = context;
-    if let Some(v) = rt::global_opt(engine, "a")? { rt::fill(&__st.G_V0_add_a, v)?; }
-    if let Some(v) = rt::global_opt(engine, "b")? { rt::fill(&__st.G_V0_add_b, v)?; }
+    if let Some(v) = rt::capture_opt(engine, "a")? { rt::fill(&__st.G_V0_add_a, v)?; }
+    if let Some(v) = rt::capture_opt(engine, "b")? { rt::fill(&__st.G_V0_add_b, v)?; }
     { let v = Value::Func(Func::from(&D_V0_add)); rt::fill(&__st.V0_add, v.clone())?; scope.define("add", v); }
     Ok(Module::new("function", scope).with_content(rt::content_sequence(vec![rt::embed(Value::None)])).with_file_id(file_span().id().expect("file span id")))
 }

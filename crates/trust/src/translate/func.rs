@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use typst_syntax::ast::{self};
 
 use super::ctx::{Ctx, Env, bind_local};
-use super::naming::{escape, sanitize};
+use super::naming::{escape, sanitize, sanitize_key};
 
 impl Ctx {
     /// 生成一个函数:参数解构 + 体直译。
@@ -57,7 +57,7 @@ impl Ctx {
                     let name = named.name().as_str().to_string();
                     // 默认值在定义期(module_init)求值物化进槽,调用期
                     // 只读:求值时机与 typst 一致(创建期一次)。
-                    let def_slot = format!("DEF_{slot}_{}", sanitize(&name));
+                    let def_slot = format!("DEF_{slot}_{}", sanitize_key(&name));
                     self.used_state = true;
                     let rust = bind_local(&mut fn_env, &name);
                     let _ = writeln!(

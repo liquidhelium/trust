@@ -60,18 +60,18 @@ impl Ctx {
                         let set_at = self.span_of(set.span());
                         let styles = self.set_styles_code(set, &env, &set_at);
                         format!(
-                            "rt::show_rule_style({sel_arg}, {sel_at}, {styles}, {show_at}, engine)?"
+                            "{{ let __sel = {sel_arg}; let __styles = {styles}; rt::show_rule_style(__sel, {sel_at}, __styles, {show_at}, engine)? }}"
                         )
                     }
                     transform => format!(
-                        "rt::show_rule({sel_arg}, {sel_at}, {}, {show_at}, engine)?",
+                        "{{ let __sel = {sel_arg}; let __tf = {{ {} }}; rt::show_rule(__sel, {sel_at}, __tf, {show_at}, engine)? }}",
                         self.expr(transform, &env)
                     ),
                 };
                 let at = self.span_of(stmt.span());
                 last = Some((
                     format!(
-                        "Value::Content({{ let __recipe = {recipe}; rt::styled_with_recipe(engine, context, ({tail}).display(), __recipe)? }})"
+                        "Value::Content({{ let __recipe = {recipe}; let __styled_tail = ({tail}).display(); rt::styled_with_recipe(engine, context, __styled_tail, __recipe)? }})"
                     ),
                     at,
                 ));

@@ -62,6 +62,24 @@ impl Ctx {
                 format!("Value::numeric(({value:?}, Unit::{}))", unit_variant(unit))
             }
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
+            ast::Expr::Raw(raw) => {
+                // 代码位 Raw(对照 typst-eval markup.rs 的 `Eval for
+                // ast::Raw`):行表 + 语言 + 块标记构造 RawElem;
+                // `.text` 等字段访问走元素字段(与原生同语义)。
+                let lines = raw
+                    .lines()
+                    .map(|l| format!("{:?}", l.get().as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let lang = match raw.lang() {
+                    Some(l) => format!("Some({:?}.into())", l.get().as_str()),
+                    None => "None".to_string(),
+                };
+                format!(
+                    "rt::raw(eco_vec![{lines}], {lang}, {})",
+                    raw.block()
+                )
+            }
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
             ast::Expr::ContentBlock(block) => {
@@ -731,12 +749,12 @@ impl Ctx {
                             let set_at = self.span_of(set.span());
                             let styles = self.set_styles_code(set, env, &set_at);
                             format!(
-                                "rt::show_rule_style({sel_arg}, {sel_at}, {styles}, {show_at}, engine)?"
+                                "{{ let __sel = {sel_arg}; let __styles = {styles}; rt::show_rule_style(__sel, {sel_at}, __styles, {show_at}, engine)? }}"
                             )
                         }
                         transform => {
                             format!(
-                                "rt::show_rule({sel_arg}, {sel_at}, {}, {show_at}, engine)?",
+                                "{{ let __sel = {sel_arg}; let __tf = {{ {} }}; rt::show_rule(__sel, {sel_at}, __tf, {show_at}, engine)? }}",
                                 self.expr(transform, env)
                             )
                         }
@@ -784,6 +802,15 @@ impl Ctx {
                 format!("rt::text({:?})", t.get().as_str())
             }
             ContentItem::Part(ast::Expr::Space(_)) => "rt::space()".into(),
+            ContentItem::Part(ast::Expr::Shorthand(s)) => {
+                // markup 简写:`~` nbsp、`--` en、`---` em、`...`、`-?`
+                // (对照 eval_markup 直接产 text 节点)。
+                format!("rt::text({:?})", s.get().to_string())
+            }
+            ContentItem::Part(ast::Expr::SmartQuote(q)) => {
+                // 智能引号:构造 smartquote 元素,解析留给 layout 期。
+                format!("rt::smartquote({})", q.double())
+            }
             ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
             ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),
             ContentItem::Part(ast::Expr::Escape(e)) => {

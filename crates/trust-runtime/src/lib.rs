@@ -726,6 +726,27 @@ pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value
     args.expect::<Value>(name)
 }
 
+/// markup 智能引号(`'` / `"`):构造 smartquote 元素(开合/语言相关
+/// 的解析语义留给 layout 期,对照 eval_markup 的 SmartQuoteElem)。
+pub fn smartquote(double: bool) -> Value {
+    use typst::foundations::NativeElement;
+    Value::Content(typst::text::SmartQuoteElem::new().with_double(double).pack())
+}
+
+/// 代码位 Raw:行表 + 语言 + 块标记构造 RawElem(对照 typst-eval
+/// `Eval for ast::Raw`;行 span 用 detached——仅诊断用,不影响值)。
+pub fn raw(lines: EcoVec<EcoString>, lang: Option<EcoString>, block: bool) -> Value {
+    use typst::foundations::NativeElement;
+    let lines: EcoVec<(EcoString, Span)> =
+        lines.into_iter().map(|l| (l, Span::detached())).collect();
+    let mut elem = typst::text::RawElem::new(typst::text::RawContent::Lines(lines))
+        .with_block(block);
+    if let Some(lang) = lang {
+        elem.lang.set(Some(lang));
+    }
+    Value::Content(elem.pack())
+}
+
 /// 每调用点静态版的解释闭包创建(节点来自调用点静态;pending
 /// 物化协议同 [`closure`])。
 pub fn closure_node_at(

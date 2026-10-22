@@ -260,7 +260,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     };
                     for name in names {
                         let id = cx.fresh_id();
-                        tops.push((name.clone(), format!("V{id}_{}", sanitize(&name))));
+                        tops.push((name.clone(), format!("V{id}_{}", sanitize_key(&name))));
                     }
                 }
                 // 其余顶层表达式(文本/嵌入/set/show)是模块 body
@@ -943,7 +943,7 @@ impl Ctx {
                     ImportItems::Rename(name) => name.clone(),
                     _ => spec_name(&spec),
                 };
-                let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
+                let slot = format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&name));
                 state_fields.push(slot.clone());
                 let ext_at = cx.span_of(edge.span);
                 if input.dep_entries.contains_key(&spec) {

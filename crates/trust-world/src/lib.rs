@@ -202,6 +202,38 @@ impl InjectWorld {
         Ok(())
     }
 
+    /// 给(已存在的)虚拟包追加数据文件(wasm 插件、图片等)——包内
+    /// 相对读取(`plugin("plugin.wasm")` / `read("data.csv")`)按 spec
+    /// 根解析;golden 侧经包缓存回退读到真实文件,gen 侧据此补齐。
+    pub fn add_virtual_package_file(
+        &mut self,
+        spec: &str,
+        rel: &str,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        let spec: PackageSpec = spec
+            .parse()
+            .map_err(|err| format!("invalid package spec: {err}"))?;
+        let id = RootedPath::new(
+            VirtualRoot::Package(spec),
+            VirtualPath::new(rel).expect("valid path"),
+        )
+        .intern();
+        self.files.insert(id, Bytes::new(data));
+        Ok(())
+    }
+
+    /// 挂一个项目根数据文件(生成物顶层包的 span 走 Project 根,
+    /// 包内相对读取解析到项目根——探针据此双挂)。
+    pub fn add_file(&mut self, path: &str, data: Vec<u8>) {
+        let id = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new(path).expect("valid path"),
+        )
+        .intern();
+        self.files.insert(id, Bytes::new(data));
+    }
+
     /// 挂载字体(排版/渲染用):`font()` 与 `book()` 从此供给。
     /// 评估专用场景无需调用;渲染对拍时挂 `typst-assets` 或系统字体。
     pub fn set_fonts(&mut self, fonts: Vec<Font>) {

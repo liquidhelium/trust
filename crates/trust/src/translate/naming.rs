@@ -21,7 +21,12 @@ pub(super) fn sanitize(name: &str) -> String {
         "static", "mut", "ref", "move", "true", "false", "self", "super", "crate", "dyn", "where",
         "unsafe", "async", "await", "box", "union",
     ];
-    if KEYWORDS.contains(&out.as_str()) {
+    // r# 不适用的保留字(self/Self/super/crate 禁作 raw ident):
+    // 加下划线后缀(cmarker 驱动:`super` 生成 `r#super` 被 rustc 拒)。
+    const RAW_ILLEGAL: &[&str] = &["self", "Self", "super", "crate"];
+    if RAW_ILLEGAL.contains(&out.as_str()) {
+        out.push('_');
+    } else if KEYWORDS.contains(&out.as_str()) {
         out = format!("r#{out}");
     }
     if out.is_empty() {

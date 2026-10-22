@@ -39,11 +39,29 @@ pub fn source_span(path: &str, orig_raw: u64) -> Span {
     if path.is_empty() {
         return Span::detached();
     }
-    let id = typst::syntax::RootedPath::new(
-        typst::syntax::VirtualRoot::Project,
-        typst::syntax::VirtualPath::new(path).unwrap_or_else(|_| panic!("invalid path {path}")),
-    )
-    .intern();
+    // 递归依赖形态:`@ns/name:ver/包内路径` 前缀 → Package 根
+    // (与宿主加载真实包时的 FileId 同源,intern 去重后 span 可直接
+    // 定位到宿主的包文件,plugin 的相对路径解析亦走包根)。
+    let id = if path.starts_with('@') {
+        let colon = path.find(':').expect("spec 含版本分隔符");
+        let slash = path[colon..].find('/').expect("spec 后有路径") + colon;
+        let spec: typst::syntax::package::PackageSpec = path[..slash]
+            .parse()
+            .unwrap_or_else(|e| panic!("invalid spec {}: {e}", &path[..slash]));
+        typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Package(spec),
+            typst::syntax::VirtualPath::new(&path[slash + 1..])
+                .unwrap_or_else(|_| panic!("invalid path {path}")),
+        )
+        .intern()
+    } else {
+        typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Project,
+            typst::syntax::VirtualPath::new(path)
+                .unwrap_or_else(|_| panic!("invalid path {path}")),
+        )
+        .intern()
+    };
     let file_num = id.into_raw().get() as u64;
     let number = orig_raw & NUMBER_MASK;
     let raw = std::num::NonZeroU64::new((file_num << 48) | number)
@@ -1406,6 +1424,13 @@ pub fn context_body(func: Func) -> typst::foundations::Content {
         typst::foundations::Value::Content(content) => content,
         _ => unreachable!("ContextElem packs to content"),
     }
+}
+
+/// 标签字面量 `<name>`(对照 `Eval for ast::Label`)。
+pub fn label(name: &str) -> Value {
+    let label = typst::foundations::Label::construct(name.into())
+        .unwrap_or_else(|_| panic!("label name must not be empty: {name}"));
+    Value::Label(label)
 }
 
 /// v1 语言子集外的**math 表达式**(Equation):体量大、几乎不构成

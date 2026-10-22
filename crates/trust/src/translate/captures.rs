@@ -112,6 +112,11 @@ pub(super) fn collect_idents(
             let Some(keyed) = node.cast::<ast::Keyed>() else {
                 return;
             };
+            // 键表达式照常遍历(对照原生 CapturesVisitor:只有命名参数
+            // 跳过名字部分;计算键 `("pt-" + str(i)): v` 里的 str 等
+            // 外层引用是真实求值——跳过会让解释闭包运行期 unknown
+            // variable)。
+            collect_idents(keyed.key().to_untyped(), bound, out);
             collect_idents(keyed.expr().to_untyped(), bound, out);
         }
         K::CodeBlock | K::ContentBlock => {

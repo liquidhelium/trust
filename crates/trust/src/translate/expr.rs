@@ -311,6 +311,7 @@ impl Ctx {
             // 经 typst-eval 解释求值(与解释闭包同一保真路径,不是
             // 缺口;其余子集外表达式仍走诊断降级)。自由标识符(含
             // 数学名)按闭包同款捕获分析物化。
+            ast::Expr::Label(l) => format!("rt::label({:?})", l.get()),
             ast::Expr::Equation(_) => {
                 let src = expr.to_untyped().full_text().trim().to_string();
                 let mut names: Vec<String> = Vec::new();

@@ -78,6 +78,7 @@ fn main() {
                         i += 2;
                     }
                     "--lenient" => i += 1,
+                    "--with-deps" => i += 1,
                     other => {
                         input = Some(other);
                         i += 1;
@@ -89,6 +90,7 @@ fn main() {
                 std::process::exit(2);
             };
             let lenient = args.iter().any(|a| a == "--lenient");
+            let with_deps = args.iter().any(|a| a == "--with-deps");
             let root = std::path::Path::new(input);
             let mut files = std::collections::BTreeMap::new();
             let mut stack = vec![root.to_path_buf()];
@@ -143,7 +145,19 @@ fn main() {
             if !src_root.is_empty() {
                 files.retain(|k, _| k.starts_with(&src_root));
             }
-            let pkg = trust::PackageInput { files, entry };
+            // 递归依赖(--with-deps):从本地包缓存解析 @spec,把可
+            // 翻译的依赖包并入文件集({spec}/{rel} 键),import 边
+            // 静态化;未命中缓存的保持运行时解释回退(警告)。
+            let dep_entries = if with_deps {
+                collect_translatable_deps(&mut files)
+            } else {
+                Default::default()
+            };
+            let pkg = trust::PackageInput {
+                files,
+                entry,
+                dep_entries,
+            };
             // 模块名取 manifest 的 package.name(而非目录名——包缓存
             // 目录名是版本号)。
             let name = std::fs::read_to_string(root.join("typst.toml"))
@@ -292,7 +306,11 @@ fn coverage(root: &str) -> i32 {
                     map.insert(rel, src);
                 }
             }
-            let input = trust::PackageInput { files: map, entry };
+            let input = trust::PackageInput {
+                files: map,
+                entry,
+                dep_entries: Default::default(),
+            };
             match trust::translate_package(&input, "cetz") {
                 Ok(_) => println!("包模式:整包翻译通过"),
                 Err(diags) => {
@@ -374,4 +392,110 @@ fn normalize_diag(message: &str) -> String {
         return m.to_string();
     }
     m.to_string()
+}
+
+
+/// 递归依赖闭包:扫描文本中的 `"@spec"` 引用,从本地包缓存
+/// (`TYPST_PACKAGE_CACHE_PATH` 或 `~/.cache/typst/packages`)解析,
+/// 把依赖包源码以 `{spec}/{包内相对路径}` 并入 `files`,返回
+/// spec → 入口合并键。迭代到不动点(依赖自身的依赖同样并入)。
+/// 缓存未命中的 spec 不并入(生成物运行时回退解释),打警告。
+fn collect_translatable_deps(
+    files: &mut std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let cache_root = std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| {
+                std::path::PathBuf::from(h).join(".cache/typst/packages")
+            })
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
+    let mut dep_entries = std::collections::BTreeMap::new();
+    loop {
+        // 扫描全部文本中的 "@..." 字符串字面量(spec 不含转义)。
+        let mut specs: Vec<String> = Vec::new();
+        for text in files.values() {
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'"' && i + 1 < bytes.len() && bytes[i + 1] == b'@' {
+                    let start = i + 1;
+                    let mut j = start + 1;
+                    while j < bytes.len() && bytes[j] != b'"' && bytes[j] != b'\n' {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        let spec = text[start..j].to_string();
+                        if !specs.contains(&spec) {
+                            specs.push(spec);
+                        }
+                    }
+                    i = j;
+                }
+                i += 1;
+            }
+        }
+        let mut added = false;
+        for spec in specs {
+            if dep_entries.contains_key(&spec) {
+                continue;
+            }
+            // spec 形如 @ns/name:ver。
+            let Some(rest) = spec.strip_prefix('@') else { continue };
+            let Some((ns_name, _ver)) = rest.split_once(':') else {
+                eprintln!("依赖 spec 格式不支持: {spec}");
+                continue;
+            };
+            let Some((ns, name)) = ns_name.split_once('/') else {
+                continue;
+            };
+            let dir = cache_root.join(ns).join(name).join(
+                rest.split_once(':').map(|(_, v)| v).unwrap_or(""),
+            );
+            let Ok(manifest) = std::fs::read_to_string(dir.join("typst.toml")) else {
+                eprintln!("依赖未在本地包缓存命中(运行时解释回退): {spec}");
+                continue;
+            };
+            let Ok(table) = manifest.parse::<toml::Table>() else {
+                eprintln!("依赖 manifest 解析失败: {spec}");
+                continue;
+            };
+            let Some(entry) = table
+                .get("package")
+                .and_then(|p| p.get("entrypoint"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let src_root = entry.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+            let mut stack = vec![dir.join(&src_root)];
+            let base = src_root;
+            while let Some(d) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&d) else { continue };
+                for e in entries.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|x| x.to_str()) == Some("typ") {
+                        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                        let rel = path
+                            .strip_prefix(&dir)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        files.insert(format!("{spec}/{rel}"), text);
+                    }
+                }
+            }
+            dep_entries.insert(spec.clone(), format!("{spec}/{entry}"));
+            added = true;
+            eprintln!("依赖已并入翻译: {spec}(入口 {entry})");
+        }
+        if !added {
+            break;
+        }
+    }
+    dep_entries
 }

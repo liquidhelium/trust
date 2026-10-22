@@ -58,6 +58,7 @@ fn main() {
         let input = trust::PackageInput {
             files,
             entry: "entry.typ".into(),
+            dep_entries: Default::default(),
         };
         let code = trust::translate_package(&input, &name).unwrap_or_else(|diags| {
             panic!(

@@ -33,10 +33,18 @@ use super::plan::{
 
 /// 待翻译的多文件包。
 pub struct PackageInput {
-    /// 相对路径(POSIX 风格,相对包根)→ 源码。
+    /// 相对路径(POSIX 风格,相对包根)→ 源码。递归依赖形态下,
+    /// 被翻译的依赖包文件以 `{spec}/{包内相对路径}` 为键并入
+    /// (spec 形如 `@preview/cetz:0.3.4`;与文件内路径规范化兼容,
+    /// mod 名带序号前缀天然无槽名冲突)。
     pub files: std::collections::BTreeMap<String, String>,
     /// 入口文件相对路径。
     pub entry: String,
+    /// 已并入翻译的外部包:spec → 其入口的合并键(`{spec}/{entry}`)。
+    /// 命中这些 spec 的 import 边**静态化**(求值期直接装配对应生成
+    /// 模块,不再运行时 import_external 解释);未命中的保持运行时
+    /// 回退(混合执行)。
+    pub dep_entries: std::collections::BTreeMap<String, String>,
 }
 
 /// 一个 typ 文件的可发射产物:文件体 + 单文件/目录两种模块名。
@@ -123,6 +131,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         for expr in markup.exprs() {
             match expr {
                 ast::Expr::Space(_) | ast::Expr::Parbreak(_) => {}
+                // (其内的 <Label> 等标记不是代码)。
                 ast::Expr::ModuleImport(import) => {
                     let (raw, external, module_access) = match import.source() {
                         // 字符串路径:外部包或包内相对/绝对路径。
@@ -146,11 +155,33 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     let target = if module_access.is_some() {
                         String::new()
                     } else if external {
-                        // 外部包:target 即原始 spec(勿路径归一,否则
-                        // rt::import_external 解析失败)。
-                        raw.clone()
+                        // 外部包:已并入翻译的依赖指向其入口合并键
+                        // (依赖图/求值序随之打通);否则保持原始 spec
+                        // (运行时 import_external 解释)。
+                        input
+                            .dep_entries
+                            .get(&raw)
+                            .cloned()
+                            .unwrap_or_else(|| raw.clone())
                     } else {
-                        normalize_import(path, &raw)
+                        let mut target = normalize_import(path, &raw);
+                        // 依赖包内的**绝对** import(`/src/x.typ`)限定在
+                        // 该包的合并键空间内(相对 import 经 dir 拼接
+                        // 天然带前缀;绝对 import 会落到顶层键,丢失
+                        // 包归属)。
+                        if raw.starts_with('/') && let Some(colon) = path.find(':')
+                            && let Some(rel) = path[colon..].find('/')
+                        {
+                            let prefix_end = colon + rel;
+                            if path.starts_with('@') && prefix_end < path.len() {
+                                target = format!(
+                                    "{}/{}",
+                                    &path[..prefix_end],
+                                    target.trim_start_matches('/')
+                                );
+                            }
+                        }
+                        target
                     };
                     if module_access.is_none() && !external && !input.files.contains_key(&target) {
                         cx.diag(
@@ -269,6 +300,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     // 下游 list/wildcard import 可达上游的 import 转出名。
     let order = topo_order(&plans);
     let export_table = build_export_table(&plans, &order);
+        cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
     // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
     let mut top_defines = String::new();
@@ -290,221 +322,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let mut import_fills = String::new();
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for edge in &plan.imports {
-            if edge.is_include {
-                continue;
-            }
-            // 外部包:槽位 + 装配期运行时导入(未翻译依赖走解释器)。
-            if edge.external {
-                let spec = edge.target.clone();
-                let name = match &edge.items {
-                    ImportItems::Rename(name) => name.clone(),
-                    _ => spec_name(&spec),
-                };
-                let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
-                state_fields.push(slot.clone());
-                let ext_at = cx.span_of(edge.span);
-                let _ = writeln!(
-                    import_fills,
-                    "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\", {ext_at})?))?;"
-                );
-                match &edge.items {
-                    ImportItems::Bare | ImportItems::Rename(_) => {
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
-                        );
-                    }
-                    ImportItems::List(list) => {
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            env.module.push((
-                                as_name.clone(),
-                                Ref::ModuleField {
-                                    expr: format!("rt::read(&__st.{slot})?"),
-                                    name: item.clone(),
-                                },
-                            ));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
-                                escape(&as_name),
-                                escape(item)
-                            );
-                        }
-                    }
-                    ImportItems::Wildcard => {
-                        cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
-                    }
-                }
-                continue;
-            }
-            // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
-            if let Some((root, fields)) = &edge.module_access {
-                let base = match env.module.iter().rev().find(|(n, _)| n == root) {
-                    Some((_, module_ref)) => cx.ref_value(module_ref),
-                    None => {
-                        cx.diag(
-                            edge.span,
-                            format!("import 的模块根 `{root}` 不可见(须先 import)"),
-                        );
-                        continue;
-                    }
-                };
-                let mut expr = base;
-                for field in fields {
-                    expr = format!(
-                        "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
-                        escape(field)
-                    );
-                }
-                // 绑定进**槽**(eval 期填充 + 模块作用域转出):与外部包
-                // import 同款形态——下游 `import "本文件": 名字` 可达
-                // (对照原生:模块作用域含 import 引入的名字)。此前绑定
-                // 为即时表达式,文件内可用但不可转出,fletcher 0.5.9 的
-                // `#import cetz: vector`(外部模块的子模块值)踩中此缺口。
-                match &edge.items {
-                    ImportItems::Bare => {
-                        let name = fields.last().cloned().unwrap_or_else(|| root.clone());
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&name)
-                        );
-                        state_fields.push(slot.clone());
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {expr})?;"
-                        );
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
-                        );
-                    }
-                    ImportItems::Rename(name) => {
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&name)
-                        );
-                        state_fields.push(slot.clone());
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {expr})?;"
-                        );
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
-                        );
-                    }
-                    ImportItems::List(list) => {
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize(&plan.mod_name),
-                                sanitize(&as_name)
-                            );
-                            state_fields.push(slot.clone());
-                            let item_expr = format!(
-                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
-                                escape(item)
-                            );
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::fill(&__st.{slot}, {item_expr})?;"
-                            );
-                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                                escape(&as_name)
-                            );
-                        }
-                    }
-                    ImportItems::Wildcard => {
-                        cx.diag(edge.span, "模块值表达式的通配 import 暂不支持".into());
-                    }
-                }
-                continue;
-            }
-            let target_mod = &plans
-                .iter()
-                .find(|p| p.path == edge.target)
-                .expect("target checked")
-                .mod_name;
-            let exports = &export_table[edge.target.as_str()];
-            match &edge.items {
-                ImportItems::Bare | ImportItems::Rename(_) => {
-                    let bound = match &edge.items {
-                        ImportItems::Rename(name) => name.clone(),
-                        _ => edge
-                            .target
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or("m")
-                            .split('.')
-                            .next()
-                            .unwrap_or("m")
-                            .to_string(),
-                    };
-                    let slot = match import_slots.get(&edge.target) {
-                        Some(slot) => slot.clone(),
-                        None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&bound)),
-                    };
-                    let existed = import_slots
-                        .insert(edge.target.clone(), slot.clone())
-                        .is_some();
-                    if !existed {
-                        state_fields.push(slot.clone());
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
-                        );
-                    }
-                    env.module.push((bound.clone(), Ref::Slot(slot.clone())));
-                    let _ = writeln!(
-                        file_defines,
-                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                        escape(&bound)
-                    );
-                }
-                ImportItems::List(list) => {
-                    for (name, rename) in list {
-                        let Some(slot) = exports.get(name) else {
-                            cx.diag(edge.span, format!("`{}` 不包含导出 `{name}`", edge.target));
-                            continue;
-                        };
-                        let as_name = rename.clone().unwrap_or_else(|| name.clone());
-                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&as_name)
-                        );
-                    }
-                }
-                ImportItems::Wildcard => {
-                    for (name, slot) in exports {
-                        if env.module.iter().any(|(n, _)| n == name) {
-                            continue;
-                        }
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(name)
-                        );
-                    }
-                }
-            }
-        }
+        // 顶层 import 边不再整体前置:由下方源序流水在语句位置处理
+        //(见 process_import_edge 与 ModuleImport 臂的 edge 游标)。
+        let mut edge_cursor = 0usize;
 
         // 本文件顶层绑定与内容(按源序):绑定填槽,内容折叠进 body。
         let mut binding_code = String::new();
@@ -523,7 +343,33 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         for expr in plan.markup.exprs() {
             // 内容项:顶层文本/嵌入表达式/set/show/include(逐项可见性)。
             match expr {
-                ast::Expr::LetBinding(_) | ast::Expr::ModuleImport(_) => {
+                ast::Expr::ModuleImport(_) => {
+                    // 源序流水:在此语句位置处理对应 import 边(env 注入
+                    // 即时生效——此后的 let 才能看见它;此前的 let 仍
+                    // 解析到外层,对照原生逐语句求值)。
+                    if let Some(edge) = plan.imports.get(edge_cursor) {
+                        edge_cursor += 1;
+                        cx.process_import_edge(
+                            edge,
+                            plan,
+                            input,
+                            &plans,
+                            &export_table,
+                            &package_mods,
+                            &mut env,
+                            &mut state_fields,
+                            &mut import_fills,
+                            &mut file_defines,
+                            &mut import_slots,
+                        );
+                    }
+                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(expr),
+                        env: content_env(&env, &own),
+                    });
+                }
+                ast::Expr::LetBinding(_) => {
                     // 对照 eval_markup:语句并入一个空 display 槽。
                     content_items.push(super::expr::TopItem {
                         item: super::expr::ContentItem::Part(expr),
@@ -1010,6 +856,22 @@ fn dedent4(s: &str) -> String {
 }
 
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
+/// 合并键 `{spec}/{包内路径}` 的 spec 前缀提取(spec 自含 `/`,
+/// 以冒号后的首个 `/` 为界);非合并键返回空串。
+pub(super) fn spec_prefix(target: &str) -> String {
+    if !target.starts_with('@') {
+        return String::new();
+    }
+    match target.find(':').and_then(|colon| {
+        target[colon..].find('/').map(|rel| colon + rel)
+    }) {
+        Some(end) => target[..end].to_string(),
+        // 无后续路径:整个串就是 spec(未翻译外部边,target 即原始
+        // spec,如 "@preview/oxifmt:1.0.0")。
+        None => target.to_string(),
+    }
+}
+
 pub(super) fn spec_name(spec: &str) -> String {
     spec.split('/')
         .nth(1)
@@ -1018,4 +880,263 @@ pub(super) fn spec_name(spec: &str) -> String {
         .next()
         .unwrap_or("pkg")
         .to_string()
+}
+
+impl Ctx {
+    /// 单条顶层 import 边的处理(env 注入 + 槽填充 + 导出面;由第二遍
+    /// 的**源序流水**在 ModuleImport 语句位置调用——import 在 let 之前
+    /// 还是之后影响名字解析,与原生逐语句求值一致,不能整体前置)。
+    #[allow(clippy::too_many_arguments)]
+    fn process_import_edge(
+        &mut self,
+        edge: &super::plan::ImportEdge,
+        plan: &super::plan::FilePlan,
+        input: &PackageInput,
+        plans: &[super::plan::FilePlan],
+        export_table: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
+        package_mods: &std::collections::BTreeMap<String, String>,
+        env: &mut Env,
+        state_fields: &mut Vec<String>,
+        import_fills: &mut String,
+        file_defines: &mut String,
+        import_slots: &mut std::collections::HashMap<String, String>,
+    ) {
+        let cx = self;
+        // 单次迭代壳:方法体内的裸 `continue` 语义 == 跳过本条边
+        //(原属边循环体;内层循环的 continue 不受影响)。
+        for _ in std::iter::once(()) {
+
+            if edge.is_include {
+                continue;
+            }
+            // 外部包:槽位 + 装配期运行时导入(未翻译依赖走解释器)。
+            if edge.external {
+                // 已并入翻译的依赖:spec 在 target(入口合并键)前缀
+                // (spec 自含 `/`,取到冒号后的首个 `/` 为止);求值期
+                // 静态装配生成模块,不经 import_external。
+                let spec = spec_prefix(&edge.target);
+                let name = match &edge.items {
+                    ImportItems::Rename(name) => name.clone(),
+                    _ => spec_name(&spec),
+                };
+                let slot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&name));
+                state_fields.push(slot.clone());
+                let ext_at = cx.span_of(edge.span);
+                if input.dep_entries.contains_key(&spec) {
+                    let target_mod = &plans
+                        .iter()
+                        .find(|p| p.path == edge.target)
+                        .expect("dep entry plan")
+                        .mod_name;
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                    );
+                } else {
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\", {ext_at})?))?;"
+                    );
+                }
+                match &edge.items {
+                    ImportItems::Bare | ImportItems::Rename(_) => {
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&name)
+                        );
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            env.module.push((
+                                as_name.clone(),
+                                Ref::ModuleField {
+                                    expr: format!("rt::read(&__st.{slot})?"),
+                                    name: item.clone(),
+                                },
+                            ));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                escape(&as_name),
+                                escape(item)
+                            );
+                        }
+                    }
+                    ImportItems::Wildcard => {
+                        cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
+                    }
+                }
+                continue;
+            }
+            // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
+            if let Some((root, fields)) = &edge.module_access {
+                let base = match env.module.iter().rev().find(|(n, _)| n == root) {
+                    Some((_, module_ref)) => cx.ref_value(module_ref),
+                    None => {
+                        cx.diag(
+                            edge.span,
+                            format!("import 的模块根 `{root}` 不可见(须先 import)"),
+                        );
+                        continue;
+                    }
+                };
+                let mut expr = base;
+                for field in fields {
+                    expr = format!(
+                        "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                        escape(field)
+                    );
+                }
+                // 绑定进**槽**(eval 期填充 + 模块作用域转出):与外部包
+                // import 同款形态——下游 `import "本文件": 名字` 可达
+                // (对照原生:模块作用域含 import 引入的名字)。此前绑定
+                // 为即时表达式,文件内可用但不可转出,fletcher 0.5.9 的
+                // `#import cetz: vector`(外部模块的子模块值)踩中此缺口。
+                match &edge.items {
+                    ImportItems::Bare => {
+                        let name = fields.last().cloned().unwrap_or_else(|| root.clone());
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&name)
+                        );
+                        state_fields.push(slot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {expr})?;"
+                        );
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&name)
+                        );
+                    }
+                    ImportItems::Rename(name) => {
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&name)
+                        );
+                        state_fields.push(slot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {expr})?;"
+                        );
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&name)
+                        );
+                    }
+                    ImportItems::List(list) => {
+                        for (item, rename) in list {
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            let slot = format!(
+                                "IMPORT_{}_{}",
+                                sanitize(&plan.mod_name),
+                                sanitize(&as_name)
+                            );
+                            state_fields.push(slot.clone());
+                            let item_expr = format!(
+                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                                escape(item)
+                            );
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::fill(&__st.{slot}, {item_expr})?;"
+                            );
+                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                escape(&as_name)
+                            );
+                        }
+                    }
+                    ImportItems::Wildcard => {
+                        cx.diag(edge.span, "模块值表达式的通配 import 暂不支持".into());
+                    }
+                }
+                continue;
+            }
+            let target_mod = &plans
+                .iter()
+                .find(|p| p.path == edge.target)
+                .expect("target checked")
+                .mod_name;
+            let exports = &export_table[edge.target.as_str()];
+            match &edge.items {
+                ImportItems::Bare | ImportItems::Rename(_) => {
+                    let bound = match &edge.items {
+                        ImportItems::Rename(name) => name.clone(),
+                        _ => edge
+                            .target
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("m")
+                            .split('.')
+                            .next()
+                            .unwrap_or("m")
+                            .to_string(),
+                    };
+                    let slot = match import_slots.get(&edge.target) {
+                        Some(slot) => slot.clone(),
+                        None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&bound)),
+                    };
+                    let existed = import_slots
+                        .insert(edge.target.clone(), slot.clone())
+                        .is_some();
+                    if !existed {
+                        state_fields.push(slot.clone());
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                        );
+                    }
+                    env.module.push((bound.clone(), Ref::Slot(slot.clone())));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                        escape(&bound)
+                    );
+                }
+                ImportItems::List(list) => {
+                    for (name, rename) in list {
+                        let Some(slot) = exports.get(name) else {
+                            cx.diag(edge.span, format!("`{}` 不包含导出 `{name}`", edge.target));
+                            continue;
+                        };
+                        let as_name = rename.clone().unwrap_or_else(|| name.clone());
+                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&as_name)
+                        );
+                    }
+                }
+                ImportItems::Wildcard => {
+                    for (name, slot) in exports {
+                        if env.module.iter().any(|(n, _)| n == name) {
+                            continue;
+                        }
+                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(name)
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

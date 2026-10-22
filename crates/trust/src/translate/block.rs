@@ -140,7 +140,20 @@ impl Ctx {
                             );
                             continue;
                         };
-                        let target = normalize_import(&file, &raw);
+                        let mut target = normalize_import(&file, &raw);
+                        // 依赖包内的绝对 import 限定在该包合并键空间
+                        // (同顶层 import 的处理)。
+                        if raw.starts_with('/')
+                            && let Some(colon) = file.find(':')
+                            && let Some(rel) = file[colon..].find('/')
+                            && file.starts_with('@')
+                        {
+                            target = format!(
+                                "{}/{}",
+                                &file[..colon + rel],
+                                target.trim_start_matches('/')
+                            );
+                        }
                         match (files.contains_key(&target), mods.get(&target)) {
                             (true, Some(mod_name)) => {
                                 // 目标文件的模块作用域从槽板构建。
@@ -166,7 +179,29 @@ impl Ctx {
                 let Some(module_expr) = module_expr else {
                     continue;
                 };
-                // 形态:bare / rename → 模块值;列表 → 字段取值。
+                // 形态:bare / rename → 模块值;列表 → 字段取值;
+                // 通配:内部文件目标按导出表静态展开(求值序保证槽已填)。
+                let internal_target = match (&source, import.imports()) {
+                    (ast::Expr::Str(str_expr), Some(ast::Imports::Wildcard)) => {
+                        let raw = str_expr.get().to_string();
+                        self.current_file.as_ref().map(|file| {
+                            let mut target = normalize_import(file, &raw);
+                            if raw.starts_with('/')
+                                && let Some(colon) = file.find(':')
+                                && let Some(rel) = file[colon..].find('/')
+                                && file.starts_with('@')
+                            {
+                                target = format!(
+                                    "{}/{}",
+                                    &file[..colon + rel],
+                                    target.trim_start_matches('/')
+                                );
+                            }
+                            target
+                        })
+                    }
+                    _ => None,
+                };
                 match import.imports() {
                     None => {
                         let name = match import.new_name() {
@@ -186,7 +221,27 @@ impl Ctx {
                         let _ = writeln!(out, "    let mut {rust} = {module_expr};");
                     }
                     Some(ast::Imports::Wildcard) => {
-                        self.diag(stmt.span(), "体内通配 import 暂不支持".into());
+                        let expanded = internal_target.as_ref().and_then(|target| {
+                            self.export_table.as_ref().and_then(|t| t.get(target).cloned())
+                        });
+                        match expanded {
+                            Some(exports) => {
+                                for (name, slot) in exports {
+                                    let rust = bind_local(&mut env, &name);
+                                    let _ = writeln!(
+                                        out,
+                                        "    let mut {rust} = rt::read(&__st.{slot})?;"
+                                    );
+                                }
+                            }
+                            None => {
+                                self.diag(
+                                    stmt.span(),
+                                    "体内通配 import 仅支持已翻译的包内文件(模块值目标暂不支持)"
+                                        .into(),
+                                );
+                            }
+                        }
                     }
                     Some(ast::Imports::Items(items)) => {
                         for item in items.iter() {

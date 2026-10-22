@@ -21,8 +21,13 @@ pub(super) struct Ctx {
     pub(super) current_file: Option<String>,
     /// 包模式的文件集(字符串 import 解析)。
     pub(super) package_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
-    /// 包模式:文件路径 → 生成 mod 名(体内字符串 import 取模块值)。
+    /// 包模式:文件路径 �� 生成 mod 名(体内字符串 import 取模块值)。
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
+    /// 包模式:导出表(路径 → 名字 → 槽;体内**通配** import 的静态
+    /// 展开用——目标为已翻译文件时其导出面在翻译期已知)。
+    pub(super) export_table: Option<
+        std::rc::Rc<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
+    >,
     /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
     pub(super) used_state: bool,
     /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
@@ -65,6 +70,7 @@ impl Ctx {
             current_file: None,
             package_files: None,
             package_mods: None,
+            export_table: None,
             used_state: false,
             in_fn: 0,
             span_table: Vec::new(),

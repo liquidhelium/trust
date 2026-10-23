@@ -2333,6 +2333,114 @@ pub fn eval_expr(
     func.call::<[Value; 0]>(engine, context, [])
 }
 
+/// 解释执行 **import 语句**(区 1 胶水,对照 `Eval for ast::ModuleImport`
+/// ——import.rs:15-178,私有 trait impl,经 pub 的 `Vm`/`Eval` 直驱):
+/// 可见名物化为 Vm 的 `scopes.top`(普通绑定,即外围块作用域形态),
+/// 语句原文经解析缓存取节点并 **synthesize 到原语句 span**(两重
+/// 意义:相对路径按原文件解析——`import()` 的路径解析锚 `span.id()`;
+/// 诊断站点指向真实语句)。原版代码执行源分派/加载(含 pub
+/// `typst_eval::import` 的 file-not-found/环检测/包校验)/bare 名
+/// 三档/Items 嵌套与 unresolved/全部警告。差集读回:按 `expected`
+/// 序返回新绑定值(bare 名/rename/项名皆静态可知)。
+pub fn eval_import(
+    src: &str,
+    span: Span,
+    expected: &[&str],
+    captured: &[(&'static str, Value)],
+    engine: &mut Engine,
+    context: Tracked<Context>,
+) -> SourceResult<Vec<Value>> {
+    use typst_eval::{Eval as _, Vm};
+
+    let mut node = cached_body_node(src);
+    node.synthesize(span);
+    if std::env::var_os("TRUST_TRACE_IMPORT").is_some() {
+        eprintln!(
+            "[eval_import] src={src:?} span_file={:?} span={:?}",
+            span.id().map(|id| id.vpath().get_with_slash().to_string()),
+            span
+        );
+    }
+    let expr = node
+        .cast::<ast::Expr>()
+        .expect("import statement parses to an expression");
+    // 可见名 = 外围作用域(普通绑定;import 写的是新名,不触只读标)。
+    let mut top = Scope::new();
+    for (name, value) in captured {
+        top.bind((*name).into(), Binding::detached(value.clone()));
+    }
+    let mut scopes = Scopes::new(Some(engine.library));
+    scopes.top = top;
+    let before: std::collections::HashSet<EcoString> =
+        scopes.top.iter().map(|(k, _)| k.clone()).collect();
+    let engine2 = Engine {
+        world: engine.world,
+        library: engine.library,
+        introspector: engine.introspector,
+        traced: engine.traced,
+        sink: TrackedMut::reborrow_mut(&mut engine.sink),
+        route: Route::extend(engine.route.track()),
+    };
+    let mut vm = Vm::new(engine2, context, scopes, span);
+    expr.eval(&mut vm)?;
+    let mut out = Vec::with_capacity(expected.len());
+    for name in expected {
+        match vm.scopes.top.get(name) {
+            Some(binding) if !before.contains(*name) => {
+                out.push(binding.read().clone());
+            }
+            _ => {
+                return Err(eco_vec![SourceDiagnostic::error(
+                    span,
+                    eco_format!("import 差集缺少绑定 `{name}`(生成器 bug)"),
+                )])
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 解释执行 **include 语句**(同款胶水,对照 `Eval for
+/// ast::ModuleInclude`):返回其内容,无绑定读回。
+pub fn eval_include(
+    src: &str,
+    span: Span,
+    captured: &[(&'static str, Value)],
+    engine: &mut Engine,
+    context: Tracked<Context>,
+) -> SourceResult<Content> {
+    use typst_eval::{Eval as _, Vm};
+
+    let mut node = cached_body_node(src);
+    node.synthesize(span);
+    let expr = node
+        .cast::<ast::Expr>()
+        .expect("include statement parses to an expression");
+    let mut top = Scope::new();
+    for (name, value) in captured {
+        top.bind((*name).into(), Binding::detached(value.clone()));
+    }
+    let mut scopes = Scopes::new(Some(engine.library));
+    scopes.top = top;
+    let engine2 = Engine {
+        world: engine.world,
+        library: engine.library,
+        introspector: engine.introspector,
+        traced: engine.traced,
+        sink: TrackedMut::reborrow_mut(&mut engine.sink),
+        route: Route::extend(engine.route.track()),
+    };
+    let mut vm = Vm::new(engine2, context, scopes, span);
+    match expr.eval(&mut vm)? {
+        Value::Content(content) => Ok(content),
+        // 对照原版:include 求值恒为内容,其余形态是生成器侧错。
+        v => Err(eco_vec![SourceDiagnostic::error(
+            span,
+            eco_format!("include 求值得到非内容 {}", v.ty()),
+        )]),
+    }
+}
+
 /// 带读回的解释求值(math 嵌入 `#let` 的逃逸通道):**直驱 pub 的
 /// `Vm`/`Eval`**(对照 eval_closure 的内部形态——以 captured 克隆为
 /// `scopes.top` 构造 Vm,求值后新绑定落在 top,`Scopes` 字段 pub 可

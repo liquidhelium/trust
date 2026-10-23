@@ -45,6 +45,9 @@ pub(super) enum ContentItem<'a> {
     Show(ast::ShowRule<'a>),
     /// 包模式:目标文件 body 槽名。
     Include(String),
+    /// 动态源 include(区 1 胶水):携带发射好的求值代码
+    /// (`rt::eval_include` 驱动原版 Eval,file-not-found 等原版报)。
+    DynamicInclude(String),
 }
 
 impl Ctx {
@@ -141,16 +144,13 @@ impl Ctx {
                                 self.used_state = true;
                                 format!("Value::Content(rt::read_content(&__st.BODY_{mod_name})?)")
                             }
-                            _ => {
-                                self.diag(path.span(), format!("include \"{raw}\" 不在包文件集"));
-                                "Value::None".into()
-                            }
+                            // 不在文件集/任意表达式源:区 1 胶水——
+                            // rt::eval_include 驱动原版 Eval,世界可能
+                            // 仍能解析,file-not-found 等由原版报。
+                            _ => self.include_glue_expr(expr, env),
                         }
                     }
-                    other => {
-                        self.diag(other.span(), "include 源暂只支持字符串路径".into());
-                        "Value::None".into()
-                    }
+                    _ => self.include_glue_expr(expr, env),
                 }
             }
             ast::Expr::Contextual(ctx) => {
@@ -616,6 +616,33 @@ impl Ctx {
             return self.ref_value(module_ref);
         }
         format!("rt::global(engine, \"{}\", file_span())?", escape(name))
+    }
+
+
+    /// include 的区 1 胶水表达式:`rt::eval_include(语句原文, span,
+    /// 可见名, engine, context)` 驱动原版 `Eval for ast::ModuleInclude`。
+    fn include_glue_expr(&mut self, expr: ast::Expr, env: &mut Env) -> String {
+        let stmt_text = expr.to_untyped().full_text().trim().to_string();
+        let at = self.span_of(expr.span());
+        let locals: Vec<(String, String)> = env.locals.clone();
+        let modules: Vec<(String, super::ctx::Ref)> = env.module.clone();
+        let mut caps: Vec<String> = locals
+            .iter()
+            .map(|(n, rust)| {
+                format!("(\"{}\", {rust}.clone())", super::naming::escape(n))
+            })
+            .collect();
+        caps.extend(modules.iter().map(|(n, r)| {
+            format!("\"{}\", {}", super::naming::escape(n), self.ref_value(r))
+        }));
+        let caps_lit = if caps.is_empty() {
+            "Vec::new()".to_string()
+        } else {
+            format!("vec![{}]", caps.join(", "))
+        };
+        format!(
+            "Value::Content(rt::eval_include({stmt_text:?}, {at}, &{caps_lit}, engine, context)?)"
+        )
     }
 
     fn binary(&mut self, binary: ast::Binary, env: &mut Env) -> String {
@@ -1133,6 +1160,7 @@ impl Ctx {
                 self.used_state = true;
                 format!("rt::read_content(&__st.{body_slot})?")
             }
+            ContentItem::DynamicInclude(code) => format!("Value::Content({code})"),
             ContentItem::Part(ast::Expr::Text(t)) => {
                 format!("rt::text({:?})", t.get().as_str())
             }

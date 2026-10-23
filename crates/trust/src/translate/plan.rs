@@ -37,6 +37,11 @@ pub(super) struct ImportEdge {
     /// 驱动):源节点,二遍经 Ctx 翻译求值为模块值,绑定走模块值
     /// 同款机制(对照 typst-eval:import 源求值为模块即可)。
     pub(super) source_node: Option<typst_syntax::SyntaxNode>,
+    /// 语句原文(区 1 胶水用:经 rt::eval_import 重解析驱动原版
+    /// `Eval for ast::ModuleImport`,span 合成到原语句)。
+    pub(super) stmt_text: Option<String>,
+    /// Str 源的原始字面量(通配越界走 import_external 层用)。
+    pub(super) raw: String,
     /// `#include` 边:参与依赖图,不产生名字绑定。
     pub(super) is_include: bool,
 }

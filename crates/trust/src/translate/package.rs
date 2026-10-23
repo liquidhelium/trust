@@ -203,15 +203,10 @@ fn plan_files(
                         }
                         target
                     };
-                    if module_access.is_none() && source_node.is_none() && !external
-                        && !input.files.contains_key(&target)
-                    {
-                        cx.diag(
-                            expr.span(),
-                            format!("包内 import \"{raw}\" 解析到 {target},不在文件集中"),
-                        );
-                        continue;
-                    }
+                    // 不在文件集的非外部 Str:不再翻译期拦截——世界
+                    // 可能仍能运行期解析(套件 fixture 等);交胶水
+                    // 路径,原版 import 的 file-not-found 自然承担。
+                    let _ = &raw;
                     let items = match import.imports() {
                         None => match import.new_name() {
                             Some(new_name) => ImportItems::Rename(new_name.as_str().to_string()),
@@ -283,6 +278,10 @@ fn plan_files(
                         external,
                         module_access,
                         source_node,
+                        // 语句原文:区 1 胶水(rt::eval_import 重解析驱动
+                        // 原版 Eval;span 合成回原语句)。
+                        stmt_text: Some(expr.to_untyped().full_text().to_string()),
+                        raw: raw.clone(),
                         is_include: false,
                     });
                 }
@@ -308,6 +307,8 @@ fn plan_files(
                         external: false,
                         module_access: None,
                         source_node: None,
+                        stmt_text: None,
+                        raw: String::new(),
                         is_include: true,
                     });
                 }
@@ -837,10 +838,12 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             &export_table,
                             &package_mods,
                             &mut top.env,
+                            &top.own,
                             &mut state_fields,
                             &mut top.import_fills,
                             &mut top.file_defines,
                             &mut import_slots,
+                            &mut top.binding_code,
                         );
                     }
                     // 对照 eval_markup:语句并入一个空 display 槽。
@@ -857,19 +860,47 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     });
                     top.gen_let(cx, plan, &mut state_fields, lets);
                 }
-                ast::Expr::ModuleInclude(include) => {
+                ast::Expr::ModuleInclude(inc) => {
                     let item_env = top.content_env();
-                    let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
-                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
-                        continue;
-                    };
-                    let raw = path_expr.get().to_string();
-                    let target = normalize_import(&plan.path, &raw);
-                    let Some(target_mod) = package_mods.get(&target) else {
-                        continue;
+                    if let ast::Expr::Str(path_expr) = inc.source() {
+                        let raw = path_expr.get().to_string();
+                        let target = normalize_import(&plan.path, &raw);
+                        if let Some(target_mod) = package_mods.get(&target) {
+                            content_items.push(super::expr::TopItem {
+                                item: super::expr::ContentItem::Include(format!(
+                                    "BODY_{target_mod}"
+                                )),
+                                env: item_env,
+                            });
+                            continue;
+                        }
+                    }
+                    // 动态源/越界:区 1 胶水项(rt::eval_include 驱动
+                    // 原版 Eval;世界可能仍能解析,file-not-found 原版报)。
+                    let stmt_text = expr.to_untyped().full_text().trim().to_string();
+                    let at = cx.span_of(expr.span());
+                    let refs: Vec<(String, Ref)> = top.env.module.clone();
+                    let mut caps: Vec<String> = refs
+                        .iter()
+                        .map(|(n, r)| {
+                            format!("(\"{}\", {})", escape(n), cx.ref_value(r))
+                        })
+                        .collect();
+                    for (seen, seen_slot) in &top.own {
+                        caps.push(format!(
+                            "(\"{}\", rt::read(&__st.{seen_slot})?)",
+                            escape(seen)
+                        ));
+                    }
+                    let caps_lit = if caps.is_empty() {
+                        "Vec::new()".to_string()
+                    } else {
+                        format!("vec![{}]", caps.join(", "))
                     };
                     content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Include(format!("BODY_{target_mod}")),
+                        item: super::expr::ContentItem::DynamicInclude(format!(
+                            "rt::eval_include({stmt_text:?}, {at}, &{caps_lit}, engine, context)?"
+                        )),
                         env: item_env,
                     });
                     continue;
@@ -1452,12 +1483,115 @@ fn module_stem_pub(path: &str) -> String {
         .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn import_edge_via_glue(
+    cx: &mut Ctx,
+    plan: &super::plan::FilePlan,
+    edge: &super::plan::ImportEdge,
+    env: &mut Env,
+    own: &[(String, String)],
+    state_fields: &mut Vec<String>,
+    // 语句位 sink(binding_code):胶水求值依赖此前的顶层 let 槽,
+    // 不得随 import_fills 提前(静态边的填充序无关,提升无害;胶水
+    // 边的求值位 = 源序语句位,对照原版逐语句求值)。
+    inline_sink: &mut String,
+    file_defines: &mut String,
+    bare_expected: Option<&str>,
+) {
+    use std::fmt::Write as _;
+    let stmt = edge
+        .stmt_text
+        .as_deref()
+        .expect("胶水边带语句原文(计划期捕获)");
+    let expected: Vec<String> = match &edge.items {
+        ImportItems::Bare => bare_expected
+            .map(|n| vec![n.to_string()])
+            .unwrap_or_default(),
+        ImportItems::Rename(n) => vec![n.clone()],
+        ImportItems::RenameList(n, list) => {
+            let mut v = vec![n.clone()];
+            v.extend(
+                list.iter()
+                    .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone())),
+            );
+            v
+        }
+        ImportItems::List(list) => list
+            .iter()
+            .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone()))
+            .collect(),
+        ImportItems::Wildcard => unreachable!("通配不走差集胶水(层机制)"),
+    };
+    // 可见名物化(当前 env 模块域;对照原版:语句位点的词法面)。
+    let refs: Vec<(String, Ref)> = env.module.clone();
+    let mut caps: Vec<String> = refs
+        .iter()
+        .map(|(n, r)| format!("(\"{}\", {})", escape(n), cx.ref_value(r)))
+        .collect();
+    // 本文件此前顶层绑定(env.module 不含 own,须显式并入)。
+    for (seen, seen_slot) in own {
+        caps.push(format!(
+            "(\"{}\", rt::read(&__st.{seen_slot})?)",
+            escape(seen)
+        ));
+    }
+    let at = cx.span_of(edge.span);
+    let expected_lit = if expected.is_empty() {
+        "&[]".to_string()
+    } else {
+        format!(
+            "&[{}]",
+            expected
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let caps_lit = if caps.is_empty() {
+        "Vec::new()".to_string()
+    } else {
+        format!("vec![{}]", caps.join(", "))
+    };
+    let mut slot_fills = String::new();
+    for (i, name) in expected.iter().enumerate() {
+        let slot = format!(
+            "IMPORT_{}_{}",
+            sanitize_key(&plan.mod_name),
+            sanitize_key(name)
+        );
+        state_fields.push(slot.clone());
+        let _ = writeln!(
+            slot_fills,
+            "        rt::fill(&__st.{slot}, __imported[{i}].clone())?;"
+        );
+        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+        let _ = writeln!(
+            file_defines,
+            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+            escape(name)
+        );
+    }
+    let _ = writeln!(
+        inline_sink,
+        "    {{ let __caps: Vec<(&'static str, Value)> = {caps_lit}; let __imported = rt::eval_import({stmt:?}, {at}, {expected_lit}, &__caps, engine, context)?; {slot_fills}    }}"
+    );
+}
+
+
 impl Ctx {
     /// 单条顶层 import 边的处理(env 注入 + 槽填充 + 导出面;由第二遍
     /// 的**源序流水**在 ModuleImport 语句位置调用——import 在 let 之前
     /// 还是之后影响名字解析,与原生逐语句求值一致,不能整体前置)。
     #[allow(clippy::too_many_arguments)]
 
+
+/// 区 1 胶水边处理:语句原文经 `rt::eval_import` 驱动原版
+/// `Eval for ast::ModuleImport`(源分派/加载含 file-not-found 与环/
+/// bare 名三档/Items 嵌套与 unresolved/全部警告,均为原版代码),
+/// 差集按静态可知的绑定名填槽转出。
+/// `bare_expected`:bare 形态的静态名(Str 字面量的 stem / 模块链末段
+/// 或根名);动态源 bare 传 None(原版运行期报 dynamic 错)。
     fn process_import_edge(
         &mut self,
         edge: &super::plan::ImportEdge,
@@ -1470,10 +1604,12 @@ impl Ctx {
         >,
         package_mods: &std::collections::BTreeMap<String, String>,
         env: &mut Env,
+        own: &[(String, String)],
         state_fields: &mut Vec<String>,
         import_fills: &mut String,
         file_defines: &mut String,
         import_slots: &mut std::collections::HashMap<String, String>,
+        binding_code: &mut String,
     ) {
         let cx = self;
         // 单次迭代壳:方法体内的裸 `continue` 语义 == 跳过本条边
@@ -1609,105 +1745,79 @@ impl Ctx {
             // touying/hy-dro-gen 驱动):源翻译求值为模块值,后续绑定
             // 与模块值 import 同款(对照 typst-eval:import 源求值为
             // 模块即可)。
-            if let Some(node) = &edge.source_node
-                && let Some(expr_node) = node.cast::<ast::Expr>()
-            {
-                let mut env_m = env.clone();
-                let value = cx.expr(expr_node, &mut env_m);
-                let base_name = match &edge.items {
-                    ImportItems::Rename(name) | ImportItems::RenameList(name, _) => name.clone(),
-                    ImportItems::Bare => "trust-source".to_string(),
-                    _ => "trust-source".to_string(),
-                };
-                let mslot = format!(
-                    "IMPORT_{}_{}",
-                    sanitize_key(&plan.mod_name),
-                    sanitize_key(&base_name)
-                );
-                state_fields.push(mslot.clone());
-                let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
-                match &edge.items {
-                    // 裸表达式源无名可绑(typst 语义须 `as`;hy-dro-gen
-                    // 即 `as hypher`)——不产生绑定。
-                    ImportItems::Bare => {}
-                    ImportItems::Rename(name) => {
-                        env.module.push((name.clone(), Ref::Slot(mslot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
-                            escape(name)
-                        );
-                    }
-                    ImportItems::RenameList(mname, list) => {
-                        env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
-                            escape(mname)
-                        );
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            env.module.push((
-                                as_name.clone(),
-                                Ref::ModuleField {
-                                    expr: format!("rt::read(&__st.{mslot})?"),
-                                    name: item.clone(),
-                                    file: None,
-                                },
-                            ));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", {});",
-                                escape(&as_name),
-                                super::ctx::field_access_chain(
-                                    &format!("rt::read(&__st.{mslot})?"),
-                                    item
-                                )
-                            );
-                        }
-                    }
-                    ImportItems::List(list) => {
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            env.module.push((
-                                as_name.clone(),
-                                Ref::ModuleField {
-                                    expr: format!("rt::read(&__st.{mslot})?"),
-                                    name: item.clone(),
-                                    file: None,
-                                },
-                            ));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", {});",
-                                escape(&as_name),
-                                super::ctx::field_access_chain(
-                                    &format!("rt::read(&__st.{mslot})?"),
-                                    item
-                                )
-                            );
-                        }
-                    }
-                    ImportItems::Wildcard => {
-                        // 任意表达式源的通配:运行时按模块作用域展开——
-                        // 槽里存模块值,define 后由 scope 镜像(此处以
-                        // 模块值本身导出,binding 靠字段访问;纯通配场景
-                        // 罕见,降级为模块绑定 + 诊断提示)。
-                        cx.diag(edge.span, "任意表达式源的通配 import 暂不支持".into());
-                    }
+            if edge.source_node.is_some() {
+                // 区 1 胶水:任意表达式源经原版 Eval 分派(模块/Str/Path/
+                // 校验/警告全原版),差集填槽;通配走层 + 导出面枚举。
+                if matches!(edge.items, ImportItems::Wildcard) {
+                    let expr_node = edge
+                        .source_node
+                        .as_ref()
+                        .and_then(|n| n.cast::<ast::Expr>())
+                        .expect("source_node casts");
+                    let mut env_m = env.clone();
+                    let value = cx.expr(expr_node, &mut env_m);
+                    let mslot = format!(
+                        "IMPORT_{}_WILD_SRC",
+                        sanitize_key(&plan.mod_name)
+                    );
+                    state_fields.push(mslot.clone());
+                    let at = cx.span_of(edge.span);
+                    let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
+                    let w = format!("__wild{}", cx.fresh_id());
+                    let _ = writeln!(
+                        import_fills,
+                        "    let {w} = rt::wild_import(&({value}), {at})?;"
+                    );
+                    env.wildcards.push(w);
+                    let _ = writeln!(
+                        file_defines,
+                        "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                    );
+                } else {
+                    import_edge_via_glue(
+                        cx,
+                        plan,
+                        edge,
+                        env,
+                        own,
+                        state_fields,
+                        binding_code,
+                        file_defines,
+                        None,
+                    );
                 }
                 continue;
             }
             // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
             if let Some((root, fields)) = &edge.module_access {
+                // 非通配形态一律走胶水(值类型运行期才知:模块/Str/Path/
+                // 全局类型的 scope;原版分派+校验全承担,含 `import enum`
+                // 的 no-effect 警告与 `import p`(p 为串)的 dynamic 错)。
+                if !matches!(edge.items, ImportItems::Wildcard) {
+                    let bare =
+                        fields.last().cloned().unwrap_or_else(|| root.clone());
+                    import_edge_via_glue(
+                        cx,
+                        plan,
+                        edge,
+                        env,
+                        own,
+                        state_fields,
+                        binding_code,
+                        file_defines,
+                        Some(&bare),
+                    );
+                    continue;
+                }
+                // 通配:静态解析链(root 须可见)展开;根不可见(全局
+                // 类型/函数的 scope,如 `import assert.with(true): *`)
+                // 走运行期层 + 导出面运行期枚举(对照原版通配分支的
+                // `scope.iter()` 逐名 bind)。
                 let base = match env.module.iter().rev().find(|(n, _)| n == root) {
                     Some((_, module_ref)) => cx.ref_value(module_ref),
                     None => {
-                        cx.diag(
-                            edge.span,
-                            format!("import 的模块根 `{root}` 不可见(须先 import)"),
-                        );
-                        continue;
+                        let at = cx.span_of(edge.span);
+                        format!("rt::global(engine, \"{root}\", {at})?")
                     }
                 };
                 let mut expr = base.clone();
@@ -1879,17 +1989,87 @@ impl Ctx {
                                 );
                             }
                         } else {
-                            cx.diag(edge.span, "模块值表达式的通配 import 暂不支持(链未静态解析)".into());
+                            // 静态链不通:运行期层(体内名字经层解析)
+                            // + 导出面运行期枚举(模块作用域逐名 bind,
+                            // 对照原版通配分支)。
+                            let mslot = format!(
+                                "IMPORT_{}_WILD_{}",
+                                sanitize_key(&plan.mod_name),
+                                sanitize_key(root)
+                            );
+                            state_fields.push(mslot.clone());
+                            let at = cx.span_of(edge.span);
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::fill(&__st.{mslot}, {expr})?;"
+                            );
+                            let w = format!("__wild{}", cx.fresh_id());
+                            let _ = writeln!(
+                                import_fills,
+                                "    let {w} = rt::wild_import(&({expr}), {at})?;"
+                            );
+                            env.wildcards.push(w);
+                            let _ = writeln!(
+                                file_defines,
+                                "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                            );
                         }
                     }
                 }
                 continue;
             }
-            let target_mod = &plans
-                .iter()
-                .find(|p| p.path == edge.target)
-                .expect("target checked")
-                .mod_name;
+            // 世界可能仍能运行期解析(fixture 等):胶水,原版
+            // file-not-found 自然承担(此前翻译期拦截吞掉了错误)。
+            let Some(target_plan) = plans.iter().find(|p| p.path == edge.target) else {
+                // 通配越界:模块值经 import_external(pub import,含
+                // file-not-found)物化,运行期层 + 导出面运行期枚举。
+                if matches!(edge.items, ImportItems::Wildcard) && !edge.raw.is_empty() {
+                    let mslot = format!(
+                        "IMPORT_{}_WILD",
+                        sanitize_key(&plan.mod_name)
+                    );
+                    state_fields.push(mslot.clone());
+                    let at = cx.span_of(edge.span);
+                    let raw_escaped = escape(&edge.raw);
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{mslot}, Value::Module(rt::import_external(engine, \"{raw_escaped}\", {at})?))?;"
+                    );
+                    let w = format!("__wild{}", cx.fresh_id());
+                    let _ = writeln!(
+                        import_fills,
+                        "    let {w} = rt::wild_import(&rt::read(&__st.{mslot})?, {at})?;"
+                    );
+                    env.wildcards.push(w);
+                    let _ = writeln!(
+                        file_defines,
+                        "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                    );
+                    continue;
+                }
+                let stem = edge
+                    .target
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("m")
+                    .split('.')
+                    .next()
+                    .unwrap_or("m")
+                    .to_string();
+                import_edge_via_glue(
+                    cx,
+                    plan,
+                    edge,
+                    env,
+                    own,
+                    state_fields,
+                    import_fills,
+                    file_defines,
+                    Some(&stem),
+                );
+                continue;
+            };
+            let target_mod = &target_plan.mod_name;
             let exports = &export_table[edge.target.as_str()];
             match &edge.items {
                 ImportItems::Bare | ImportItems::Rename(_) => {

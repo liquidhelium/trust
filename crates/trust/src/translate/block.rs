@@ -207,16 +207,19 @@ impl Ctx {
                                 ))
                             }
                             _ => {
-                                self.diag(
-                                    str_expr.span(),
-                                    format!("体内 import \"{raw}\" 不在包文件集"),
-                                );
+                                // 世界可能仍能运行期解析:胶水(原版
+                                // file-not-found 自然承担)。
+                                let code =
+                                    self.in_body_import_glue(&stmt, import, &mut env);
+                                let _ = writeln!(out, "    {{ {code} }}");
                                 continue;
                             }
                         }
                     }
                     _ => {
-                        self.diag(source.span(), "体内 import 源暂只支持模块访问".into());
+                        // 区 1 胶水:任意源表达式经原版 Eval 分派。
+                        let code = self.in_body_import_glue(&stmt, import, &mut env);
+                        let _ = writeln!(out, "    {{ {code} }}");
                         continue;
                     }
                 };
@@ -566,6 +569,86 @@ impl Ctx {
                 String::new()
             }
         }
+    }
+
+
+    /// 体内 import 的区 1 胶水:语句原文经 `rt::eval_import` 驱动原版
+    /// `Eval for ast::ModuleImport`(源分派/校验/警告全原版);可见名
+    /// (局部 + 模块域)物化为 Vm 作用域,差集按静态可知的绑定名写回
+    /// 新的 Rust 局部。bare 动态源 expected 为空(原版运行期报
+    /// dynamic 错)。
+    fn in_body_import_glue(
+        &mut self,
+        stmt: &ast::Expr,
+        import: ast::ModuleImport,
+        env: &mut Env,
+    ) -> String {
+        use std::fmt::Write as _;
+        let stmt_text = stmt.to_untyped().full_text().to_string();
+        // 静态可知的绑定名(bare 的模块链/字面量名由上方快路径承担,
+        // 此处 bare 一律动态语义:expected 空,原版报错)。
+        let expected: Vec<String> = match import.imports() {
+            None => match import.new_name() {
+                Some(new_name) => vec![new_name.as_str().to_string()],
+                None => Vec::new(),
+            },
+            Some(ast::Imports::Items(items)) => items
+                .iter()
+                .map(|item| item.bound_name().as_str().to_string())
+                .collect(),
+            Some(ast::Imports::Wildcard) => {
+                // 通配的任意源:源表达式翻译求值 → 运行期层。
+                let source = import.source();
+                let value = self.expr(source, env);
+                let w = format!("__wild{}", self.fresh_id());
+                let at = self.span_of(stmt.span());
+                let code = format!("let {w} = rt::wild_import(&({value}), {at})?;");
+                env.wildcards.push(w);
+                return code;
+            }
+        };
+        // 可见名:局部 + 模块域(ref_value 需要 &mut self,先克隆表)。
+        let locals: Vec<(String, String)> = env.locals.clone();
+        let modules: Vec<(String, super::ctx::Ref)> = env.module.clone();
+        let mut caps: Vec<String> = locals
+            .iter()
+            .map(|(n, rust)| {
+                format!("(\"{}\", {rust}.clone())", super::naming::escape(n))
+            })
+            .collect();
+        caps.extend(modules.iter().map(|(n, r)| {
+            format!("\"{}\", {}", super::naming::escape(n), self.ref_value(r))
+        }));
+        let at = self.span_of(stmt.span());
+        let caps_lit = if caps.is_empty() {
+            "Vec::new()".to_string()
+        } else {
+            format!("vec![{}]", caps.join(", "))
+        };
+        let expected_lit = if expected.is_empty() {
+            "&[]".to_string()
+        } else {
+            format!(
+                "&[{}]",
+                expected
+                    .iter()
+                    .map(|n| format!("{n:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let mut binds = String::new();
+        let mut names = Vec::new();
+        for name in &expected {
+            let rust = bind_local(env, name);
+            names.push((name.clone(), rust));
+        }
+        for (i, (_, rust)) in names.iter().enumerate() {
+            let _ = write!(binds, "let mut {rust} = __imported[{i}].clone(); ");
+        }
+        format!(
+            "let __caps: Vec<(&'static str, Value)> = {caps_lit}; let __imported = rt::eval_import({stmt_text:?}, {at}, {expected_lit}, &__caps, engine, context)?; {binds} Value::None"
+        )
     }
 
     fn walk_place(

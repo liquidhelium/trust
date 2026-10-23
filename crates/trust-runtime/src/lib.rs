@@ -2248,53 +2248,72 @@ pub fn context_closure(
     pending: &[&'static str],
     engine: &mut Engine,
 ) -> Func {
-    // 定位缓存(**原始片段文本**为键,命中零格式化)。context 体是
-    // **表达式**(代码块或单一表达式),用 `parse_code` 取 Code 根下
-    // 的首个表达式——不能用 `#let` 包装源(其根下首个可 cast 节点是
-    // LetBinding 本身:求值会执行体,但返回值是 let 的 none,
-    // ContextElem 显示 none = 空内容,cetz 画布因此整体消失)。
-    // 解析与登记文本一律 trim(前后 trivia 会让"首个表达式节点"
-    // 取到 Space)。
+    let node = cached_body_node(body_src);
+    let scope = captured_scope(captured, pending, engine);
+    Func::from(Closure {
+        node: ClosureNode::Context(node.clone()),
+        defaults: vec![],
+        captured: scope,
+        num_pos_params: 0,
+    })
+}
+
+/// 片段源码 → AST 表达式节点(**原始片段文本**为键的定位缓存,命中
+/// 零格式化)。context 体是**表达式**(代码块或单一表达式),用
+/// `parse_code` 取 Code 根下的首个表达式——不能用 `#let` 包装源
+/// (其根下首个可 cast 节点是 LetBinding 本身:求值会执行体,但返回
+/// 值是 let 的 none,ContextElem 显示 none = 空内容,cetz 画布因此
+/// 整体消失)。解析与登记文本一律 trim(前后 trivia 会让"首个表达式
+/// 节点"取到 Space)。
+fn cached_body_node(body_src: &str) -> typst_syntax::SyntaxNode {
     static CACHE: std::sync::LazyLock<
         std::sync::RwLock<std::collections::HashMap<String, typst_syntax::SyntaxNode>>,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-    let node = if let Some(hit) = CACHE.read().unwrap().get(body_src) {
-        hit.clone()
-    } else {
-        let text = body_src.trim().to_string();
-        // 括号包裹后解析:片段脱离了原解析上下文——原处若在括号/块内
-        // (参数默认值、数组元素、代码块等),换行只是 trivia、表达式
-        // 跨行续接;顶层 `parse_code` 却在换行处终止表达式(仅 else/.
-        // 续接,对照 parser.rs AtNewline::ContextualContinue),多行体
-        // 会被截断成首个表达式(touying 页脚 `context a\n+ " / "\n+ b`
-        // 曾只剩 a)。包一对括号恢复 Continue 语义,再剥 Parenthesized
-        // 层取内层表达式(对照 typst-eval `Eval for ast::Contextual`
-        // 直接持有原位 body 节点的形态)。CLOSURE_SOURCES 登记包裹后
-        // 的文本,span 与源逐字节对应。
-        let wrapped = format!("({text})");
-        let root = typst_syntax::parse_code(&wrapped);
-        let first = root
-            .children()
-            .find(|child| child.cast::<ast::Expr>().is_some())
-            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"));
-        let node = match first.cast::<ast::Expr>() {
-            Some(ast::Expr::Parenthesized(paren)) => paren.expr().to_untyped().clone(),
-            _ => first.clone(),
-        };
-        let n = CLOSURE_SOURCES.read().unwrap().len();
-        let id = typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Project,
-            typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
-                .expect("valid closure path"),
-        )
-        .intern();
-        CLOSURE_SOURCES.write().unwrap().push((id, wrapped.clone()));
-        CACHE
-            .write()
-            .unwrap()
-            .insert(body_src.to_string(), node.clone());
-        node
+    if let Some(hit) = CACHE.read().unwrap().get(body_src) {
+        return hit.clone();
+    }
+    let text = body_src.trim().to_string();
+    // 括号包裹后解析:片段脱离了原解析上下文——原处若在括号/块内
+    //(参数默认值、数组元素、代码块等),换行只是 trivia、表达式
+    // 跨行续接;顶层 `parse_code` 却在换行处终止表达式(仅 else/.
+    // 续接,对照 parser.rs AtNewline::ContextualContinue),多行体
+    // 会被截断成首个表达式(touying 页脚 `context a\n+ " / "\n+ b`
+    // 曾只剩 a)。包一对括号恢复 Continue 语义,再剥 Parenthesized
+    // 层取内层表达式(对照 typst-eval `Eval for ast::Contextual`
+    // 直接持有原位 body 节点的形态)。CLOSURE_SOURCES 登记包裹后
+    // 的文本,span 与源逐字节对应。
+    let wrapped = format!("({text})");
+    let root = typst_syntax::parse_code(&wrapped);
+    let first = root
+        .children()
+        .find(|child| child.cast::<ast::Expr>().is_some())
+        .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"));
+    let node = match first.cast::<ast::Expr>() {
+        Some(ast::Expr::Parenthesized(paren)) => paren.expr().to_untyped().clone(),
+        _ => first.clone(),
     };
+    let n = CLOSURE_SOURCES.read().unwrap().len();
+    let id = typst::syntax::RootedPath::new(
+        typst::syntax::VirtualRoot::Project,
+        typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
+            .expect("valid closure path"),
+    )
+    .intern();
+    CLOSURE_SOURCES.write().unwrap().push((id, wrapped.clone()));
+    CACHE
+        .write()
+        .unwrap()
+        .insert(body_src.to_string(), node.clone());
+    node
+}
+
+/// 捕获作用域(pending 物化 + Captured 只读标;对照 eval_closure 的
+/// `scopes.top = closure.captured.clone()`)。
+fn captured_scope(
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+) -> Scope {
     let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
     resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();
@@ -2302,19 +2321,13 @@ pub fn context_closure(
         // 捕获绑定按 `Binding::capture` 打只读标(对照 typst 闭包的
         // captured 作用域):`context (i = 1)` 这类写捕获会由 typst
         // 求值器经 `Binding::write` 拒绝,报 "variables from outside
-        // the context expression are read-only..."。math 片段同经此
-        // 路径,但 math 不含赋值,不受影响。
+        // the context expression are read-only..."。
         scope.bind(
             (*name).into(),
             Binding::detached(value.clone()).capture(Capturer::Context),
         );
     }
-    Func::from(Closure {
-        node: ClosureNode::Context(node.clone()),
-        defaults: vec![],
-        captured: scope,
-        num_pos_params: 0,
-    })
+    scope
 }
 
 /// context 闭包的载体元素(对照 `ContextElem::new(func).pack()`;
@@ -2349,11 +2362,13 @@ pub fn eval_expr(
     func.call::<[Value; 0]>(engine, context, [])
 }
 
-/// 带导出的解释求值(math 嵌入 `#let` 的逃逸通道):合成包裹
-/// `{ let __v = (SRC); let __x = (n1, n2, ..); (__v, __x) }`——嵌入
-/// let 按原版语义绑定到包裹代码作用域,导出元组随后打包;生成侧把
-/// 导出写回块级提升槽。返回 (表达式值, 导出值序列)。
-pub fn eval_expr_exports(
+/// 带读回的解释求值(math 嵌入 `#let` 的逃逸通道):**直驱 pub 的
+/// `Vm`/`Eval`**(对照 eval_closure 的内部形态——以 captured 克隆为
+/// `scopes.top` 构造 Vm,求值后新绑定落在 top,`Scopes` 字段 pub 可
+/// 直接读回),零合成 typst 源、零导出元组——片段按原文求值,嵌入
+/// let 按 typst 语义绑进 top,我们与 typst 自身共用同一求值机制。
+/// 返回 (表达式值, 导出名绑定值序列)。
+pub fn eval_vm_exports(
     src: &str,
     exports: &[&str],
     captured: &[(&'static str, Value)],
@@ -2361,29 +2376,36 @@ pub fn eval_expr_exports(
     engine: &mut Engine,
     context: Tracked<Context>,
 ) -> SourceResult<(Value, Vec<Value>)> {
-    // 单元素元组须带尾逗号(`(sm)` 是括号表达式而非元组),统一
-    // 逐项后置逗号。
-    let export_tuple = exports
+    use typst_eval::{Eval as _, Vm};
+
+    let node = cached_body_node(src);
+    let expr = node
+        .cast::<ast::Expr>()
+        .expect("cached body node casts to an expression");
+    let scope = captured_scope(captured, pending, engine);
+    let mut scopes = Scopes::new(Some(engine.library));
+    scopes.top = scope;
+    // 与 eval_closure 同款的引擎/路由形态:字段全 pub,拷贝构造;
+    // 路由经 track+extend 共享深度计数(嵌套防护连续)。
+    let engine = Engine {
+        world: engine.world,
+        library: engine.library,
+        introspector: engine.introspector,
+        traced: engine.traced,
+        sink: TrackedMut::reborrow_mut(&mut engine.sink),
+        route: Route::extend(engine.route.track()),
+    };
+    let mut vm = Vm::new(engine, context, scopes, node.span());
+    let value = expr.eval(&mut vm)?;
+    let out = exports
         .iter()
-        .map(|n| format!("{n}, "))
-        .collect::<String>();
-    let wrapped = format!(
-        "{{ let __v = ({src}); let __x = ({export_tuple}); (__v, __x) }}",
-    );
-    let value = eval_expr(&wrapped, captured, pending, engine, context)?;
-    let typst::foundations::Value::Array(pair) = value else {
-        return Err(eco_vec![SourceDiagnostic::error(
-            Span::detached(),
-            "导出包裹未返回二元组(生成器 bug)",
-        )]);
-    };
-    let v = pair.at(0, None).at(Span::detached())?;
-    let x = pair.at(1, None).at(Span::detached())?;
-    let typst::foundations::Value::Array(items) = x else {
-        return Err(eco_vec![SourceDiagnostic::error(
-            Span::detached(),
-            "导出元组形态不对(生成器 bug)",
-        )]);
-    };
-    Ok((v, items.iter().cloned().collect()))
+        .map(|name| {
+            vm.scopes
+                .top
+                .get(name)
+                .map(|b| b.read().clone())
+                .unwrap_or(Value::None)
+        })
+        .collect();
+    Ok((value, out))
 }

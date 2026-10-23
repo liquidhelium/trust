@@ -479,12 +479,12 @@ impl Ctx {
                         .join(" ");
                     if captured.is_empty() {
                         return format!(
-                            "{{ let __mx = rt::eval_expr_exports({src:?}, {names_lit}, &[], {pending_lit}, engine, context)?; {writes} __mx.0 }}"
+                            "{{ let __mx = rt::eval_vm_exports({src:?}, {names_lit}, &[], {pending_lit}, engine, context)?; {writes} __mx.0 }}"
                         );
                     }
                     let init = format!("vec![{}]", captured.join(", "));
                     return format!(
-                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; let __mx = rt::eval_expr_exports({src:?}, {names_lit}, &__caps, {pending_lit}, engine, context)?; {writes} __mx.0 }}"
+                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; let __mx = rt::eval_vm_exports({src:?}, {names_lit}, &__caps, {pending_lit}, engine, context)?; {writes} __mx.0 }}"
                     );
                 }
                 if captured.is_empty() {

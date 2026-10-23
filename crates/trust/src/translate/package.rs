@@ -123,6 +123,15 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             );
             continue;
         };
+        let mut mutated_roots = Vec::new();
+        collect_mutated_roots(source.root(), &mut mutated_roots);
+        let parse_diags = source
+            .root()
+            .errors_and_warnings()
+            .0
+            .into_iter()
+            .map(|d| d.message.to_string())
+            .collect::<Vec<_>>();
         let stem = path
             .rsplit('/')
             .next()
@@ -321,6 +330,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             }
         }
         plans.push(FilePlan {
+            parse_diags,
+            mutated_roots,
             path: path.clone(),
             mod_name,
             markup,
@@ -357,6 +368,22 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let order = topo_order(&plans);
     let export_table = build_export_table(&plans, &order, &input.dep_entries);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
+
+    // 可变槽:被就地修改的根名并集,标记各计划自身定义的同名槽
+    // (对照 typst 顶层绑定可就地修改的语义;跨文件导入名不改本槽)。
+    {
+        let roots: std::collections::HashSet<String> = plans
+            .iter()
+            .flat_map(|p| p.mutated_roots.iter().cloned())
+            .collect();
+        for p in &plans {
+            for (name, slot) in &p.tops {
+                if roots.contains(name) {
+                    cx.mutable_slots.insert(slot.clone());
+                }
+            }
+        }
+    }
 
     // 槽名→文件索引(第二遍开始前一次性构建,体内模块值链通配用):
     // 槽名→文件索引(一次性构建,体内模块值链通配用):
@@ -680,12 +707,26 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     own.push((name.as_str().to_string(), slot.clone()));
                 }
                 ast::LetBindingKind::Normal(pattern) => {
-                    let Some(init_expr) = lets.init() else {
+                    // 无初值声明(`#let x`):绑定 none(对照 typst-eval
+                    // LetBinding 无 init 的 define(name, None))。
+                    let Some(init_expr) = lets.init().map(|e| e) else {
                         if let Some(name) = pattern.bindings().first() {
-                            cx.diag(
-                                lets.span(),
-                                format!("顶层 `#let {}` 缺少初始化", name.as_str()),
-                            );
+                            let nth = own_seen_counts.get(name.as_str()).copied().unwrap_or(0);
+                            own_seen_counts.insert(name.as_str().to_string(), nth + 1);
+                            if let Some(slot) = nth_slot(plan, name.as_str(), nth) {
+                                let fill_none = if cx.mutable_slots.contains(&slot) {
+                                    format!("rt::fill_ms(&__st.{slot}, Value::None)?")
+                                } else {
+                                    format!("rt::fill(&__st.{slot}, Value::None)?")
+                                };
+                                let _ = writeln!(binding_code, "    {fill_none};");
+                                let _ = writeln!(
+                                    file_defines,
+                                    "    scope.define(\"{}\", Value::None);",
+                                    escape(name.as_str())
+                                );
+                                own.push((name.as_str().to_string(), slot));
+                            }
                         }
                         continue;
                     };
@@ -712,13 +753,23 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     // 类型),env2 不含本绑定。
                     if let [(name, slot)] = bound.as_slice() {
                         let value = cx.expr(init_expr, &env2);
+                        let fill_call = if cx.mutable_slots.contains(slot) {
+                            format!("rt::fill_ms(&__st.{slot}, v.clone())?")
+                        } else {
+                            format!("rt::fill(&__st.{slot}, v.clone())?")
+                        };
+                        let read_call = if cx.mutable_slots.contains(slot) {
+                            format!("rt::read_ms(&__st.{slot})?")
+                        } else {
+                            format!("rt::read(&__st.{slot})?")
+                        };
                         let _ = writeln!(
                             binding_code,
-                            "    {{ let v = {value}; rt::fill(&__st.{slot}, v.clone())?; }}"
+                            "    {{ let v = {value}; {fill_call}; }}"
                         );
                         let _ = writeln!(
                             file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            "    scope.define(\"{}\", {read_call});",
                             escape(name)
                         );
                     } else {
@@ -776,11 +827,31 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             "\n    #[allow(non_snake_case, dead_code)]\n    pub(crate) fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
             plan.path
         );
+        // 解析诊断(对照官方 compile parse 阶段):首条错误即 bail;
+        // 多条时信息集合口径的差由错误测试自然承载。
+        let parse_guard = if plan.parse_diags.is_empty() {
+            String::new()
+        } else {
+            let msgs: Vec<String> = plan
+                .parse_diags
+                .iter()
+                .map(|m| format!("{m:?}"))
+                .collect();
+            // 多条解析诊断一次带全(Err 携 EcoVec;对照官方 compile
+            // 的 parse 阶段收集行为——单条 bail 曾让多错误测试失配)。
+            format!(
+                "        return Err(eco_vec![{}]);\n",
+                msgs.iter()
+                    .map(|m| format!("typst::diag::SourceDiagnostic::error(file_span(), ecow::eco_format!(\"{{}}\", {m}))"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let _ = writeln!(
             body,
             "\n    /// `{}` 的求值:填 import 槽与自身绑定槽(模块求值的镜像)。\n\
              \x20   pub(super) fn eval(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
-             \x20       let _ = (&*engine, context);\n{import_fills}{binding_code}        Ok(())\n    }}",
+             \x20       let _ = (&*engine, context);\n{parse_guard}{import_fills}{binding_code}        Ok(())\n    }}",
             plan.path
         );
         let _ = writeln!(
@@ -887,7 +958,12 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let mut seen_fields = std::collections::BTreeSet::new();
     for slot in &state_fields {
         if seen_fields.insert(slot.clone()) {
-            let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
+            let ty = if cx.mutable_slots.contains(slot) {
+                "std::sync::Mutex<Value>"
+            } else {
+                "std::sync::OnceLock<Value>"
+            };
+            let _ = writeln!(fields, "    {slot}: {ty},");
         }
     }
 
@@ -1094,6 +1170,49 @@ fn dedent4(s: &str) -> String {
 }
 
 
+
+/// 收集被就地修改的绑定根名:可变方法调用(push/pop/insert/remove)
+/// 与赋值/复合赋值的目标根标识符(对照 typst 的 access 可变语义——
+/// 模块绑定同样可就地修改)。
+pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
+    use typst_syntax::SyntaxKind as K;
+    if let Some(fc) = node.cast::<typst_syntax::ast::FuncCall>()
+        && let typst_syntax::ast::Expr::FieldAccess(access) = fc.callee()
+        && matches!(access.field().as_str(), "push" | "pop" | "insert" | "remove")
+    {
+        if let Some(root) = place_root(access.target().to_untyped()) {
+            out.push(root);
+        }
+    }
+    if let Some(bin) = node.cast::<typst_syntax::ast::Binary>()
+        && matches!(
+            bin.op(),
+            typst_syntax::ast::BinOp::Assign
+                | typst_syntax::ast::BinOp::AddAssign
+                | typst_syntax::ast::BinOp::SubAssign
+                | typst_syntax::ast::BinOp::MulAssign
+                | typst_syntax::ast::BinOp::DivAssign
+        )
+        && let Some(root) = place_root(bin.lhs().to_untyped())
+    {
+        out.push(root);
+    }
+    for child in node.children() {
+        collect_mutated_roots(child, out);
+    }
+}
+
+/// 可放路径的根名(Ident 或以 Ident 开头的字段链;其余形态 None)。
+fn place_root(node: &typst_syntax::SyntaxNode) -> Option<String> {
+    use typst_syntax::ast::AstNode;
+    if let Some(ident) = node.cast::<typst_syntax::ast::Ident>() {
+        return Some(ident.as_str().to_string());
+    }
+    if let Some(access) = node.cast::<typst_syntax::ast::FieldAccess>() {
+        return place_root(access.target().to_untyped());
+    }
+    None
+}
 
 /// 文件的依赖闭包(含自身),依赖在前(与 topo_order 的访问一致,
 /// include 边亦为依赖)。

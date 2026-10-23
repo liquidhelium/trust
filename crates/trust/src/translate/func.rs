@@ -150,6 +150,7 @@ pub(super) fn gen_closure_fn(
     let saved = self.used_state;
     self.used_state = false;
     self.in_fn += 1;
+    self.in_closure += 1;
 
     // 先绑定捕获名(体的自由名解析到这些局部)。
     for name in capture_names {
@@ -243,6 +244,7 @@ pub(super) fn gen_closure_fn(
     //(勿在此恢复——外层再读会被污染,创建元组与序言形态不一致)。
     let has_st = self.used_state;
     self.in_fn -= 1;
+    self.in_closure = self.in_closure.saturating_sub(1);
 
     // 状态元组与解包序言(has_st 后置判定)。自递归闭包:���部追加
     // SelfFuncCell(自身 stub 的每实例一次重建缓存),序言保留槽。

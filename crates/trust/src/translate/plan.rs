@@ -12,6 +12,14 @@ pub(super) struct FilePlan<'a> {
     pub(super) path: String,
     pub(super) mod_name: String,
     pub(super) markup: ast::Markup<'a>,
+    /// 解析诊断(typst-syntax errors_and_warnings 的错误信息;对照
+    /// 官方 compile 的 parse 阶段——lenient 翻译曾静默吞掉错误节点,
+    /// 解析类错误测试假绿,eval 头部按首条 bail)。
+    pub(super) parse_diags: Vec<String>,
+    /// 被就地修改的顶层绑定根名(可变方法 push/pop/insert/remove 的
+    /// 目标根、复合赋值的目标根):这些绑定发射为可变槽
+    /// (std::sync::Mutex),读点/填点/修改点走 *_ms 助手。
+    pub(super) mutated_roots: Vec<String>,
     pub(super) tops: Vec<(String, String)>,
     pub(super) imports: Vec<ImportEdge>,
 }

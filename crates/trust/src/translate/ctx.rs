@@ -51,6 +51,12 @@ pub(super) struct Ctx {
     /// 循环嵌套深度(break/continue 循环外形态的翻译期判定,
     /// scripting-loop 错误测试驱动)。
     pub(super) in_loop: usize,
+    /// 可变槽集合(被就地修改的顶层绑定槽名):读点走 read_ms、
+    /// 填点走 fill_ms、修改点读改写回(write_ms)。
+    pub(super) mutable_slots: std::collections::HashSet<String>,
+    /// 闭包体翻译中(闭包按需携带 __st,模块槽直接引用不可用;
+    /// 对照 typst:闭包改捕获名本就报错,留给诊断承载)。
+    pub(super) in_closure: usize,
     /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
     /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
     /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
@@ -122,6 +128,8 @@ impl Ctx {
             used_state: false,
             in_fn: 0,
             in_loop: 0,
+            mutable_slots: std::collections::HashSet::new(),
+            in_closure: 0,
             closure_dedup: std::collections::HashMap::new(),
             next_closure_id: 0,
             closure_items: String::new(),
@@ -201,6 +209,9 @@ impl Ctx {
     pub(super) fn ref_value(&mut self, module_ref: &Ref) -> String {
         self.used_state = true;
         match module_ref {
+            Ref::Slot(id) if self.mutable_slots.contains(id) => {
+                format!("rt::read_ms(&__st.{id})?")
+            }
             Ref::Slot(id) => format!("rt::read(&__st.{id})?"),
             Ref::ModuleField { expr, name, .. } => {
                 field_access_chain(expr, name)

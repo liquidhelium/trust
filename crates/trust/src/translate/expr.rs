@@ -356,6 +356,55 @@ impl Ctx {
             // 缺口;其余子集外表达式仍走诊断降级)。自由标识符(含
             // 数学名)按闭包同款捕获分析物化。
             ast::Expr::Label(l) => format!("rt::label({:?})", l.get()),
+            ast::Expr::Heading(h) => {
+                // `= body`(depth = 等号数):对照 Eval for ast::Heading。
+                let items: Vec<ContentItem> = h
+                    .body()
+                    .exprs()
+                    .map(ContentItem::Part)
+                    .collect();
+                let body = self.content_seq(&items, env);
+                format!("Value::Content(rt::heading({body}, {}))", h.depth())
+            }
+            ast::Expr::ListItem(li) => {
+                let items: Vec<ContentItem> = li
+                    .body()
+                    .exprs()
+                    .map(ContentItem::Part)
+                    .collect();
+                let body = self.content_seq(&items, env);
+                format!("Value::Content(rt::list_item({body}))")
+            }
+            ast::Expr::EnumItem(ei) => {
+                let items: Vec<ContentItem> = ei
+                    .body()
+                    .exprs()
+                    .map(ContentItem::Part)
+                    .collect();
+                let body = self.content_seq(&items, env);
+                let num = match ei.number() {
+                    Some(n) => format!("Some({n}u64)"),
+                    None => "None".to_string(),
+                };
+                format!("Value::Content(rt::enum_item({body}, {num}))")
+            }
+            ast::Expr::TermItem(ti) => {
+                let term: Vec<ContentItem> =
+                    ti.term().exprs().map(ContentItem::Part).collect();
+                let desc: Vec<ContentItem> =
+                    ti.description().exprs().map(ContentItem::Part).collect();
+                let term = self.content_seq(&term, env);
+                let desc = self.content_seq(&desc, env);
+                format!("Value::Content(rt::term_item({term}, {desc}))")
+            }
+            ast::Expr::Link(l) => {
+                // 标记裸链接:对照 Eval for ast::Link(Url::new 可错)。
+                let at = self.span_of(l.span());
+                format!(
+                    "Value::Content(rt::link({:?}, {at})?)",
+                    l.get().to_string()
+                )
+            }
             ast::Expr::Ref(r) => {
                 // `@target` 引用缩写(对照 Eval for ast::Ref → RefElem;
                 // supplement 为 `[...]` 补充内容,值经 display 内容化)。
@@ -493,6 +542,17 @@ impl Ctx {
                     let args = self.gen_args(call.args(), env, &at);
                     return format!(
                         "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut(engine, __place, \"{}\", __mut_args, {at})? }}",
+                        escape(field)
+                    );
+                }
+                if let Some((mslot, mpath)) = self.parse_place_slot(access.target(), env) {
+                    // 可变模块槽:读改写回(就地修改语义);体引用
+                    // __st 须置 used_state(函数序言按它带状态)。
+                    self.used_state = true;
+                    let path_lit = super::block::place_path_lit(&mpath);
+                    let args = self.gen_args(call.args(), env, &at);
+                    return format!(
+                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let mut __msv = rt::read_ms(&__st.{mslot})?; let __place = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __r = rt::method_mut(engine, __place, \"{}\", __mut_args, {at})?; rt::write_ms(&__st.{mslot}, __msv)?; __r }}",
                         escape(field)
                     );
                 }
@@ -954,7 +1014,7 @@ impl Ctx {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("rt::attach_labels(vec![{items}])")
+            format!("{{ let __items = vec![{items}]; rt::attach_labels(engine, __items) }}")
         }
     }
 

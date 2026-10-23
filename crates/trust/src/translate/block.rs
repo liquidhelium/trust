@@ -361,7 +361,34 @@ impl Ctx {
             {
                 // 目标:局部变量(空路径)或可变位置(字段/accessor 链),
                 // 对照 typst 的 `Expr::access`;复合赋值读旧值再写回。
-                if let Some((root, path)) = self.parse_place(binary.lhs(), &env) {
+                if let Some((mslot, mpath)) = self.parse_place_slot(binary.lhs(), &env) {
+                    // 可变模块槽:读改写回(对照 typst 顶层绑定的就地
+                    // 修改语义);体引用 __st 须置 used_state。
+                    self.used_state = true;
+                    let path_lit = place_path_lit(&mpath);
+                    let at = self.span_of(binary.span());
+                    let rhs = self.expr(binary.rhs(), &env);
+                    let op = match binary.op() {
+                        ast::BinOp::Assign => "assign",
+                        ast::BinOp::AddAssign => "add",
+                        ast::BinOp::SubAssign => "sub",
+                        ast::BinOp::MulAssign => "mul",
+                        ast::BinOp::DivAssign => "div",
+                        _ => unreachable!(),
+                    };
+                    let body = match op {
+                        "assign" => format!(
+                            "let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; *__p = __rhs;"
+                        ),
+                        o => format!(
+                            "let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{o}(__old, __rhs).at({at})?;"
+                        ),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "    {{ let __rhs = {rhs}; let mut __msv = rt::read_ms(&__st.{mslot})?; {body} rt::write_ms(&__st.{mslot}, __msv)?; }}"
+                    );
+                } else if let Some((root, path)) = self.parse_place(binary.lhs(), &env) {
                     let path_lit = place_path_lit(&path);
                     let at = self.span_of(binary.span());
                     let rhs = self.expr(binary.rhs(), &env);
@@ -442,6 +469,35 @@ impl Ctx {
         let root = root?;
         let (_, rust) = env.locals.iter().rev().find(|(n, _)| *n == root)?;
         Some((rust.clone(), segs))
+    }
+
+    /// 可变**模块槽**放路径:根为被标记可变的顶层槽,返回(槽名,路径)。
+    /// 修改点用读改写回(read_ms → place_mut → write_ms)。
+    pub(super) fn parse_place_slot(
+        &mut self,
+        expr: ast::Expr,
+        env: &Env,
+    ) -> Option<(String, Vec<String>)> {
+        let mut segs = Vec::new();
+        let mut root: Option<String> = None;
+        if !self.walk_place(expr, env, &mut segs, &mut root) {
+            return None;
+        }
+        let root = root?;
+        match env
+            .module
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == root)
+            .map(|(_, r)| r)
+        {
+            Some(super::ctx::Ref::Slot(s))
+                if self.mutable_slots.contains(s) && self.in_closure == 0 =>
+            {
+                Some((s.clone(), segs))
+            }
+            _ => None,
+        }
     }
 
     fn walk_place(

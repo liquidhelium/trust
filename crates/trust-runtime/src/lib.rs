@@ -289,10 +289,20 @@ fn state_error(message: &str) -> EcoVec<SourceDiagnostic> {
 
 /// 读一个顶层绑定槽(写一次单元)。
 pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
-    slot.get()
-        .cloned()
-        .ok_or_else(|| state_error("模块槽未初始化(求值序错误)"))
-}
+        if let Some(v) = slot.get() {
+            if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
+                eprintln!("[slot] read-ok  @{:?}", std::ptr::from_ref(slot));
+            }
+            return Ok(v.clone());
+        }
+        if std::env::var_os("TRUST_SLOT_PANIC").is_some() {
+            panic!("slot-unfilled @{:?}", std::ptr::from_ref(slot));
+        }
+        Err(state_error(&format!(
+            "模块槽未初始化(求值序错误,槽@{:?})",
+            std::ptr::from_ref(slot)
+        )))
+    }
 
 /// 读创建期物化的全局名槽:有值读槽(对照 typst 创建期捕获),
 /// 无值回退调用期全局查找(对照创建期不可见名字的调用期解析)。
@@ -318,6 +328,9 @@ pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> 
 /// 填一个顶层绑定槽。首填成功即定;重入(如 `module_init` 因模块缓存
 /// 驱逐而重新求值)时同值幂等跳过,不同值仍是生成器 bug,明确报错。
 pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
+    if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
+        eprintln!("[slot] fill    @{:?}", std::ptr::from_ref(slot));
+    }
     match slot.get() {
         Some(existing) => {
             if *existing == value {
@@ -738,22 +751,90 @@ pub fn smartquote(double: bool) -> typst::foundations::Content {
 /// 不可见——glossarium 驱动:`<glossarium:make-glossary>` 查询空致
 /// "make-glossary not called"),其余值经 display 入序,末按
 /// Content::sequence 折叠。
-pub fn attach_labels(items: Vec<Value>) -> typst::foundations::Content {
+pub fn attach_labels(
+    engine: &mut Engine,
+    items: Vec<Value>,
+) -> typst::foundations::Content {
     let mut seq: Vec<typst::foundations::Content> = Vec::with_capacity(items.len());
     for item in items {
         if let Value::Label(label) = item {
+            // 对照 eval_markup 的标签贴附双警告:已贴过 → "content
+            // labelled multiple times";序列无可贴元素 → "label `x` is
+            // not attached to anything"(label-unattached-warn 驱动;
+            // 警告 span 取元素/分离位,信息比对不看位置)。
             if let Some(elem) = seq
                 .iter_mut()
                 .rev()
                 .find(|n| !n.can::<dyn typst::foundations::Unlabellable>())
             {
+                if elem.label().is_some() {
+                    engine.sink.warn(typst::diag::warning!(
+                        elem.span(),
+                        "content labelled multiple times";
+                        hint: "only the last label is used, the rest are ignored";
+                    ));
+                }
                 *elem = std::mem::take(elem).labelled(label);
+            } else {
+                engine.sink.warn(typst::diag::warning!(
+                    Span::detached(),
+                    "label `{}` is not attached to anything",
+                    format!("<{}>", label.resolve()),
+                ));
             }
         } else {
             seq.push(item.display());
         }
     }
     typst::foundations::Content::sequence(seq)
+}
+
+/// `= body`(depth 级标题):对照 eval_markup 的
+/// `HeadingElem::new(body).with_depth(depth).pack()`。
+pub fn heading(body: typst::foundations::Content, depth: usize) -> typst::foundations::Content {
+    use typst::foundations::NativeElement;
+    // ast::Heading::depth() = 等号数(≥1 的 NonZero),直传。
+    let depth = std::num::NonZeroUsize::new(depth.max(1)).expect("depth >= 1");
+    typst::model::HeadingElem::new(body)
+        .with_depth(depth)
+        .pack()
+}
+
+/// `- body` 列表项:对照 `ListItem::new(body).pack()`(连续项由
+/// realize 期分组进 List,无需翻译侧聚合)。
+pub fn list_item(body: typst::foundations::Content) -> typst::foundations::Content {
+    use typst::foundations::NativeElement;
+    typst::model::ListItem::new(body).pack()
+}
+
+/// `+ body` 枚举项(number 为 `+3.` 形态的显式序号)。
+pub fn enum_item(
+    body: typst::foundations::Content,
+    number: Option<u64>,
+) -> typst::foundations::Content {
+    use typst::foundations::{NativeElement, Smart};
+    let mut elem = typst::model::EnumItem::new(body);
+    if let Some(n) = number {
+        elem.number.set(Smart::Custom(n));
+    }
+    elem.pack()
+}
+
+/// `/ term: desc` 词条项。
+pub fn term_item(
+    term: typst::foundations::Content,
+    description: typst::foundations::Content,
+) -> typst::foundations::Content {
+    use typst::foundations::NativeElement;
+    typst::model::TermItem::new(term, description).pack()
+}
+
+/// 标记里的裸链接(`https://…`):对照 `Url::new(...)` +
+/// `LinkElem::from_url(url).pack()`。
+pub fn link(url: &str, at: Span) -> SourceResult<typst::foundations::Content> {
+    use typst::foundations::NativeElement;
+    let url = typst::model::Url::new(url.to_string()).at(at)?;
+    Ok(typst::model::LinkElem::from_url(url).pack())
 }
 
 /// `*body*`:对照 eval_markup 的 `StrongElem::new(body).pack()`。
@@ -1983,6 +2064,21 @@ pub fn ref_elem(target: &str, supplement: Option<Value>) -> typst::foundations::
         typst::foundations::Value::Content(c) => c,
         _ => unreachable!("RefElem packs to content"),
     }
+}
+
+/// 可变模块槽助手(被就地修改的顶层绑定,槽为 Mutex<Value>)。
+pub fn fill_ms(slot: &std::sync::Mutex<Value>, v: Value) -> SourceResult<()> {
+    *slot.lock().unwrap() = v;
+    Ok(())
+}
+
+pub fn read_ms(slot: &std::sync::Mutex<Value>) -> SourceResult<Value> {
+    Ok(slot.lock().unwrap().clone())
+}
+
+pub fn write_ms(slot: &std::sync::Mutex<Value>, v: Value) -> SourceResult<()> {
+    *slot.lock().unwrap() = v;
+    Ok(())
 }
 
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for

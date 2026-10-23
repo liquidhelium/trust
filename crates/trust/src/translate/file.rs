@@ -211,7 +211,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 pattern: None,
             } => {
                 let (name, slot) = &top.names[0];
-                let expr = cx.expr(*init, &init_env);
+                let mut ie = init_env.clone();
+                let expr = cx.expr(*init, &mut ie);
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = {expr}; rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",
@@ -225,7 +226,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 // 顶层解构:槽名预绑为临时局部,destructure 经
                 // assign=true(写既有目标)写回这些名字,再逐槽填充
                 // 注册——块的 let 遮蔽语义不适用于此(名字即槽别名)。
-                let expr = cx.expr(*init, &init_env);
+                let mut ie = init_env.clone();
+                let expr = cx.expr(*init, &mut ie);
                 let mut tmp_env = init_env.clone();
                 let mut decls = String::new();
                 for (name, slot) in &top.names {
@@ -307,7 +309,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     ));
                 }
                 init_code.push_str(&g_code);
-                items.push_str(&cx.gen_function(&fun, slot, *closure, &g_env));
+                items.push_str(&cx.gen_function(&fun, slot, *closure, &mut g_env));
                 items.push_str(&gen_func_data(&data, &fun, name, *closure));
                 // 默认值创建期物化(对照 typst:闭包创建时逐参数求值)。
                 // 同批表达式进 stub 的 defaults——求值点即闭包值创建
@@ -320,7 +322,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         let pname = named.name().as_str();
                         let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
                         let _ = writeln!(fields, "    {def_slot}: std::sync::OnceLock<Value>,");
-                        let value = cx.expr(named.expr(), &init_env);
+                        let mut ie2 = init_env.clone();
+                        let value = cx.expr(named.expr(), &mut ie2);
                         defaults.push(format!(
                             "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
                         ));

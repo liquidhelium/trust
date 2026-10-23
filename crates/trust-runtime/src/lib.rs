@@ -2348,3 +2348,42 @@ pub fn eval_expr(
     let func = context_closure(src, captured, pending, engine);
     func.call::<[Value; 0]>(engine, context, [])
 }
+
+/// 带导出的解释求值(math 嵌入 `#let` 的逃逸通道):合成包裹
+/// `{ let __v = (SRC); let __x = (n1, n2, ..); (__v, __x) }`——嵌入
+/// let 按原版语义绑定到包裹代码作用域,导出元组随后打包;生成侧把
+/// 导出写回块级提升槽。返回 (表达式值, 导出值序列)。
+pub fn eval_expr_exports(
+    src: &str,
+    exports: &[&str],
+    captured: &[(&'static str, Value)],
+    pending: &[&'static str],
+    engine: &mut Engine,
+    context: Tracked<Context>,
+) -> SourceResult<(Value, Vec<Value>)> {
+    // 单元素元组须带尾逗号(`(sm)` 是括号表达式而非元组),统一
+    // 逐项后置逗号。
+    let export_tuple = exports
+        .iter()
+        .map(|n| format!("{n}, "))
+        .collect::<String>();
+    let wrapped = format!(
+        "{{ let __v = ({src}); let __x = ({export_tuple}); (__v, __x) }}",
+    );
+    let value = eval_expr(&wrapped, captured, pending, engine, context)?;
+    let typst::foundations::Value::Array(pair) = value else {
+        return Err(eco_vec![SourceDiagnostic::error(
+            Span::detached(),
+            "导出包裹未返回二元组(生成器 bug)",
+        )]);
+    };
+    let v = pair.at(0, None).at(Span::detached())?;
+    let x = pair.at(1, None).at(Span::detached())?;
+    let typst::foundations::Value::Array(items) = x else {
+        return Err(eco_vec![SourceDiagnostic::error(
+            Span::detached(),
+            "导出元组形态不对(生成器 bug)",
+        )]);
+    };
+    Ok((v, items.iter().cloned().collect()))
+}

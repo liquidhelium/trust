@@ -11,7 +11,7 @@ use typst_syntax::ast::{self, AstNode};
 
 use super::captures::collect_idents;
 use super::ctx::{Ctx, Env};
-use super::naming::escape;
+use super::naming::{escape, sanitize_key};
 
 /// `ast::Unit` → Rust 变体名的显式映射(不依赖 Debug 输出形态,
 /// typst 改名即编译错,而非静默错值)。
@@ -49,7 +49,7 @@ pub(super) enum ContentItem<'a> {
 
 impl Ctx {
     /// 表达式直译:返回类型为 `Value` 的 Rust 表达式(可含 `?`)。
-    pub(super) fn expr(&mut self, expr: ast::Expr, env: &Env) -> String {
+    pub(super) fn expr(&mut self, expr: ast::Expr, env: &mut Env) -> String {
         match expr {
             ast::Expr::Ident(ident) => self.ident(ident, env),
             ast::Expr::None(_) => "Value::None".into(),
@@ -97,6 +97,13 @@ impl Ctx {
                 let mut env2 = env.clone();
                 let stmts = self.destructure(assign.pattern(), value, &mut env2, true);
                 format!("{{ {} Value::None }}", stmts)
+            }
+            ast::Expr::LetBinding(lets) => {
+                // 表达式位置 `let`(对照 `Eval for ast::LetBinding`:init
+                // 先求,再绑定,值为 none):绑定名在**位点**压入 env(位点
+                // 前的引用仍解析外层),值写块顶提升槽(扫描期登记,
+                // 见 block/content_part 的扫描;未扫描上下文降级)。
+                self.let_expr(lets, env)
             }
             ast::Expr::ContentBlock(block) => {
                 // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
@@ -348,7 +355,8 @@ impl Ctx {
                     }
                 };
                 self.in_loop += 1;
-                let body = self.expr(for_loop.body(), &body_env);
+                let mut body_env = body_env;
+                let body = self.expr(for_loop.body(), &mut body_env);
                 self.in_loop -= 1;
                 let iter_at = self.span_of(for_loop.iterable().span());
                 let join_at = self.span_of(for_loop.body().span());
@@ -432,6 +440,53 @@ impl Ctx {
                 collect_idents(expr.to_untyped(), &mut Vec::new(), &mut names);
                 let (captured, pending) = self.capture_entries(&names, env);
                 let pending_lit = pending_list(&pending);
+                // 嵌入 `#let`(math 内代码嵌入)按原版逃逸到外围代码
+                // 作用域:经导出包裹解释求值,导出写回块级提升槽
+                //(名字须已在提升面——块扫描对 Equation 下行)。
+                let mut lets: Vec<String> = Vec::new();
+                scan_let_exprs(expr.to_untyped(), &mut lets);
+                let frame = self.let_hoists.last().cloned();
+                let export_slots: Vec<(String, String)> = match frame {
+                    Some(ref map)
+                        if !lets.is_empty()
+                            && lets
+                                .iter()
+                                .all(|n| map.contains_key(n)) =>
+                    {
+                        lets.iter()
+                            .map(|n| (n.clone(), map[n].clone()))
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                };
+                if !export_slots.is_empty() {
+                    for (name, rust) in &export_slots {
+                        env.locals.push((name.clone(), rust.clone()));
+                    }
+                    let names_lit = format!(
+                        "&[{}]",
+                        export_slots
+                            .iter()
+                            .map(|(n, _)| format!("{n:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    let writes = export_slots
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, rust))| format!("{rust} = __mx.1[{i}].clone();"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if captured.is_empty() {
+                        return format!(
+                            "{{ let __mx = rt::eval_expr_exports({src:?}, {names_lit}, &[], {pending_lit}, engine, context)?; {writes} __mx.0 }}"
+                        );
+                    }
+                    let init = format!("vec![{}]", captured.join(", "));
+                    return format!(
+                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; let __mx = rt::eval_expr_exports({src:?}, {names_lit}, &__caps, {pending_lit}, engine, context)?; {writes} __mx.0 }}"
+                    );
+                }
                 if captured.is_empty() {
                     format!("rt::eval_expr({src:?}, &[], {pending_lit}, engine, context)?")
                 } else {
@@ -454,7 +509,88 @@ impl Ctx {
         }
     }
 
-    fn ident(&mut self, ident: ast::Ident, env: &Env) -> String {
+    /// 表达式位置 `let` 的发射(对照 `Eval for ast::LetBinding`:init
+    /// 先求、再绑定、值为 none):绑定名在**位点**压入 env(位点前的
+    /// 引用仍解析外层),值写外层作用域登记的提升槽。
+    fn let_expr(&mut self, lets: ast::LetBinding, env: &mut Env) -> String {
+        let names: Vec<String> = match lets.kind() {
+            ast::LetBindingKind::Closure(name) => vec![name.as_str().to_string()],
+            ast::LetBindingKind::Normal(pattern) => pattern
+                .bindings()
+                .iter()
+                .map(|i| i.as_str().to_string())
+                .collect(),
+        };
+        // 提升槽须由外层可扫描作用域(块/裸表达式函数体/内容项)登记;
+        // 未登记(content 序列跨项等)降级。
+        let Some(map) = self.let_hoists.last().cloned() else {
+            self.diag(lets.span(), "此位置的 let 绑定暂不支持(作用域未扫描)".into());
+            return "Value::None".into();
+        };
+        let hoisted: Vec<(String, String)> = match names
+            .iter()
+            .map(|n| map.get(n).map(|r| (n.clone(), r.clone())))
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(v) => v,
+            None => {
+                self.diag(lets.span(), "此位置的 let 绑定暂不支持(未入扫描面)".into());
+                return "Value::None".into();
+            }
+        };
+        // init 先求(绑定生效前,同名引用解析外层)。
+        let init = match lets.init() {
+            Some(e) => self.expr(e, env),
+            None => "Value::None".into(),
+        };
+        match lets.kind() {
+            ast::LetBindingKind::Closure(name) => {
+                let (_, rust) = hoisted[0].clone();
+                env.locals.push((name.as_str().to_string(), rust.clone()));
+                format!("{{ {rust} = {init}; Value::None }}")
+            }
+            ast::LetBindingKind::Normal(pattern) => {
+                // 模式名先全部指向提升槽(destructure 的 assign 叶子经
+                // classify 找到它们),再按模式写入。
+                for (name, rust) in &hoisted {
+                    env.locals.push((name.clone(), rust.clone()));
+                }
+                let stmts = self.destructure(pattern, init, env, true);
+                format!("{{ {} Value::None }}", stmts)
+            }
+        }
+    }
+
+    /// 开一层提升槽帧(扫描给定语句/表达式根集),返回声明代码;
+    /// 帧由 [`Self::close_let_hoists`] 关闭。
+    pub(super) fn open_let_hoists<'n>(
+        &mut self,
+        roots: impl Iterator<Item = &'n typst_syntax::SyntaxNode>,
+    ) -> String {
+        let mut names: Vec<String> = Vec::new();
+        for root in roots {
+            scan_let_exprs(root, &mut names);
+        }
+        let mut map = std::collections::HashMap::new();
+        let mut decls = String::new();
+        for name in names {
+            if map.contains_key(&name) {
+                continue;
+            }
+            let rust = format!("__lh{}_{}", self.fresh_id(), sanitize_key(&name));
+            decls.push_str(&format!("let mut {rust} = Value::None;\n"));
+            map.insert(name, rust);
+        }
+        self.let_hoists.push(map);
+        decls
+    }
+
+    /// 关闭最上层提升槽帧。
+    pub(super) fn close_let_hoists(&mut self) {
+        self.let_hoists.pop();
+    }
+
+    fn ident(&mut self, ident: ast::Ident, env: &mut Env) -> String {
         let name = ident.as_str();
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return format!("{rust}.clone()");
@@ -482,7 +618,7 @@ impl Ctx {
         format!("rt::global(engine, \"{}\", file_span())?", escape(name))
     }
 
-    fn binary(&mut self, binary: ast::Binary, env: &Env) -> String {
+    fn binary(&mut self, binary: ast::Binary, env: &mut Env) -> String {
         use ast::BinOp::*;
         let op = binary.op();
         // 赋值族(表达式位置与语句位置同一语义,对照 `apply_assignment`
@@ -543,7 +679,7 @@ impl Ctx {
         }
     }
 
-    fn func_call(&mut self, call: ast::FuncCall, env: &Env) -> String {
+    fn func_call(&mut self, call: ast::FuncCall, env: &mut Env) -> String {
         let at = self.span_of(call.span());
         // 参数按源序求值(对照 `Eval for ast::Args`);Args.span 为整个
         // 调用的 span(对照 `.spanned(self.span())`)。
@@ -630,7 +766,7 @@ impl Ctx {
 
     /// 调用点参数:按源序构造 `Args`;每项用**自身** span(项 span 与
     /// 值 span 分开,对照原生 `Eval for ast::Args`),整体 span 为调用点。
-    fn gen_args(&mut self, args: ast::Args, env: &Env, call_at: &str) -> String {
+    fn gen_args(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> String {
         let mut out = format!(
             "{{ let mut __call_args_v = Args::new({call_at}, std::iter::empty::<Value>());"
         );
@@ -667,7 +803,7 @@ impl Ctx {
     /// 闭包:保留源码片段交由 typst-eval 解释(保真路径);
     /// 默认值创建期求值;捕获 = 子树标识符 ∩ 外层可解析名字
     /// (保守过捕,解释器按参数/局部遮蔽覆盖,语义不变)。
-    fn closure_expr(&mut self, closure: ast::Closure, env: &Env) -> String {
+    fn closure_expr(&mut self, closure: ast::Closure, env: &mut Env) -> String {
         // 微型闭包(谓词/投影,如 `i => i * 2`)保持解释:体的解释成本
         // 低于一次 stub 跳数(eval_closure 记账 + 转发体解释 + 原生调用
         // 协议开销),C2 反而净亏(map-heavy 实测 1.0× → 0.4×)。阈值取
@@ -688,7 +824,7 @@ impl Ctx {
     }
 
     /// 微型闭包的解释路径(v1 原形态:片段源经 typst-eval 解释)。
-    fn closure_expr_interp(&mut self, closure: ast::Closure, env: &Env) -> String {
+    fn closure_expr_interp(&mut self, closure: ast::Closure, env: &mut Env) -> String {
         // 命名闭包(`#let f(x) = ..` 或局部 `let f(x) = ..`)的节点文本
         // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码。
         let raw = closure.to_untyped().full_text().to_string();
@@ -726,7 +862,7 @@ impl Ctx {
     fn closure_expr_c2(
         &mut self,
         closure: ast::Closure,
-        env: &Env,
+        env: &mut Env,
         self_name: Option<String>,
     ) -> String {
         // C2:值位置闭包也走原生——闭包表达式编译为顶层 `f_c{id}`
@@ -868,7 +1004,7 @@ impl Ctx {
 
     /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
     /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
-    pub(super) fn content_seq(&mut self, items: &[ContentItem], env: &Env) -> String {
+    pub(super) fn content_seq(&mut self, items: &[ContentItem], env: &mut Env) -> String {
         let tops: Vec<TopItem> = items
             .iter()
             .map(|item| TopItem {
@@ -882,7 +1018,7 @@ impl Ctx {
     /// 顶层内容折叠:各项按自己的可见绑定集生成(规则包装后续项)。
     pub(super) fn content_seq_top(&mut self, items: &[TopItem]) -> String {
         for (i, top) in items.iter().enumerate() {
-            let env = &top.env;
+            let mut env = top.env.clone();
             match &top.item {
                 ContentItem::Set(set) => {
                     let mut parts: Vec<String> =
@@ -892,7 +1028,7 @@ impl Ctx {
                     // set.eval 之后才是 tail;Rust 实参从左到右,故用
                     // 局部先物化样式)。
                     let rule_at = self.span_of(set.span());
-                    let styles = self.set_styles_code(*set, env, &rule_at);
+                    let styles = self.set_styles_code(*set, &mut env, &rule_at);
                     parts.push(format!("{{ let __s = {styles}; rt::styled_with_map({tail}, __s) }}"));
                     return self.content_join(parts);
                 }
@@ -906,7 +1042,7 @@ impl Ctx {
                     let (sel_arg, sel_at) = match show.selector() {
                         Some(sel) => {
                             let sel_at = self.span_of(sel.span());
-                            (format!("Some({})", self.expr(sel, env)), sel_at)
+                            (format!("Some({})", self.expr(sel, &mut env)), sel_at)
                         }
                         None => ("None".to_string(), show_at.clone()),
                     };
@@ -915,7 +1051,7 @@ impl Ctx {
                             // show-set:transform 是样式;set 的条件在
                             // set.eval 内处理(条件假 → 空样式)。
                             let set_at = self.span_of(set.span());
-                            let styles = self.set_styles_code(set, env, &set_at);
+                            let styles = self.set_styles_code(set, &mut env, &set_at);
                             format!(
                                 "{{ let __sel = {sel_arg}; let __styles = {styles}; rt::show_rule_style(__sel, {sel_at}, __styles, {show_at}, engine)? }}"
                             )
@@ -923,7 +1059,7 @@ impl Ctx {
                         transform => {
                             format!(
                                 "{{ let __sel = {sel_arg}; let __tf = {{ {} }}; rt::show_rule(__sel, {sel_at}, __tf, {show_at}, engine)? }}",
-                                self.expr(transform, env)
+                                self.expr(transform, &mut env)
                             )
                         }
                     };
@@ -942,7 +1078,7 @@ impl Ctx {
     /// set 规则的样式求值代码(条件假 → 空样式;条件先于目标与实参
     /// 求值,对照 `Eval for ast::SetRule`)。`call_at` 为调用点 span
     /// (Args.span 与规则 span 同源)。set/show-set 两臂共用。
-    pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &Env, call_at: &str) -> String {
+    pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &mut Env, call_at: &str) -> String {
         let args = self.gen_args(set.args(), env, call_at);
         let target = self.expr(set.target(), env);
         match set.condition() {
@@ -960,7 +1096,37 @@ impl Ctx {
     /// content 的单个部分(表达式产出 Content 构造代码;env 取该项
     /// 自身的可见绑定集)。
     fn content_part(&mut self, top: &TopItem) -> String {
-        let env = &top.env;
+        let mut env = top.env.clone();
+        // 项内 let 表达式提升壳:项是单条 Rust 表达式,提升槽在项的
+        // 块顶声明,绑定随项弃(content 块作用域近似;对照 typst 内容
+        // 块的自作用域)。语句形态的 Part(let/import/include)由
+        // 外层语句机制处理,不入提升面。
+        let scan_root: Option<&typst_syntax::SyntaxNode> = match &top.item {
+            ContentItem::Part(ast::Expr::LetBinding(_))
+            | ContentItem::Part(ast::Expr::ModuleImport(_))
+            | ContentItem::Part(ast::Expr::ModuleInclude(_)) => None,
+            ContentItem::Part(expr) => Some(expr.to_untyped()),
+            _ => None,
+        };
+        let hoist = match scan_root {
+            Some(root) => {
+                let d = self.open_let_hoists(std::iter::once(root));
+                d
+            }
+            None => String::new(),
+        };
+        let out = self.content_part_inner(top, &mut env);
+        if scan_root.is_some() {
+            self.close_let_hoists();
+        }
+        if hoist.is_empty() {
+            out
+        } else {
+            format!("{{ {} {out} }}", hoist)
+        }
+    }
+
+    fn content_part_inner(&mut self, top: &TopItem, env: &mut Env) -> String {
         match &top.item {
             ContentItem::Include(body_slot) => {
                 self.used_state = true;
@@ -1063,7 +1229,7 @@ impl Ctx {
 
     /// 捕获列表构造(闭包与 context 共用):局部/模块槽直接物化,
     /// 全局名存在才物化(创建期不可见的交给体内 import)。
-    fn capture_entries(&mut self, names: &[String], env: &Env) -> (Vec<String>, Vec<String>) {
+    fn capture_entries(&mut self, names: &[String], env: &mut Env) -> (Vec<String>, Vec<String>) {
         let (pairs, globals) = self.capture_pairs(names, env);
         (
             pairs
@@ -1076,7 +1242,7 @@ impl Ctx {
 
     /// 结构化捕获表:(名字, 求值表达式) 列表 + 待运行期物化的全局名
     /// (C2 闭包按名排序组捕获元组,需要名字与表达式分离)。
-    fn capture_pairs(&mut self, names: &[String], env: &Env) -> (Vec<(String, String)>, Vec<String>) {
+    fn capture_pairs(&mut self, names: &[String], env: &mut Env) -> (Vec<(String, String)>, Vec<String>) {
         let mut captured: Vec<(String, String)> = Vec::new();
         let mut globals = Vec::new();
         let mut seen = HashSet::new();
@@ -1130,7 +1296,7 @@ impl Ctx {
 
 /// 运行期通配层切片表达式(`&[&__w1, &__w2]`,内层在尾,查找自尾
 /// 向首=内层遮蔽外层)。
-fn wild_layers(env: &Env) -> String {
+fn wild_layers(env: &mut Env) -> String {
     let refs: Vec<String> = env.wildcards.iter().map(|w| format!("&{w}")).collect();
     format!("&[{}]", refs.join(", "))
 }
@@ -1171,4 +1337,34 @@ fn pending_list(names: &[String]) -> String {
 fn can_diverge(expr: &typst_syntax::SyntaxNode) -> bool {
     matches!(expr.kind(), SyntaxKind::Break | SyntaxKind::Return)
         || expr.children().any(can_diverge)
+}
+
+/// 扫描表达式位置 `let` 绑定的名字(为提升槽登记)。作用域边界
+/// 对照 typst:不穿越闭包/代码块/内容块(各有自身作用域——闭包经
+/// CapturesVisitor 自管,代码块由 block() 递归自扫,内容块由
+/// content_part 项内自包);LetBinding 的 init 内再嵌 let 仍绑定本
+/// 作用域,继续下行。
+pub(super) fn scan_let_exprs(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
+    use typst_syntax::ast::AstNode as _;
+    if let Some(expr) = node.cast::<ast::Expr>() {
+        match expr {
+            ast::Expr::Closure(_)
+            | ast::Expr::CodeBlock(_)
+            | ast::Expr::ContentBlock(_) => return,
+            ast::Expr::LetBinding(lets) => match lets.kind() {
+                ast::LetBindingKind::Closure(name) => {
+                    out.push(name.as_str().to_string());
+                }
+                ast::LetBindingKind::Normal(pattern) => {
+                    out.extend(
+                        pattern.bindings().iter().map(|i| i.as_str().to_string()),
+                    );
+                }
+            },
+            _ => {}
+        }
+    }
+    for child in node.children() {
+        scan_let_exprs(child, out);
+    }
 }

@@ -63,6 +63,13 @@ pub(super) struct Ctx {
     /// 运行期报 "variables from outside the function are read-only"
     /// (对照 `Binding::write` 的 Captured 拒绝)。
     pub(super) captured_locals: Vec<std::collections::HashSet<String>>,
+    /// 表达式位置 `let` 的提升槽栈(每层可扫描作用域一帧:块/裸表达式
+    /// 函数体/内容项;键 = 绑定名,值 = 块顶 `let mut` 的提升 rust 名)。
+    /// 对照 typst:`let` 是表达式,求值为 none 并在**当前词法作用域**
+    /// 绑定/遮蔽名字,对同作用域后续求值立即可见——两阶段翻译里,
+    /// 绑定名在位点压入 env(位点前的引用仍解析外层),值写进提升槽
+    /// (块退出即弃,作用域精确)。
+    pub(super) let_hoists: Vec<std::collections::HashMap<String, String>>,
     /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
     /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
     /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
@@ -137,6 +144,7 @@ impl Ctx {
             mutable_slots: std::collections::HashSet::new(),
             in_closure: 0,
             captured_locals: Vec::new(),
+            let_hoists: Vec::new(),
             closure_dedup: std::collections::HashMap::new(),
             next_closure_id: 0,
             closure_items: String::new(),

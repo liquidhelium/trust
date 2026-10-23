@@ -15,16 +15,33 @@ impl Ctx {
     pub(super) fn block<'a>(
         &mut self,
         stmts: impl Iterator<Item = ast::Expr<'a>>,
-        env: &Env,
+        env: &mut Env,
     ) -> String {
         let mut out = String::from("{ let mut __out = Value::None;\n");
         let mut env = env.clone();
+        // 表达式位置 `let` 的提升槽(块作用域;对照 typst:let 是
+        // 表达式,在当前词法作用域绑定,块退出即弃)。语句位置的
+        // `#let` 由下方语句臂走 bind_local,不入提升面——只扫其
+        // init(init 内的 let 表达式仍绑定本块)。
+        let stmt_vec: Vec<ast::Expr> = stmts.collect();
+        let hoist_decls = self.open_let_hoists(stmt_vec.iter().map(|s| match s {
+            ast::Expr::LetBinding(lets) => match lets.init() {
+                Some(init) => init.to_untyped(),
+                None => s.to_untyped(),
+            },
+            _ => s.to_untyped(),
+        }));
+        if !hoist_decls.is_empty() {
+            for line in hoist_decls.lines() {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
         // (尾表达式代码, 其 span):非末位语句值按 join 语义累积,
         // 末位表达式同样并入 __out 后返回——对照 `eval_code` 的
         // `output = ops::join(output, value).at(span)?`(每个表达式的
         // 值都 join,错误站点为该表达式自身 span)。
         let mut last: Option<(String, String)> = None;
-        let mut iter = stmts;
+        let mut iter = stmt_vec.into_iter();
         while let Some(stmt) = iter.next() {
             if let Some((prev, prev_at)) = last.take() {
                 let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
@@ -34,9 +51,9 @@ impl Ctx {
             // `eval_code` 的 SetRule/ShowRule 特例——规则包装块尾)。
             if let ast::Expr::SetRule(set) = stmt {
                 let rest: Vec<ast::Expr> = iter.collect();
-                let tail = self.block(rest.into_iter(), &env);
+                let tail = self.block(rest.into_iter(), &mut env);
                 let rule_at = self.span_of(set.span());
-                let styles = self.set_styles_code(set, &env, &rule_at);
+                let styles = self.set_styles_code(set, &mut env, &rule_at);
                 let at = self.span_of(stmt.span());
                 last = Some((
                     format!("Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"),
@@ -46,26 +63,26 @@ impl Ctx {
             }
             if let ast::Expr::ShowRule(show) = stmt {
                 let rest: Vec<ast::Expr> = iter.collect();
-                let tail = self.block(rest.into_iter(), &env);
+                let tail = self.block(rest.into_iter(), &mut env);
                 let show_at = self.span_of(show.span());
                 let (sel_arg, sel_at) = match show.selector() {
                     Some(sel) => {
                         let sel_at = self.span_of(sel.span());
-                        (format!("Some({})", self.expr(sel, &env)), sel_at)
+                        (format!("Some({})", self.expr(sel, &mut env)), sel_at)
                     }
                     None => ("None".to_string(), show_at.clone()),
                 };
                 let recipe = match show.transform() {
                     ast::Expr::SetRule(set) => {
                         let set_at = self.span_of(set.span());
-                        let styles = self.set_styles_code(set, &env, &set_at);
+                        let styles = self.set_styles_code(set, &mut env, &set_at);
                         format!(
                             "{{ let __sel = {sel_arg}; let __styles = {styles}; rt::show_rule_style(__sel, {sel_at}, __styles, {show_at}, engine)? }}"
                         )
                     }
                     transform => format!(
                         "{{ let __sel = {sel_arg}; let __tf = {{ {} }}; rt::show_rule(__sel, {sel_at}, __tf, {show_at}, engine)? }}",
-                        self.expr(transform, &env)
+                        self.expr(transform, &mut env)
                     ),
                 };
                 let at = self.span_of(stmt.span());
@@ -79,7 +96,7 @@ impl Ctx {
             }
             if let ast::Expr::LetBinding(lets) = stmt {
                 let init = match lets.init() {
-                    Some(init) => self.expr(init, &env),
+                    Some(init) => self.expr(init, &mut env),
                     None => "Value::None".into(),
                 };
                 match lets.kind() {
@@ -343,7 +360,7 @@ impl Ctx {
             }
             if let ast::Expr::DestructAssignment(assign_) = stmt {
                 // 解构赋值:目标须为已存在局部(对照 `Access` 语义)。
-                let value = self.expr(assign_.value(), &env);
+                let value = self.expr(assign_.value(), &mut env);
                 let stmts = self.destructure(assign_.pattern(), value, &mut env, true);
                 out.push_str("    ");
                 out.push_str(&stmts.replace('\n', "\n    "));
@@ -361,11 +378,11 @@ impl Ctx {
             {
                 // 赋值:统一走 classify_place 分类(局部/模块槽/捕获/
                 // 未命中/临时值,对照 `apply_assignment` + `Access`)。
-                let code = self.assign_code(binary, &env);
+                let code = self.assign_code(binary, &mut env);
                 let _ = writeln!(out, "    {code};");
                 continue;
             }
-            let value = self.expr(stmt, &env);
+            let value = self.expr(stmt, &mut env);
             let at = self.span_of(stmt.span());
             last = Some((value, at));
         }
@@ -376,6 +393,7 @@ impl Ctx {
         }
         let _ = writeln!(out, "    let _ = &__out;");
         let _ = writeln!(out, "    __out");
+        self.close_let_hoists();
         out.push('}');
         out
     }
@@ -385,7 +403,7 @@ impl Ctx {
     ///
     /// 注:`at` 的参数在段处求值,先走目标链后求参数(纯下标表达式
     /// 下与 typst 的"参数先求"等价;带副作用的下标才有顺序差)。
-    pub(super) fn classify_place(&mut self, expr: ast::Expr, env: &Env) -> Place {
+    pub(super) fn classify_place(&mut self, expr: ast::Expr, env: &mut Env) -> Place {
         let mut segs = Vec::new();
         let mut root: Option<String> = None;
         if !self.walk_place(expr, env, &mut segs, &mut root) {
@@ -433,7 +451,7 @@ impl Ctx {
     /// 访问;普通赋值且目标为字段链时末段走"缺失即创建"的字典插入
     /// (对照 `access_dict` + `insert` 特例);复合赋值单次寻址 +
     /// mem::take。
-    pub(super) fn assign_code(&mut self, binary: ast::Binary, env: &Env) -> String {
+    pub(super) fn assign_code(&mut self, binary: ast::Binary, env: &mut Env) -> String {
         use ast::BinOp;
         let compound = match binary.op() {
             BinOp::Assign => None,
@@ -500,7 +518,7 @@ impl Ctx {
 
     /// 临时值目标的副作用求值,对照 `Access` 各臂的递归形态:
     /// FieldAccess 只深入**目标**(不读字段),其余表达式整体求值。
-    pub(super) fn eval_for_access(&mut self, expr: ast::Expr, env: &Env) -> String {
+    pub(super) fn eval_for_access(&mut self, expr: ast::Expr, env: &mut Env) -> String {
         match expr {
             ast::Expr::FieldAccess(access) => self.eval_for_access(access.target(), env),
             ast::Expr::Parenthesized(p) => self.eval_for_access(p.expr(), env),
@@ -515,7 +533,7 @@ impl Ctx {
         &mut self,
         expr: ast::Expr,
         value: &str,
-        env: &Env,
+        env: &mut Env,
     ) -> String {
         let at = self.span_of(expr.span());
         match self.classify_place(expr, env) {
@@ -553,7 +571,7 @@ impl Ctx {
     fn walk_place(
         &mut self,
         expr: ast::Expr,
-        env: &Env,
+        env: &mut Env,
         segs: &mut Vec<String>,
         root: &mut Option<String>,
     ) -> bool {

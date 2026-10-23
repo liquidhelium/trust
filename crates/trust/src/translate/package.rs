@@ -608,7 +608,7 @@ return;
                             },
                         ));
                     }
-                    self.file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &g_env));
+                    self.file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &mut g_env));
                     self.file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
                     // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
                     // env2 = import + 此前绑定,不含本函数自身)。同一批
@@ -620,7 +620,7 @@ return;
                             let pname = named.name().as_str();
                             let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
                             state_fields.push(def_slot.clone());
-                            let value = cx.expr(named.expr(), &env2);
+                            let value = cx.expr(named.expr(), &mut env2);
                             defaults.push(format!(
                                 "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
                             ));
@@ -707,7 +707,7 @@ return;
                             | ast::Pattern::Parenthesized(_)
                     );
                     if let [(name, slot)] = bound.as_slice() && plain_ident {
-                        let value = cx.expr(init_expr, &env2);
+                        let value = cx.expr(init_expr, &mut env2);
                         let fill_call = if cx.mutable_slots.contains(slot) {
                             format!("rt::fill_ms(&__st.{slot}, v.clone())?")
                         } else {
@@ -730,7 +730,7 @@ return;
                     } else {
                         // 顶层解构:槽名预绑为临时局部,destructure 写回
                         // 这些名字,再逐槽填充注册。
-                        let value = cx.expr(init_expr, &env2);
+                        let value = cx.expr(init_expr, &mut env2);
                         let mut tmp_env = env2.clone();
                         let mut decls = String::new();
                         for (name, slot) in &bound {
@@ -1611,7 +1611,8 @@ impl Ctx {
             if let Some(node) = &edge.source_node
                 && let Some(expr_node) = node.cast::<ast::Expr>()
             {
-                let value = cx.expr(expr_node, &env);
+                let mut env_m = env.clone();
+                let value = cx.expr(expr_node, &mut env_m);
                 let base_name = match &edge.items {
                     ImportItems::Rename(name) | ImportItems::RenameList(name, _) => name.clone(),
                     ImportItems::Bare => "trust-source".to_string(),

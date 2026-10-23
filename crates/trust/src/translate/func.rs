@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use typst_syntax::ast::{self};
+use typst_syntax::ast::{self, AstNode as _};
 
 use super::ctx::{Ctx, Env, bind_local};
 use super::naming::{escape, sanitize, sanitize_key};
@@ -17,7 +17,7 @@ impl Ctx {
         fun: &str,
         slot: &str,
         closure: ast::Closure,
-        env: &Env,
+        env: &mut Env,
     ) -> String {
         let mut body = String::new();
         let mut fn_env = env.clone();
@@ -117,7 +117,15 @@ impl Ctx {
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
 
-        let value = self.expr(closure.body(), &fn_env);
+        // 裸表达式函数体(let 表达式提升壳;块体由 block() 自扫)。
+        let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
+        let value = self.expr(closure.body(), &mut fn_env);
+        self.close_let_hoists();
+        let value = if hoist.is_empty() {
+            value
+        } else {
+            format!("{{ {} {value} }}", hoist)
+        };
         let _ = writeln!(body, "    Ok({value})");
 
         // 序言:状态从首个位置参数解包(stub 转发必带,对照原生闭包
@@ -247,7 +255,15 @@ pub(super) fn gen_closure_fn(
     }
     let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
 
-    let value = self.expr(closure.body(), &fn_env);
+    // 裸表达式体提升壳(同 gen_function;块体由 block() 自扫)。
+    let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
+    let value = self.expr(closure.body(), &mut fn_env);
+    self.close_let_hoists();
+    let value = if hoist.is_empty() {
+        value
+    } else {
+        format!("{{ {} {value} }}", hoist)
+    };
     let body_code = format!("    Ok({value})\n");
 
     // has_st 判定(体/参数代码生成期间的标记),恢复外层计数并留下

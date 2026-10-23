@@ -71,7 +71,7 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
 
       let __v = { let mut __out = Value::None;
     __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(*S0)?, std::cmp::Ordering::Greater)), *S3)? { { let mut __out = Value::None;
-    __out = rt::join(__out, { rt::check_call_depth(engine, *S1)?; let __mut_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); __call_args_v.push(*S2, x.clone()); __call_args_v }; let __place = rt::place_mut(&mut out, &[], *S1)?; rt::method_mut(engine, __place, "push", __mut_args, *S1)? }, *S1)?;
+    __out = rt::join(__out, { rt::check_call_depth(engine, *S1)?; let __mut_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); __call_args_v.push(*S2, x.clone()); __call_args_v }; let __place = rt::place_mut(&mut out, &[], *S1)?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, *S1, "out.push")? }, *S1)?;
     let _ = &__out;
     __out
 } } else { Value::None }, *S3)?;

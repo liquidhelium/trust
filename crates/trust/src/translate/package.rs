@@ -89,22 +89,12 @@ pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<Stri
     Ok(render_single(&parts))
 }
 
-fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx) -> PackageParts {
-    let entry = input.entry.trim_start_matches('/');
-    if !input.files.contains_key(entry) {
-        cx.diags.push(Diag {
-            span: typst_syntax::Span::detached(),
-            message: format!("入口文件 {entry} 不在文件集中"),
-            file: None,
-        });
-        return PackageParts::default();
-    }
 
-    // 第一遍:每个文件的顶层绑定与 import 边。
-    // 注意:此处直接使用形参 cx(此前误建局部同名 Ctx 遮蔽形参,
-    // 导致包模式的诊断从未传回壳层,严格性失效)。
-    let mut plans: Vec<FilePlan> = Vec::new();
-    // 经 Source 解析:span 携带 FileId(与生成物 file_span 同源)。
+// ─── 分阶段装配(对照 typst-eval `eval()` 的目录式入口:每步全部
+// 委托,读完入口即知全流程)────────────────────────────────
+
+/// 解析:每文件 `Source`(span 携带 FileId,与生成物 file_span 同源)。
+fn parse_sources(input: &PackageInput) -> Vec<(String, typst_syntax::Source)> {
     let mut roots: Vec<(String, typst_syntax::Source)> = Vec::new();
     for (path, src) in input.files.iter() {
         let id = typst_syntax::RootedPath::new(
@@ -114,6 +104,17 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         .intern();
         roots.push((path.clone(), typst_syntax::Source::new(id, src.clone())));
     }
+    roots
+}
+
+/// 第一遍:每个文件的计划(import 边/顶层绑定槽/解析诊断/可变根)。
+/// markup 取自 `Box::leak` 的静态根,计划全 'static。
+fn plan_files(
+    input: &PackageInput,
+    roots: &[(String, typst_syntax::Source)],
+    cx: &mut Ctx,
+) -> Vec<FilePlan<'static>> {
+    let mut plans: Vec<FilePlan> = Vec::new();
     for (idx, (path, source)) in roots.iter().enumerate() {
         let root: &'static typst_syntax::SyntaxNode = Box::leak(source.root().clone().into());
         let Some(markup) = root.cast::<ast::Markup>() else {
@@ -339,21 +340,33 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             imports,
         });
     }
-    if !cx.diags.is_empty() && !cx.lenient {
-        // 壳层负责返回 Err。
-        return PackageParts::default();
-    }
+    plans
+}
 
+/// 包世界装配产物:求值拓扑序、导出查找表、路径→mod 名表。
+struct PkgWorld {
+    order: Vec<usize>,
+    export_table: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    package_mods: std::rc::Rc<std::collections::BTreeMap<String, String>>,
+}
+
+/// 世界装配:环检测(None = 成环)→ 拓扑序/导出表 → cx 侧的
+/// files/mods/export/slot_files 注册与可变槽标记。
+fn assemble_package_world(
+    input: &PackageInput,
+    plans: &[FilePlan],
+    entry: &str,
+    cx: &mut Ctx,
+) -> Option<PkgWorld> {
     // import 环检测(typst 模块循环求值同样报错)。
-    if has_import_cycle(&plans, entry) {
+    if has_import_cycle(plans, entry) {
         cx.diags.push(Diag {
             span: typst_syntax::Span::detached(),
             message: "包内 import 成环(typst 运行时同样会报循环求值)".into(),
             file: None,
         });
-        return PackageParts::default();
+        return None;
     }
-
     let package_files = std::rc::Rc::new(input.files.clone());
     let package_mods_map: std::collections::BTreeMap<String, String> = plans
         .iter()
@@ -365,8 +378,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 
     // 拓扑序(被依赖者在前):求值顺序。导出查找表按同序展开,
     // 下游 list/wildcard import 可达上游的 import 转出名。
-    let order = topo_order(&plans);
-    let export_table = build_export_table(&plans, &order, &input.dep_entries);
+    let order = topo_order(plans);
+    let export_table = build_export_table(plans, &order, &input.dep_entries);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
     // 可变槽:被就地修改的根名并集,标记各计划自身定义的同名槽
@@ -376,7 +389,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             .iter()
             .flat_map(|p| p.mutated_roots.iter().cloned())
             .collect();
-        for p in &plans {
+        for p in plans {
             for (name, slot) in &p.tops {
                 if roots.contains(name) {
                     cx.mutable_slots.insert(slot.clone());
@@ -470,138 +483,72 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
     cx.slot_files = Some(std::rc::Rc::new(idx));
     }
-    // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
-    let mut top_defines = String::new();
-    let mut state_fields: Vec<String> = Vec::new();
-    let mut files: Vec<FileOut> = Vec::new();
-    let mut eval_flat = String::new();
-    let mut eval_tree = String::new();
-    let mut registry_flat = String::new();
-    let mut registry_tree = String::new();
-    for &idx in &order {
-        let plan = &plans[idx];
-        cx.current_file = Some(plan.path.clone());
-        let is_entry = plan.path == entry;
-        let mut env = Env {
-            locals: Vec::new(),
-            module: Vec::new(),
-            wildcards: Vec::new(),
-        };
-        // 当前文件的 import 抄入:可见绑定(env) + 槽位填充(eval)
-        // + 导出面(module)。
-        let mut file_defines = String::new();
-        let mut import_fills = String::new();
-        let mut import_slots: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        // 顶层 import 边不再整体前置:由下方源序流水在语句位置处理
-        //(见 process_import_edge 与 ModuleImport 臂的 edge 游标)。
-        let mut edge_cursor = 0usize;
+    Some(PkgWorld { order, export_table, package_mods })
+}
 
-        // 本文件顶层绑定与内容(按源序):绑定填槽,内容折叠进 body。
-        let mut binding_code = String::new();
-        let mut file_fns = String::new();
-        let mut own: Vec<(String, String)> = Vec::new();
-        let mut content_items: Vec<super::expr::TopItem> = Vec::new();
-        let mut own_seen_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let content_env = |env: &Env, own: &[(String, String)]| {
-            let mut e = env.clone();
-            for (seen, seen_slot) in own {
-                e.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
-            }
-            e
-        };
-        for expr in plan.markup.exprs() {
-            // 内容项:顶层文本/嵌入表达式/set/show/include(逐项可见性)。
-            match expr {
-                ast::Expr::ModuleImport(_) => {
-                    // 源序流水:在此语句位置处理对应 import 边(env 注入
-                    // 即时生效——此后的 let 才能看见它;此前的 let 仍
-                    // 解析到外层,对照原生逐语句求值)。
-                    if let Some(edge) = plan.imports.get(edge_cursor) {
-                        edge_cursor += 1;
-                        cx.process_import_edge(
-                            edge,
-                            plan,
-                            input,
-                            &plans,
-                            &export_table,
-                            &package_mods,
-                            &mut env,
-                            &mut state_fields,
-                            &mut import_fills,
-                            &mut file_defines,
-                            &mut import_slots,
-                        );
-                    }
-                    // 对照 eval_markup:语句并入一个空 display 槽。
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Part(expr),
-                        env: content_env(&env, &own),
-                    });
-                }
-                ast::Expr::LetBinding(_) => {
-                    // 对照 eval_markup:语句并入一个空 display 槽。
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Part(expr),
-                        env: content_env(&env, &own),
-                    });
-                }
-                ast::Expr::ModuleInclude(include) => {
-                    let item_env = content_env(&env, &own);
-                    let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
-                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
-                        continue;
-                    };
-                    let raw = path_expr.get().to_string();
-                    let target = normalize_import(&plan.path, &raw);
-                    let Some(target_mod) = package_mods.get(&target) else {
-                        continue;
-                    };
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Include(format!("BODY_{target_mod}")),
-                        env: item_env,
-                    });
-                    continue;
-                }
-                ast::Expr::SetRule(set) => {
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Set(set),
-                        env: content_env(&env, &own),
-                    });
-                    continue;
-                }
-                ast::Expr::ShowRule(show) => {
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Show(show),
-                        env: content_env(&env, &own),
-                    });
-                    continue;
-                }
-                other => {
-                    content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Part(other),
-                        env: content_env(&env, &own),
-                    });
-                    continue;
-                }
-            }
-            let ast::Expr::LetBinding(lets) = expr else {
-                continue;
-            };
+/// 第二遍单文件累积器(Vm 等价物:一文件一束,顶层语句生成共享;
+/// package 级共享的 `state_fields` 由调用方传参)。
+struct TopGen {
+    /// 当前可见 env(import 注入与绑定可见性按源序演进)。
+    env: Env,
+    /// 本文件已处理的顶层绑定(名,槽)。
+    own: Vec<(String, String)>,
+    /// 同名绑定的第 n 次出现(解构多名配对槽用)。
+    own_seen: std::collections::HashMap<String, usize>,
+    /// 求值序绑定代码(eval 体内)。
+    binding_code: String,
+    /// 导出面 define 序列(module 体内)。
+    file_defines: String,
+    /// 函数体与静态汇集(文件 body)。
+    file_fns: String,
+    /// import 槽填充序列(eval 体头部)。
+    import_fills: String,
+}
+
+impl TopGen {
+    fn new() -> Self {
+        Self {
+            env: Env { locals: Vec::new(), module: Vec::new(), wildcards: Vec::new() },
+            own: Vec::new(),
+            own_seen: std::collections::HashMap::new(),
+            binding_code: String::new(),
+            file_defines: String::new(),
+            file_fns: String::new(),
+            import_fills: String::new(),
+        }
+    }
+
+    /// 内容项的可见 env(当前 env + 此前顶层绑定)。
+    fn content_env(&self) -> Env {
+        let mut e = self.env.clone();
+        for (seen, seen_slot) in &self.own {
+            e.module.push((seen.clone(), Ref::Slot(seen_slot.clone())));
+        }
+        e
+    }
+
+    /// 顶层 `#let`(函数/闭包/普通绑定/解构):计划槽配对、全局名
+    /// 创建期物化、绑定代码与导出面写入。对照 eval 的 LetBinding 分支。
+    fn gen_let(
+        &mut self,
+        cx: &mut Ctx,
+        plan: &super::plan::FilePlan,
+        state_fields: &mut Vec<String>,
+        lets: ast::LetBinding,
+    ) {
             match lets.kind() {
                 ast::LetBindingKind::Closure(name) => {
                     let Some(ast::Expr::Closure(closure)) = lets.init() else {
                         cx.diag(lets.span(), "闭包绑定缺少闭包初始化".into());
-                        continue;
+return;
                     };
-                    let nth = own_seen_counts.get(name.as_str()).copied().unwrap_or(0);
-                    own_seen_counts.insert(name.as_str().to_string(), nth + 1);
+                    let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
+                    self.own_seen.insert(name.as_str().to_string(), nth + 1);
                     let Some(slot) = nth_slot(plan, name.as_str(), nth) else {
-                        continue;
+return;
                     };
-                    let mut env2 = env.clone();
-                    for (seen, seen_slot) in &own {
+                    let mut env2 = self.env.clone();
+                    for (seen, seen_slot) in &self.own {
                         env2.module
                             .push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
@@ -650,7 +597,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         state_fields.push(gslot.clone());
                         let gname_escaped = escape(&gname);
                         let _ = writeln!(
-                            binding_code,
+                            self.binding_code,
                             "    if let Some(v) = rt::capture_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
                         );
                         g_env.module.push((
@@ -661,8 +608,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             },
                         ));
                     }
-                    file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &g_env));
-                    file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
+                    self.file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &g_env));
+                    self.file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
                     // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
                     // env2 = import + 此前绑定,不含本函数自身)。同一批
                     // 表达式进 stub 的 defaults(调用期缺失参数取值用,
@@ -696,62 +643,70 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                         format!("Func::from(&{data})")
                     };
                     let _ = writeln!(
-                        binding_code,
+                        self.binding_code,
                         "    rt::fill(&__st.{slot}, Value::Func({func_value}))?;"
                     );
                     let _ = writeln!(
-                        file_defines,
+                        self.file_defines,
                         "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
                         escape(name.as_str())
                     );
-                    own.push((name.as_str().to_string(), slot.clone()));
+                    self.own.push((name.as_str().to_string(), slot.clone()));
                 }
                 ast::LetBindingKind::Normal(pattern) => {
                     // 无初值声明(`#let x`):绑定 none(对照 typst-eval
                     // LetBinding 无 init 的 define(name, None))。
                     let Some(init_expr) = lets.init().map(|e| e) else {
                         if let Some(name) = pattern.bindings().first() {
-                            let nth = own_seen_counts.get(name.as_str()).copied().unwrap_or(0);
-                            own_seen_counts.insert(name.as_str().to_string(), nth + 1);
+                            let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
+                            self.own_seen.insert(name.as_str().to_string(), nth + 1);
                             if let Some(slot) = nth_slot(plan, name.as_str(), nth) {
                                 let fill_none = if cx.mutable_slots.contains(&slot) {
                                     format!("rt::fill_ms(&__st.{slot}, Value::None)?")
                                 } else {
                                     format!("rt::fill(&__st.{slot}, Value::None)?")
                                 };
-                                let _ = writeln!(binding_code, "    {fill_none};");
+                                let _ = writeln!(self.binding_code, "    {fill_none};");
                                 let _ = writeln!(
-                                    file_defines,
+                                    self.file_defines,
                                     "    scope.define(\"{}\", Value::None);",
                                     escape(name.as_str())
                                 );
-                                own.push((name.as_str().to_string(), slot));
+                                self.own.push((name.as_str().to_string(), slot));
                             }
                         }
-                        continue;
+return;
                     };
                     // 每个模式名字配对本文件的下一个同名槽(解构多名)。
                     let mut bound: Vec<(String, String)> = Vec::new();
                     for ident in pattern.bindings().iter() {
                         let name = ident.as_str();
-                        let nth = own_seen_counts.get(name).copied().unwrap_or(0);
-                        own_seen_counts.insert(name.to_string(), nth + 1);
+                        let nth = self.own_seen.get(name).copied().unwrap_or(0);
+                        self.own_seen.insert(name.to_string(), nth + 1);
                         let Some(slot) = nth_slot(plan, name, nth) else {
-                            continue;
+return;
                         };
                         bound.push((name.to_string(), slot));
                     }
                     if bound.is_empty() {
-                        continue;
+return;
                     }
-                    let mut env2 = env.clone();
-                    for (seen, seen_slot) in &own {
+                    let mut env2 = self.env.clone();
+                    for (seen, seen_slot) in &self.own {
                         env2.module
                             .push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
                     // init 在绑定生效前求值:同名引用解析到外层(如全局
-                    // 类型),env2 不含本绑定。
-                    if let [(name, slot)] = bound.as_slice() {
+                    // 类型),env2 不含本绑定。单名快速路径只适用于
+                    // **纯标识符模式**——`(a,)` 这类单绑定解构模式仍须
+                    // 走解构(整值绑定曾是 destructuring-let 单元数组
+                    // 与字典 sink 族的根因)。
+                    let plain_ident = matches!(
+                        pattern,
+                        ast::Pattern::Normal(ast::Expr::Ident(_))
+                            | ast::Pattern::Parenthesized(_)
+                    );
+                    if let [(name, slot)] = bound.as_slice() && plain_ident {
                         let value = cx.expr(init_expr, &env2);
                         let fill_call = if cx.mutable_slots.contains(slot) {
                             format!("rt::fill_ms(&__st.{slot}, v.clone())?")
@@ -764,11 +719,11 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             format!("rt::read(&__st.{slot})?")
                         };
                         let _ = writeln!(
-                            binding_code,
+                            self.binding_code,
                             "    {{ let v = {value}; {fill_call}; }}"
                         );
                         let _ = writeln!(
-                            file_defines,
+                            self.file_defines,
                             "    scope.define(\"{}\", {read_call});",
                             escape(name)
                         );
@@ -786,23 +741,172 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
                         let mut fills = String::new();
                         for (name, slot) in &bound {
-                            let _ =
-                                writeln!(fills, "        rt::fill(&__st.{slot}, {slot}.clone())?;");
+                            // 可变槽(fill_ms/read_ms)与写一次槽(fill/read)
+                            // 按计划期标记分流。
+                            let (fill_call, read_call) =
+                                if cx.mutable_slots.contains(slot) {
+                                    (
+                                        format!("rt::fill_ms(&__st.{slot}, {slot}.clone())?;"),
+                                        format!("rt::read_ms(&__st.{slot})?"),
+                                    )
+                                } else {
+                                    (
+                                        format!("rt::fill(&__st.{slot}, {slot}.clone())?;"),
+                                        format!("rt::read(&__st.{slot})?"),
+                                    )
+                                };
+                            let _ = writeln!(fills, "        {fill_call}");
                             let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                                self.file_defines,
+                                "    scope.define(\"{}\", {read_call});",
                                 escape(name)
                             );
                         }
                         let _ = writeln!(
-                            binding_code,
+                            self.binding_code,
                             "    {{ let v = {value};\n{decls}{stmts}{fills}    }}"
                         );
                     }
-                    own.extend(bound);
+                    self.own.extend(bound);
+                }
+            }
+    }
+}
+
+fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx) -> PackageParts {
+    let entry = input.entry.trim_start_matches('/');
+    if !input.files.contains_key(entry) {
+        cx.diags.push(Diag {
+            span: typst_syntax::Span::detached(),
+            message: format!("入口文件 {entry} 不在文件集中"),
+            file: None,
+        });
+        return PackageParts::default();
+    }
+
+    // 解析:每文件 Source(span 带 FileId,与生成物 file_span 同源)。
+    let roots = parse_sources(input);
+    // 第一遍:每个文件的计划(import 边/顶层绑定槽/解析诊断/可变根)。
+    // 注意:计划期直接使用形参 cx(此前误建局部同名 Ctx 遮蔽形参,
+    // 导致包模式的诊断从未传回壳层,严格性失效)。
+    let plans = plan_files(input, &roots, cx);
+    if !cx.diags.is_empty() && !cx.lenient {
+        // 壳层负责返回 Err。
+        return PackageParts::default();
+    }
+    // 世界装配:环检测 → 拓扑序/导出表 → 可变槽标记 → 槽→文件表。
+    let Some(world) = assemble_package_world(input, &plans, entry, cx) else {
+        return PackageParts::default();
+    };
+    let PkgWorld { order, export_table, package_mods } = world;
+    // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
+    let mut top_defines = String::new();
+    let mut state_fields: Vec<String> = Vec::new();
+    let mut files: Vec<FileOut> = Vec::new();
+    let mut eval_flat = String::new();
+    let mut eval_tree = String::new();
+    let mut registry_flat = String::new();
+    let mut registry_tree = String::new();
+    for &idx in &order {
+        let plan = &plans[idx];
+        cx.current_file = Some(plan.path.clone());
+        let is_entry = plan.path == entry;
+        // 单文件累积器(env 按源序演进;import 槽表与边游标本文件局部)。
+        let mut top = TopGen::new();
+        let mut import_slots: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        // 顶层 import 边不再整体前置:由下方源序流水在语句位置处理
+        //(见 process_import_edge 与 ModuleImport 臂的 edge 游标)。
+        let mut edge_cursor = 0usize;
+        let mut content_items: Vec<super::expr::TopItem> = Vec::new();
+        for expr in plan.markup.exprs() {
+            // 内容项:顶层文本/嵌入表达式/set/show/include(逐项可见性)。
+            match expr {
+                ast::Expr::ModuleImport(_) => {
+                    // 源序流水:在此语句位置处理对应 import 边(env 注入
+                    // 即时生效——此后的 let 才能看见它;此前的 let 仍
+                    // 解析到外层,对照原生逐语句求值)。
+                    if let Some(edge) = plan.imports.get(edge_cursor) {
+                        edge_cursor += 1;
+                        cx.process_import_edge(
+                            edge,
+                            plan,
+                            input,
+                            &plans,
+                            &export_table,
+                            &package_mods,
+                            &mut top.env,
+                            &mut state_fields,
+                            &mut top.import_fills,
+                            &mut top.file_defines,
+                            &mut import_slots,
+                        );
+                    }
+                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(expr),
+                        env: top.content_env(),
+                    });
+                }
+                ast::Expr::LetBinding(lets) => {
+                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(expr),
+                        env: top.content_env(),
+                    });
+                    top.gen_let(cx, plan, &mut state_fields, lets);
+                }
+                ast::Expr::ModuleInclude(include) => {
+                    let item_env = top.content_env();
+                    let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
+                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
+                        continue;
+                    };
+                    let raw = path_expr.get().to_string();
+                    let target = normalize_import(&plan.path, &raw);
+                    let Some(target_mod) = package_mods.get(&target) else {
+                        continue;
+                    };
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Include(format!("BODY_{target_mod}")),
+                        env: item_env,
+                    });
+                    continue;
+                }
+                ast::Expr::SetRule(set) => {
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Set(set),
+                        env: top.content_env(),
+                    });
+                    continue;
+                }
+                ast::Expr::ShowRule(show) => {
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Show(show),
+                        env: top.content_env(),
+                    });
+                    continue;
+                }
+                other => {
+                    content_items.push(super::expr::TopItem {
+                        item: super::expr::ContentItem::Part(other),
+                        env: top.content_env(),
+                    });
+                    continue;
                 }
             }
         }
+        // 累积器移出:文件装配段按原局部名消费。
+        let TopGen {
+            env,
+            own,
+            mut binding_code,
+            file_defines,
+            file_fns,
+            import_fills,
+            ..
+        } = top;
+
         for (_, slot) in &plan.tops {
             state_fields.push(slot.clone());
         }
@@ -817,7 +921,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         }
         let body = cx.content_seq_top(&content_items);
         let _ = writeln!(
-            binding_code,
+            &mut binding_code,
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
         );
 
@@ -1197,18 +1301,44 @@ pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut V
     {
         out.push(root);
     }
+    // 解构赋值 `(a, b, ..c) = ...` / `(a.at(i),) = ...`:模式内全部
+    // 可放叶子的根(对照 binding.rs DestructAssignment 叶子走 access)。
+    if let Some(assign) = node.cast::<typst_syntax::ast::DestructAssignment>() {
+        collect_pattern_roots(assign.pattern().to_untyped(), out);
+    }
     for child in node.children() {
         collect_mutated_roots(child, out);
     }
 }
 
-/// 可放路径的根名(Ident 或以 Ident 开头的字段链;其余形态 None)。
+/// 解构模式的可放叶子根收集(叶子 = Ident 或以 Ident 根的
+/// 字段/accessor 链;重复无害,消费侧为集合)。
+fn collect_pattern_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
+    if let Some(root) = place_root(node) {
+        out.push(root);
+    }
+    for child in node.children() {
+        collect_pattern_roots(child, out);
+    }
+}
+
+/// 可放路径的根名(Ident 或以 Ident 开头的字段/accessor 链
+/// ——含 `at`/`first`/`last` 存取器调用;其余形态 None)。
 fn place_root(node: &typst_syntax::SyntaxNode) -> Option<String> {
     use typst_syntax::ast::AstNode;
     if let Some(ident) = node.cast::<typst_syntax::ast::Ident>() {
         return Some(ident.as_str().to_string());
     }
     if let Some(access) = node.cast::<typst_syntax::ast::FieldAccess>() {
+        return place_root(access.target().to_untyped());
+    }
+    if let Some(paren) = node.cast::<typst_syntax::ast::Parenthesized>() {
+        return place_root(paren.expr().to_untyped());
+    }
+    if let Some(call) = node.cast::<typst_syntax::ast::FuncCall>()
+        && let typst_syntax::ast::Expr::FieldAccess(access) = call.callee()
+        && matches!(access.field().as_str(), "at" | "first" | "last")
+    {
         return place_root(access.target().to_untyped());
     }
     None

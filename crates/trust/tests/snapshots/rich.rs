@@ -16,9 +16,10 @@ use trust_runtime as rt;
 /// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。
 const SPAN: Span = Span::detached();
 static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 289662109446693));
-static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329176865792586));
-static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329312190300619));
-static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329532092626172));
+static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 314764805686989));
+static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329176865792586));
+static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329312190300619));
+static S4: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329532092626172));
 /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。
 #[allow(non_snake_case, dead_code)]
 pub(crate) fn file_span() -> Span {
@@ -50,7 +51,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     { let v = Value::Func(rt::native_closure(&D_V0_scale, "(x, k: 2)", vec![{ let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; v }], &rt::StateSlot::new(__st.clone()))); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
         let mut V1_base = Value::None;
-V1_base = v.clone();
+{ let __p = rt::place_mut(&mut V1_base, &[], *S1)?; *__p = v.clone(); }
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
     { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
@@ -106,7 +107,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut rest = Value::Args(__args.take());
     if let Value::Args(__sink_inner) = &mut rest { __sink_inner.items.extend(__sink_pos_0.into_iter()); }
     rt::finish(__args, span)?;
-    Ok({ rt::check_call_depth(engine, *S1)?; let __callee = rt::callee(f.clone(), *S2)?; let __call_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, *S3, rest.clone())?; __call_args_v }; rt::call_with(__callee, None, *S1, __call_args, engine, context)? })
+    Ok({ rt::check_call_depth(engine, *S2)?; let __callee = rt::callee(f.clone(), *S3)?; let __call_args = { let mut __call_args_v = Args::new(*S2, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, *S4, rest.clone())?; __call_args_v }; rt::call_with(__callee, None, *S2, __call_args, engine, context)? })
 }
 
 #[allow(non_snake_case, dead_code)]

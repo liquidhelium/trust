@@ -25,6 +25,9 @@ impl Ctx {
         self.used_state = false;
         // 函数体上下文:return 编译为 Rust return,仅此上下文合法。
         self.in_fn += 1;
+        // 顶层函数在 typst 里同样是闭包(CapturesVisitor 捕获自由名):
+        // 体内引用模块绑定 = 捕获,**只读**(对照 `Binding::capture`)。
+        self.in_closure += 1;
         // 对照 eval_closure 的绑定协议(声明序逐参绑定,sink 特殊):
         // - sink_size = 位置实参总数 − 显式位置参数数(saturating);
         // - Spread 处按 sink_size 从**队首** consume 位置实参暂存;
@@ -126,6 +129,7 @@ impl Ctx {
             ""
         };
         self.in_fn -= 1;
+        self.in_closure = self.in_closure.saturating_sub(1);
         format!(
             "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{body}}}\n"
         )
@@ -151,10 +155,18 @@ pub(super) fn gen_closure_fn(
     self.used_state = false;
     self.in_fn += 1;
     self.in_closure += 1;
+    // 捕获名帧:本层闭包物化进环境的捕获 rust 名(对照 typst 闭包
+    // captured 作用域的 `Binding::capture` 只读标)——赋值/可变方法
+    // 落在这些名字上时运行期报只读错。
+    self.captured_locals.push(Default::default());
 
     // 先绑定捕获名(体的自由名解析到这些局部)。
     for name in capture_names {
-        bind_local(&mut fn_env, name);
+        let rust = bind_local(&mut fn_env, name);
+        self.captured_locals
+            .last_mut()
+            .expect("捕获名帧已在入栈时压入")
+            .insert(rust);
     }
     // 自引用名在体生成**前**注入 env(此前在序言构造段才绑定,
     // 体生成时名字不可见,递归点落到 global 回退——unknown variable)。
@@ -244,6 +256,7 @@ pub(super) fn gen_closure_fn(
     //(勿在此恢复——外层再读会被污染,创建元组与序言形态不一致)。
     let has_st = self.used_state;
     self.in_fn -= 1;
+    self.captured_locals.pop();
     self.in_closure = self.in_closure.saturating_sub(1);
 
     // 状态元组与解包序言(has_st 后置判定)。自递归闭包:���部追加

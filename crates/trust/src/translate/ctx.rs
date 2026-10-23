@@ -57,6 +57,12 @@ pub(super) struct Ctx {
     /// 闭包体翻译中(闭包按需携带 __st,模块槽直接引用不可用;
     /// 对照 typst:闭包改捕获名本就报错,留给诊断承载)。
     pub(super) in_closure: usize,
+    /// 捕获名栈(每层闭包一帧,元素为绑定进闭包环境的**捕获名
+    /// rust 局部名**;对照 typst 闭包 captured 作用域的
+    /// `Binding::capture` 只读标):赋值/可变方法落在捕获局部上时,
+    /// 运行期报 "variables from outside the function are read-only"
+    /// (对照 `Binding::write` 的 Captured 拒绝)。
+    pub(super) captured_locals: Vec<std::collections::HashSet<String>>,
     /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
     /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
     /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
@@ -130,6 +136,7 @@ impl Ctx {
             in_loop: 0,
             mutable_slots: std::collections::HashSet::new(),
             in_closure: 0,
+            captured_locals: Vec::new(),
             closure_dedup: std::collections::HashMap::new(),
             next_closure_id: 0,
             closure_items: String::new(),

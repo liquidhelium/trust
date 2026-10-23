@@ -359,81 +359,10 @@ impl Ctx {
                         | ast::BinOp::DivAssign
                 )
             {
-                // 目标:局部变量(空路径)或可变位置(字段/accessor 链),
-                // 对照 typst 的 `Expr::access`;复合赋值读旧值再写回。
-                if let Some((mslot, mpath)) = self.parse_place_slot(binary.lhs(), &env) {
-                    // 可变模块槽:读改写回(对照 typst 顶层绑定的就地
-                    // 修改语义);体引用 __st 须置 used_state。
-                    self.used_state = true;
-                    let path_lit = place_path_lit(&mpath);
-                    let at = self.span_of(binary.span());
-                    let rhs = self.expr(binary.rhs(), &env);
-                    let op = match binary.op() {
-                        ast::BinOp::Assign => "assign",
-                        ast::BinOp::AddAssign => "add",
-                        ast::BinOp::SubAssign => "sub",
-                        ast::BinOp::MulAssign => "mul",
-                        ast::BinOp::DivAssign => "div",
-                        _ => unreachable!(),
-                    };
-                    let body = match op {
-                        "assign" => format!(
-                            "let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; *__p = __rhs;"
-                        ),
-                        o => format!(
-                            "let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{o}(__old, __rhs).at({at})?;"
-                        ),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "    {{ let __rhs = {rhs}; let mut __msv = rt::read_ms(&__st.{mslot})?; {body} rt::write_ms(&__st.{mslot}, __msv)?; }}"
-                    );
-                } else if let Some((root, path)) = self.parse_place(binary.lhs(), &env) {
-                    let path_lit = place_path_lit(&path);
-                    let at = self.span_of(binary.span());
-                    let rhs = self.expr(binary.rhs(), &env);
-                    let op = match binary.op() {
-                        ast::BinOp::Assign => None,
-                        ast::BinOp::AddAssign => Some("add"),
-                        ast::BinOp::SubAssign => Some("sub"),
-                        ast::BinOp::MulAssign => Some("mul"),
-                        ast::BinOp::DivAssign => Some("div"),
-                        _ => unreachable!(),
-                    };
-                    match op {
-                        Some(op) => {
-                            // 复合赋值:单次寻址 + mem::take(对照原生
-                            // `let lhs = std::mem::take(&mut *location)`,
-                            // 免一次旧值克隆)。
-                            let _ = writeln!(
-                                out,
-                                "    {{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{op}(__old, __rhs).at({at})?; }}"
-                            );
-                        }
-                        None => {
-                            // 普通赋值:末段字段在字典上缺失即创建
-                            // (对照 `apply_assignment` 的 FieldAccess
-                            // 特例:access_dict + insert,单次写入)。
-                            let _ = writeln!(
-                                out,
-                                "    {{ let __rhs = {rhs}; rt::assign_value(&mut {root}, {path_lit}, __rhs, {at})?; }}"
-                            );
-                        }
-                    }
-                } else if let ast::Expr::Ident(ident) = binary.lhs() {
-                    self.diag(
-                        binary.span(),
-                        format!(
-                            "赋值目标 `{}` 不是局部变量(模块槽赋值暂不支持)",
-                            ident.as_str()
-                        ),
-                    );
-                } else {
-                    self.diag(
-                        binary.span(),
-                        "赋值目标须为局部变量或字段/accessor 路径".into(),
-                    );
-                }
+                // 赋值:统一走 classify_place 分类(局部/模块槽/捕获/
+                // 未命中/临时值,对照 `apply_assignment` + `Access`)。
+                let code = self.assign_code(binary, &env);
+                let _ = writeln!(out, "    {code};");
                 continue;
             }
             let value = self.expr(stmt, &env);
@@ -450,40 +379,30 @@ impl Ctx {
         out.push('}');
         out
     }
-    /// 解析可变位置(赋值/可变方法目标):根须为局部变量,路径段为
-    /// 字段访问与 accessor 方法(`at`/`first`/`last`),对照 typst-eval
-    /// `access.rs` 可 access 的形态。返回 (根局部 rust 名, 路径段表达式)。
+    /// 赋值/可变方法目标的分类(对照 typst-eval `access.rs` 的可
+    /// access 形态与 `Scopes::get_mut` 的解析序:局部层 → 模块槽 →
+    /// 全局)。路径段为字段访问与 accessor 方法(`at`/`first`/`last`)。
     ///
     /// 注:`at` 的参数在段处求值,先走目标链后求参数(纯下标表达式
     /// 下与 typst 的"参数先求"等价;带副作用的下标才有顺序差)。
-    pub(super) fn parse_place(
-        &mut self,
-        expr: ast::Expr,
-        env: &Env,
-    ) -> Option<(String, Vec<String>)> {
+    pub(super) fn classify_place(&mut self, expr: ast::Expr, env: &Env) -> Place {
         let mut segs = Vec::new();
         let mut root: Option<String> = None;
         if !self.walk_place(expr, env, &mut segs, &mut root) {
-            return None;
+            return Place::Temporary;
         }
-        let root = root?;
-        let (_, rust) = env.locals.iter().rev().find(|(n, _)| *n == root)?;
-        Some((rust.clone(), segs))
-    }
-
-    /// 可变**模块槽**放路径:根为被标记可变的顶层槽,返回(槽名,路径)。
-    /// 修改点用读改写回(read_ms → place_mut → write_ms)。
-    pub(super) fn parse_place_slot(
-        &mut self,
-        expr: ast::Expr,
-        env: &Env,
-    ) -> Option<(String, Vec<String>)> {
-        let mut segs = Vec::new();
-        let mut root: Option<String> = None;
-        if !self.walk_place(expr, env, &mut segs, &mut root) {
-            return None;
+        let Some(root) = root else {
+            return Place::Temporary;
+        };
+        // 局部判定先于模块(捕获名以局部形态绑定进闭包环境;对照
+        // typst 词法层由内向外)。捕获局部(对照 `Binding::capture`
+        // 只读标)单独成类。
+        if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == root) {
+            if self.captured_locals.iter().any(|f| f.contains(rust)) {
+                return Place::Captured;
+            }
+            return Place::Local { root: rust.clone(), path: segs };
         }
-        let root = root?;
         match env
             .module
             .iter()
@@ -491,12 +410,143 @@ impl Ctx {
             .find(|(n, _)| *n == root)
             .map(|(_, r)| r)
         {
+            // 模块顶层流(in_closure==0)的可变槽:就地修改。
             Some(super::ctx::Ref::Slot(s))
                 if self.mutable_slots.contains(s) && self.in_closure == 0 =>
             {
-                Some((s.clone(), segs))
+                Place::Slot { slot: s.clone(), path: segs }
             }
-            _ => None,
+            // 函数/闭包体内:模块绑定是捕获(对照 typst CapturesVisitor
+            // ——顶层函数同样是闭包),写即只读错。
+            Some(_) if self.in_closure > 0 => Place::Captured,
+            // 模块域内的运行期引用(ModuleField/Value/未标可变的槽):
+            // 可变语义本轮不承载,保留翻译期诊断。
+            Some(_) => Place::Deferred,
+            // 词法层全部未命中:运行期查全局(对照 `Scopes::get_mut`
+            // 的 miss 分支:命中全局报常量,否则未知变量)。
+            None => Place::Unresolved { name: root },
+        }
+    }
+
+    /// 赋值/复合赋值的统一发射(语句与表达式两处共用)。对照
+    /// typst-eval/src/ops.rs `apply_assignment`:**RHS 先求**,目标后
+    /// 访问;普通赋值且目标为字段链时末段走"缺失即创建"的字典插入
+    /// (对照 `access_dict` + `insert` 特例);复合赋值单次寻址 +
+    /// mem::take。
+    pub(super) fn assign_code(&mut self, binary: ast::Binary, env: &Env) -> String {
+        use ast::BinOp;
+        let compound = match binary.op() {
+            BinOp::Assign => None,
+            BinOp::AddAssign => Some("add"),
+            BinOp::SubAssign => Some("sub"),
+            BinOp::MulAssign => Some("mul"),
+            BinOp::DivAssign => Some("div"),
+            _ => unreachable!("assign_code 只接赋值族"),
+        };
+        let at = self.span_of(binary.span());
+        let rhs = self.expr(binary.rhs(), env);
+        match self.classify_place(binary.lhs(), env) {
+            Place::Local { root, path } => {
+                let path_lit = place_path_lit(&path);
+                match compound {
+                    Some(op) => format!(
+                        "{{ let __rhs = {rhs}; let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{op}(__old, __rhs).at({at})?; Value::None }}"
+                    ),
+                    None => format!(
+                        "{{ let __rhs = {rhs}; rt::assign_value(&mut {root}, {path_lit}, __rhs, {at})?; Value::None }}"
+                    ),
+                }
+            }
+            Place::Slot { slot, path } => {
+                // 可变模块槽:读改写回(对照 typst 顶层绑定的就地修改
+                // 语义);体引用 __st 须置 used_state。
+                self.used_state = true;
+                let path_lit = place_path_lit(&path);
+                match compound {
+                    Some(op) => format!(
+                        "{{ let __rhs = {rhs}; let mut __msv = rt::read_ms(&__st.{slot})?; let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __old = std::mem::take(__p); *__p = ops::{op}(__old, __rhs).at({at})?; rt::write_ms(&__st.{slot}, __msv)?; Value::None }}"
+                    ),
+                    None => format!(
+                        "{{ let __rhs = {rhs}; let mut __msv = rt::read_ms(&__st.{slot})?; rt::assign_value(&mut __msv, {path_lit}, __rhs, {at})?; rt::write_ms(&__st.{slot}, __msv)?; Value::None }}"
+                    ),
+                }
+            }
+            // 写捕获:对照 `Binding::write` 对 Captured 的拒绝
+            //(RHS 已先求,保持副作用顺序)。
+            Place::Captured => format!(
+                "{{ let __rhs = {rhs}; rt::bail_captured(typst::foundations::Capturer::Function)? }}"
+            ),
+            // 词法层未命中的标识符:运行期经 `Scopes::get_mut`
+            // 触发常量/未知变量错(文案与 hint 由 typst 侧生成)。
+            Place::Unresolved { name } => format!(
+                "{{ let __rhs = {rhs}; rt::check_mut_unknown(engine, \"{}\", {at})?; Value::None }}",
+                super::naming::escape(&name)
+            ),
+            // 非左值:求目标副作用后报 temporary(对照 `Access`
+            // 兜底臂;FieldAccess 只求目标链不求字段读)。
+            Place::Temporary => {
+                let lhs = self.eval_for_access(binary.lhs(), env);
+                format!("{{ let __rhs = {rhs}; let _ = {lhs}; rt::bail_temporary({at})? }}")
+            }
+            Place::Deferred => {
+                self.diag(
+                    binary.span(),
+                    "赋值目标为运行期模块引用(本轮不承载)".into(),
+                );
+                "Value::None".into()
+            }
+        }
+    }
+
+    /// 临时值目标的副作用求值,对照 `Access` 各臂的递归形态:
+    /// FieldAccess 只深入**目标**(不读字段),其余表达式整体求值。
+    pub(super) fn eval_for_access(&mut self, expr: ast::Expr, env: &Env) -> String {
+        match expr {
+            ast::Expr::FieldAccess(access) => self.eval_for_access(access.target(), env),
+            ast::Expr::Parenthesized(p) => self.eval_for_access(p.expr(), env),
+            _ => self.expr(expr, env),
+        }
+    }
+
+    /// 解构赋值叶子的统一写回(Ident 与 at 位置叶子共用;对照
+    /// binding.rs DestructAssignment 的叶子 f:`expr.access(vm)?` +
+    /// 写回,at_mut 语义**不**插入缺失键;value 由调用方先求)。
+    pub(super) fn place_write_leaf(
+        &mut self,
+        expr: ast::Expr,
+        value: &str,
+        env: &Env,
+    ) -> String {
+        let at = self.span_of(expr.span());
+        match self.classify_place(expr, env) {
+            Place::Local { root, path } => {
+                let path_lit = place_path_lit(&path);
+                format!(
+                    "{{ let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; *__p = {value}; }}\n"
+                )
+            }
+            Place::Slot { slot, path } => {
+                self.used_state = true;
+                let path_lit = place_path_lit(&path);
+                format!(
+                    "{{ let mut __msv = rt::read_ms(&__st.{slot})?; let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; *__p = {value}; rt::write_ms(&__st.{slot}, __msv)?; }}\n"
+                )
+            }
+            Place::Captured => format!(
+                "{{ let _ = {value}; rt::bail_captured(typst::foundations::Capturer::Function)?; }}\n"
+            ),
+            Place::Unresolved { name } => format!(
+                "{{ let _ = {value}; rt::check_mut_unknown(engine, \"{}\", {at})?; }}\n",
+                super::naming::escape(&name)
+            ),
+            Place::Temporary => {
+                let ev = self.eval_for_access(expr, env);
+                format!("{{ let _ = {value}; let _ = {ev}; rt::bail_temporary({at})?; }}\n")
+            }
+            Place::Deferred => {
+                self.diag(expr.span(), "解构赋值目标为运行期模块引用".into());
+                String::new()
+            }
         }
     }
 
@@ -570,4 +620,22 @@ pub(super) fn place_path_lit(path: &[String]) -> String {
     } else {
         format!("&[{}]", path.join(", "))
     }
+}
+
+/// 赋值/可变方法目标的分类(对照 typst-eval `access.rs`:可 access
+/// 形态有限枚举,其余一律 Temporary;`Scopes::get_mut` 决定解析序)。
+pub(super) enum Place {
+    /// 根为局部变量(或字段/accessor 链落在局部上)。
+    Local { root: String, path: Vec<String> },
+    /// 根为可变模块槽(读改写回)。
+    Slot { slot: String, path: Vec<String> },
+    /// 根为闭包捕获名(对照 `Binding::capture` 只读标,运行期报
+    /// "variables from outside the function are read-only")。
+    Captured,
+    /// 标识符在词法层未命中(运行期查全局:常量/未知变量错)。
+    Unresolved { name: String },
+    /// 非左值表达式(求副作用后报 temporary)。
+    Temporary,
+    /// 模块域内的运行期引用(本轮不承载可变语义,翻译期诊断)。
+    Deferred,
 }

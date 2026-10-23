@@ -10,8 +10,8 @@ use typst::World;
 use typst::diag::{At, SourceResult, bail};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Closure, ClosureNode, Content, Context, Func, IntoValue, Module,
-    Scope, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
+    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
 use typst::utils::{LazyHash, Protected};
@@ -287,8 +287,20 @@ fn state_error(message: &str) -> EcoVec<SourceDiagnostic> {
     )]
 }
 
+// --- 槽访问单门(对照 Binding::read / Binding::write)---
+//
+// 写一次槽(OnceLock)与可变槽(Mutex)走同一 `read`/`fill` 入口:
+// 翻译侧无须(也无法在全部发射点)按字段类型分流——槽的可变性由
+// 计划期 mutable_slots 决定字段类型,行为差异收拢到这两个入口。
+
+/// 槽字段的统一访问(OnceLock 写一次;Mutex 任意次写)。
+pub trait SlotField {
+    fn slot_read(&self) -> SourceResult<Value>;
+    fn slot_fill(&self, value: Value) -> SourceResult<()>;
+}
+
 /// 读一个顶层绑定槽(写一次单元)。
-pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
+fn read_lock(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
         if let Some(v) = slot.get() {
             if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
                 eprintln!("[slot] read-ok  @{:?}", std::ptr::from_ref(slot));
@@ -303,6 +315,55 @@ pub fn read(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
             std::ptr::from_ref(slot)
         )))
     }
+
+/// 填一个顶层绑定槽(写一次)。首填成功即定;重入(如 `module_init`
+/// 因模块缓存驱逐而重新求值)时同值幂等跳过,不同值仍是生成器
+/// bug,明确报错。
+fn fill_lock(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
+    if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
+        eprintln!("[slot] fill    @{:?}", std::ptr::from_ref(slot));
+    }
+    match slot.get() {
+        Some(existing) => {
+            if *existing == value {
+                Ok(())
+            } else {
+                Err(state_error("模块槽重复填充为不同值(生成器 bug)"))
+            }
+        }
+        None => slot
+            .set(value)
+            .map_err(|_| state_error("模块槽并发填充冲突")),
+    }
+}
+
+impl SlotField for std::sync::OnceLock<Value> {
+    fn slot_read(&self) -> SourceResult<Value> {
+        read_lock(self)
+    }
+    fn slot_fill(&self, value: Value) -> SourceResult<()> {
+        fill_lock(self, value)
+    }
+}
+
+impl SlotField for std::sync::Mutex<Value> {
+    fn slot_read(&self) -> SourceResult<Value> {
+        read_ms(self)
+    }
+    fn slot_fill(&self, value: Value) -> SourceResult<()> {
+        fill_ms(self, value)
+    }
+}
+
+/// 读一个顶层绑定槽(单门:字段类型决定写一次/可变语义)。
+pub fn read(slot: &impl SlotField) -> SourceResult<Value> {
+    slot.slot_read()
+}
+
+/// 填一个顶层绑定槽(单门)。
+pub fn fill(slot: &impl SlotField, value: Value) -> SourceResult<()> {
+    slot.slot_fill(value)
+}
 
 /// 读创建期物化的全局名槽:有值读槽(对照 typst 创建期捕获),
 /// 无值回退调用期全局查找(对照创建期不可见名字的调用期解析)。
@@ -319,29 +380,9 @@ pub fn read_or(
 
 /// 读存为内容(body)的槽。
 pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> {
-    match read(slot)? {
+    match read_lock(slot)? {
         Value::Content(content) => Ok(content),
         _ => Err(state_error("模块 body 槽不是内容(生成器 bug)")),
-    }
-}
-
-/// 填一个顶层绑定槽。首填成功即定;重入(如 `module_init` 因模块缓存
-/// 驱逐而重新求值)时同值幂等跳过,不同值仍是生成器 bug,明确报错。
-pub fn fill(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
-    if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
-        eprintln!("[slot] fill    @{:?}", std::ptr::from_ref(slot));
-    }
-    match slot.get() {
-        Some(existing) => {
-            if *existing == value {
-                Ok(())
-            } else {
-                Err(state_error("模块槽重复填充为不同值(生成器 bug)"))
-            }
-        }
-        None => slot
-            .set(value)
-            .map_err(|_| state_error("模块槽并发填充冲突")),
     }
 }
 
@@ -698,7 +739,13 @@ pub fn closure(
             let brief = format!("{value:?}");
             eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
         }
-        scope.define(name, value.clone());
+        // 捕获绑定打只读标(对照 typst 闭包 captured 作用域的
+        // `Binding::capture(Capturer::Function)`):写捕获由 typst
+        // 求值器经 `Binding::write` 报只读错。
+        scope.bind(
+            (*name).into(),
+            Binding::detached(value.clone()).capture(Capturer::Function),
+        );
     }
     let closure_span = node.span();
     Func::from(Closure {
@@ -885,7 +932,11 @@ pub fn closure_node_at(
     resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();
     for (name, value) in &captured {
-        scope.define(name, value.clone());
+        // 同 `closure`:捕获绑定只读标。
+        scope.bind(
+            (*name).into(),
+            Binding::detached(value.clone()).capture(Capturer::Function),
+        );
     }
     let closure_span = node.span();
     Func::from(Closure {
@@ -1139,6 +1190,19 @@ pub fn method_mut(
                     .at(span)?
             }
         },
+        // 对照 maybe_resolve_mutating 的字典回退:push/pop **不是**字典的
+        // 可变方法(is_dict_mutating_method 只认 insert/remove),落普通
+        // 字段调用——字典字段不可直接调用(键存在/缺失分档报错,对照
+        // eval_field_callee 的字典分支)。
+        Value::Dict(dict) if matches!(method, "push" | "pop") => {
+            let key = Str::from(method);
+            return match dict.at(key, None) {
+                Ok(_) => {
+                    bail!(span, "cannot directly call dictionary keys as functions")
+                }
+                Err(err) => Err(err).at(span),
+            }
+        }
         _ => bail!(span, "type {ty} has no method `{method}`"),
     }
     args.finish()?;
@@ -1146,6 +1210,45 @@ pub fn method_mut(
     Ok(output).trace(
         engine.world,
         || typst::diag::Tracepoint::Call(Some(name.clone())),
+        span,
+    )
+}
+
+/// 可变方法调用的**运行期分派**(对照 `maybe_resolve_mutating` 的完整
+/// 形态):数组四法与字典 insert/remove 就地修改;字典 push/pop 报
+/// 字段调用错;**其余类型回退普通方法/字段调用**(symbol 修饰符等,
+/// 对照 eval_field_callee——`s.push(none)` 返回新 symbol 而非报错)。
+/// 翻译期不知值型,分派必须在运行期按值完成。
+pub fn method_mut_dispatch(
+    engine: &mut Engine,
+    context: Tracked<Context>,
+    value: &mut Value,
+    method: &str,
+    mut args: Args,
+    span: Span,
+    access_text: &str,
+) -> SourceResult<Value> {
+    let is_array = matches!(value, Value::Array(_));
+    let is_dict = matches!(value, Value::Dict(_));
+    if (is_array && matches!(method, "push" | "pop" | "insert" | "remove"))
+        || (is_dict && matches!(method, "insert" | "remove"))
+    {
+        return method_mut(engine, value, method, args, span);
+    }
+    if is_dict {
+        // 字典 push/pop:method_mut 内同款分支报字段调用错。
+        return method_mut(engine, value, method, args, span);
+    }
+    // 回退普通字段调用:方法调用把目标作为首个位置参数。
+    let target = value.clone();
+    let (func, bound) = method_callee(target.clone(), method, access_text, engine, span)?;
+    if bound.is_some() {
+        args.insert(0, span, target);
+    }
+    let name = EcoString::from(method);
+    call_with(func, None, span, args, engine, context).trace(
+        engine.world,
+        move || typst::diag::Tracepoint::Call(Some(name.clone())),
         span,
     )
 }
@@ -1230,18 +1333,16 @@ pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceRe
 }
 
 /// 数组解构的剩余收集(`..rest`);`total` 为模式消费的总位数。
-pub fn d_rest(
+/// 数组解构的 sink 大小(对照 binding.rs 的 `(1 + len).checked_sub
+/// (items)`):不足即数量错误。
+pub fn d_sink_size(
     array: &typst::foundations::Array,
-    i: usize,
     total: usize,
     span: Span,
-) -> SourceResult<typst::foundations::Array> {
-    let sink_size = (1 + array.len()).checked_sub(total);
-    match sink_size {
-        Some(sink_size) if i + sink_size <= array.len() => {
-            Ok(array.as_slice()[i..i + sink_size].iter().cloned().collect())
-        }
-        _ => Err(elements_mismatch_diagnostic(
+) -> SourceResult<usize> {
+    match (1 + array.len()).checked_sub(total) {
+        Some(size) => Ok(size),
+        None => Err(elements_mismatch_diagnostic(
             array.len(),
             total - 1,
             true,
@@ -1250,16 +1351,31 @@ pub fn d_rest(
     }
 }
 
-/// 数组解构结束后校验(还有剩余元素则报错)。
+/// 数组解构的 sink 切片(自 `i` 起 `size` 个,越界即数量错误;
+/// `count` 为模式中非 sink 项数,仅用于错误消息)。
+pub fn d_rest(
+    array: &typst::foundations::Array,
+    i: usize,
+    size: usize,
+    count: usize,
+    span: Span,
+) -> SourceResult<typst::foundations::Array> {
+    match array.as_slice().get(i..i + size) {
+        Some(slice) => Ok(slice.iter().cloned().collect()),
+        None => Err(elements_mismatch_diagnostic(array.len(), count, true, span)),
+    }
+}
+
+/// 数组解构结束后校验(还有剩余元素则报错;`consumed` 为运行期索引)。
 pub fn d_array_finish(
     array: &typst::foundations::Array,
-    consumed: usize,
+    consumed: &usize,
     span: Span,
 ) -> SourceResult<()> {
-    if consumed < array.len() {
+    if *consumed < array.len() {
         return Err(elements_mismatch_diagnostic(
             array.len(),
-            consumed,
+            *consumed,
             false,
             span,
         ));
@@ -1394,6 +1510,49 @@ pub enum PlaceSeg {
     At(Value),
     First,
     Last,
+}
+
+// --- 左值访问门(对照 typst-eval/src/access.rs 与 Scopes::get_mut)---
+//
+// typst 的可变性校验集中在两处:`Binding::write` 是唯一写入门
+// (Captured 判别式按捕获者报只读错),`Scopes::get_mut` 的 miss 分支
+// 按名字是否命中全局决定"常量"或"未知变量"错。这里直接复用 typst
+// 的 pub 类型触发同一段错误构造,零文案漂移。
+
+/// 赋值/可变方法落在**捕获绑定**上:对照 `Binding::write` 对
+/// `BindingKind::Captured` 的拒绝——构造一个 Captured 绑定再调它的
+/// `write`,错误信息(含 function/context expression 措辞分档)由
+/// typst 自己生成。
+pub fn bail_captured(capturer: Capturer) -> SourceResult<Value> {
+    let err = Binding::detached(Value::None)
+        .capture(capturer)
+        .write()
+        .unwrap_err();
+    Err(eco_vec![SourceDiagnostic::error(Span::detached(), err)])
+}
+
+/// 赋值目标为**非左值表达式**:先求副作用再报错,对照
+/// `Access for ast::Expr` 的兜底臂(`access.rs:21-24`)。
+pub fn bail_temporary(span: Span) -> SourceResult<Value> {
+    bail!(span, "cannot mutate a temporary value")
+}
+
+/// 标识符赋值目标在所有词法层都未命中:对照 `Scopes::get_mut` 的
+/// miss 分支——以空局部作用域 + 全局库构造 `Scopes` 直接调它的
+/// `get_mut`,命中全局得 "cannot mutate a constant: {name}"
+/// (`std` 特判同在),否则 "unknown variable: {name}"(减号 hint
+/// 同在)。
+pub fn check_mut_unknown(
+    engine: &mut Engine,
+    name: &str,
+    span: Span,
+) -> SourceResult<()> {
+    let library: &Library = engine.library;
+    Scopes::new(Some(library))
+        .get_mut(name)
+        .map(|_| ())
+        .at(span)?;
+    Ok(())
 }
 
 /// 普通赋值 `a.b..k = v` 的求值(对照 `apply_assignment` 的
@@ -2140,7 +2299,15 @@ pub fn context_closure(
     resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();
     for (name, value) in &captured {
-        scope.define(name, value.clone());
+        // 捕获绑定按 `Binding::capture` 打只读标(对照 typst 闭包的
+        // captured 作用域):`context (i = 1)` 这类写捕获会由 typst
+        // 求值器经 `Binding::write` 拒绝,报 "variables from outside
+        // the context expression are read-only..."。math 片段同经此
+        // 路径,但 math 不含赋值,不受影响。
+        scope.bind(
+            (*name).into(),
+            Binding::detached(value.clone()).capture(Capturer::Context),
+        );
     }
     Func::from(Closure {
         node: ClosureNode::Context(node.clone()),

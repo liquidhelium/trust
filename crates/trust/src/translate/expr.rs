@@ -88,6 +88,16 @@ impl Ctx {
             }
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
+            ast::Expr::DestructAssignment(assign) => {
+                // 解构赋值(表达式位置,顶层标记语句同走此臂;对照
+                // binding.rs `Eval for ast::DestructAssignment`:值先求,
+                // 叶子走 access 写回)。assign 叶子不绑新名,env 克隆
+                // 仅为满足 &mut 签名。
+                let value = self.expr(assign.value(), env);
+                let mut env2 = env.clone();
+                let stmts = self.destructure(assign.pattern(), value, &mut env2, true);
+                format!("{{ {} Value::None }}", stmts)
+            }
             ast::Expr::ContentBlock(block) => {
                 // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
                 // 嵌入表达式 + set/show 规则,构造方式对照
@@ -256,13 +266,14 @@ impl Ctx {
                 let join_at = self.span_of(while_loop.body().span());
                 let loop_at = self.span_of(while_loop.span());
                 // 静态"常真"检测(对照原生 i==0 分支的 is_invariant/
-                // can_diverge:条件不变式且体不含 break/return 即必为
-                // 无限循环;条件本身仍先求值,保持副作用顺序)。
+                // can_diverge:条件不变式且体不含 break/return 时,首次
+                // 求值为真即报错;**条件为假则合法退出**——`while false
+                // {}` 返回 none,不报错(条件副作用仍先求值)。
                 if is_invariant(while_loop.condition().to_untyped())
                     && !can_diverge(while_loop.body().to_untyped())
                 {
                     return format!(
-                        "{{ rt::boolean({condition}, {cond_at})?; bail!({cond_at}, \"condition is always true\") }} /* never */"
+                        "{{ let __c = rt::boolean({condition}, {cond_at})?; if __c {{ bail!({cond_at}, \"condition is always true\") }} else {{ Value::None }} }}"
                     );
                 }
                 // 迭代护栏(对照原生 MAX_ITERATIONS:超出报 "loop
@@ -474,6 +485,11 @@ impl Ctx {
     fn binary(&mut self, binary: ast::Binary, env: &Env) -> String {
         use ast::BinOp::*;
         let op = binary.op();
+        // 赋值族(表达式位置与语句位置同一语义,对照 `apply_assignment`
+        // 是 Binary 求值的一个分支):统一走分类发射。
+        if matches!(op, Assign | AddAssign | SubAssign | MulAssign | DivAssign) {
+            return self.assign_code(binary, env);
+        }
         // and/or 短路(对照 typst-eval/src/ops.rs)。
         if matches!(op, And | Or) {
             let lhs = self.expr(binary.lhs(), env);
@@ -534,33 +550,60 @@ impl Ctx {
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
-                // 可变方法:目标 = 局部变量或字段/accessor 链
-                // (typst 语义:就地修改,对照 `call_method_mut`;
-                // 实参先于目标求值,对照 `maybe_resolve_mutating`)。
-                if let Some((root, path)) = self.parse_place(access.target(), env) {
-                    let path_lit = super::block::place_path_lit(&path);
-                    let args = self.gen_args(call.args(), env, &at);
-                    return format!(
-                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut(engine, __place, \"{}\", __mut_args, {at})? }}",
-                        escape(field)
-                    );
+                // 可变方法(对照 `maybe_resolve_mutating`:**实参先于
+                // 目标求值**,目标经 `Access` 可变解析)。
+                let args = self.gen_args(call.args(), env, &at);
+                let access_text = access.to_untyped().full_text().to_string();
+                match self.classify_place(access.target(), env) {
+                    super::block::Place::Local { root, path } => {
+                        let path_lit = super::block::place_path_lit(&path);
+                        return format!(
+                            "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})? }}",
+                            escape(field), access_text
+                        );
+                    }
+                    super::block::Place::Slot { slot, path } => {
+                        // 可变模块槽:读改写回(就地修改语义);体引用
+                        // __st 须置 used_state(函数序言按它带状态)。
+                        self.used_state = true;
+                        let path_lit = super::block::place_path_lit(&path);
+                        return format!(
+                            "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let mut __msv = rt::read_ms(&__st.{slot})?; let __place = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __r = rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})?; rt::write_ms(&__st.{slot}, __msv)?; __r }}",
+                            escape(field), access_text
+                        );
+                    }
+                    // 写捕获(含模块槽在闭包内的形态):实参已求,对照
+                    // `Access` 对 Captured 绑定的拒绝——symbol 上的
+                    // push 修饰符同样在此报只读错。
+                    super::block::Place::Captured => {
+                        return format!(
+                            "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::bail_captured(typst::foundations::Capturer::Function)? }}"
+                        );
+                    }
+                    // 词法层未命中:实参已求,运行期查全局(常量/未知
+                    // 变量错,对照 `Scopes::get_mut`)。
+                    super::block::Place::Unresolved { name } => {
+                        return format!(
+                            "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::check_mut_unknown(engine, \"{}\", {at})?; Value::None }}",
+                            escape(&name)
+                        );
+                    }
+                    // 非左值:实参已求,目标按 `Access` 递归求副作用
+                    //(FieldAccess 只求目标链)后报 temporary。
+                    super::block::Place::Temporary => {
+                        let target = self.eval_for_access(access.target(), env);
+                        return format!(
+                            "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let _ = {target}; rt::bail_temporary({at})? }}"
+                        );
+                    }
+                    super::block::Place::Deferred => {
+                        self.diag(
+                            call.span(),
+                            "可变方法的目标为运行期模块引用(本轮不承载)".into(),
+                        );
+                        return "Value::None".into();
+                    }
                 }
-                if let Some((mslot, mpath)) = self.parse_place_slot(access.target(), env) {
-                    // 可变模块槽:读改写回(就地修改语义);体引用
-                    // __st 须置 used_state(函数序言按它带状态)。
-                    self.used_state = true;
-                    let path_lit = super::block::place_path_lit(&mpath);
-                    let args = self.gen_args(call.args(), env, &at);
-                    return format!(
-                        "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; let mut __msv = rt::read_ms(&__st.{mslot})?; let __place = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __r = rt::method_mut(engine, __place, \"{}\", __mut_args, {at})?; rt::write_ms(&__st.{mslot}, __msv)?; __r }}",
-                        escape(field)
-                    );
-                }
-                self.diag(
-                    call.span(),
-                    "可变方法的目标须为局部变量或字段/accessor 路径".into(),
-                );
-                return "Value::None".into();
             }
             // 方法/字段调用:先解析被调值(不可调用则在实参求值前报错,
             // 对照 `eval_field_callee` 先于 args.eval;方法调用把目标

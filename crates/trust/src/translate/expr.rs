@@ -363,6 +363,23 @@ impl Ctx {
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return format!("{rust}.clone()");
         }
+        // 运行期通配层(`import <运行期值>: *` 之后):层内名字遮蔽
+        // 外层模块名与全局;未命中沿链回落(对照 typst 作用域链,
+        // 多层内层优先)。
+        if !env.wildcards.is_empty() {
+            let at = self.span_of(ident.span());
+            let name_escaped = escape(name);
+            let layers = wild_layers(env);
+            if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
+                let static_v = self.ref_value(module_ref);
+                return format!(
+                    "rt::wild_or({layers}, \"{name_escaped}\", {static_v}, {at})?"
+                );
+            }
+            return format!(
+                "rt::wild_or_global({layers}, \"{name_escaped}\", engine, {at})?"
+            );
+        }
         if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
             return self.ref_value(module_ref);
         }
@@ -920,6 +937,28 @@ impl Ctx {
             }
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
                 captured.push((name.clone(), format!("{rust}.clone()")));
+            } else if !env.wildcards.is_empty() {
+                // 通配层内名(或可能经层遮蔽):创建期快照(对照
+                // CapturesVisitor——创建期可见即捕获;层内未命中沿
+                // 链回落,与 ident 同序)。
+                let name_escaped = escape(name);
+                let layers = wild_layers(env);
+                if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
+                    let static_v = self.ref_value(module_ref);
+                    captured.push((
+                        name.clone(),
+                        format!(
+                            "rt::wild_or({layers}, \"{name_escaped}\", {static_v}, file_span())?"
+                        ),
+                    ));
+                } else {
+                    captured.push((
+                        name.clone(),
+                        format!(
+                            "rt::wild_or_global({layers}, \"{name_escaped}\", engine, file_span())?"
+                        ),
+                    ));
+                }
             } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name)
                 // 全局物化名(G_ 槽/GlobalFallback):创建期可能不可见
                 // ——走 pending 协议(resolve_pending 的 capture_opt 软物
@@ -938,6 +977,13 @@ impl Ctx {
         }
         (captured, globals)
     }
+}
+
+/// 运行期通配层切片表达式(`&[&__w1, &__w2]`,内层在尾,查找自尾
+/// 向首=内层遮蔽外层)。
+fn wild_layers(env: &Env) -> String {
+    let refs: Vec<String> = env.wildcards.iter().map(|w| format!("&{w}")).collect();
+    format!("&[{}]", refs.join(", "))
 }
 
 /// 表达式是否恒值(对照 typst-eval flow.rs 的 `is_invariant`:

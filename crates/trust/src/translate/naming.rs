@@ -43,9 +43,21 @@ pub(super) fn sanitize(name: &str) -> String {
     out
 }
 
+/// 生成代码作用域内自用的裸标识符(函数参数 engine/context/span、
+/// 模块别名 rt/ops/std、类型名等)。用户局部变量同名会遮蔽它们
+/// (finite 依赖 diagraph-layout 的 `let engine = ...` 曾使生成码把
+/// Value 当 &Engine 用)——命中即加 `__trust_` 前缀。
+pub(super) const RESERVED_RUST_IDENTS: &[&str] = &[
+    "engine", "context", "span", "rt", "ops", "std", "SPAN", "Value", "Args", "Dict",
+    "Unit", "SourceResult", "Tracked", "Engine", "Context",
+];
+
 /// 同名局部按出现序加序号,保证生成 rust 名互异。
 pub(super) fn fresh_rust_ident(name: &str, locals: &[(String, String)]) -> String {
-    let base = sanitize(name);
+    let mut base = sanitize(name);
+    if RESERVED_RUST_IDENTS.contains(&base.as_str()) {
+        base = format!("__trust_{base}");
+    }
     let mut candidate = base.clone();
     let mut n = 1;
     while locals.iter().any(|(_, rust)| *rust == candidate) {

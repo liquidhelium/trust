@@ -1891,6 +1891,71 @@ pub fn styled_with_recipe(
     tail.styled_with_recipe(engine, context, recipe)
 }
 
+/// 体内 `import <运行期值>: *` 的运行期通配层(对照 typst-eval
+/// import.rs:源值 Func 无 scope 报 "cannot import from user-defined
+/// functions",Module/Type 取 scope 逐名 `bind` 进当前作用域,
+/// later-wins;其余类型同款报错)。仅静态链不通的通配 import 走此
+/// 路径,静态可达的保持全静态。
+pub fn wild_import(value: &Value, at: Span) -> SourceResult<typst::foundations::Scope> {
+    use typst::foundations::Scope;
+    let source = match value {
+        Value::Module(module) => module.scope(),
+        Value::Type(ty) => ty.scope(),
+        Value::Func(func) => func.scope().ok_or_else(|| {
+            eco_vec![SourceDiagnostic::error(at, "cannot import from user-defined functions")]
+        })?,
+        v => {
+            return Err(eco_vec![SourceDiagnostic::error(
+                at,
+                eco_format!("expected path, module, function, or type, found {}", v.ty()),
+            )])
+        }
+    };
+    let mut layer = Scope::new();
+    for (name, binding) in source.iter() {
+        layer.bind(name.clone(), binding.clone());
+    }
+    Ok(layer)
+}
+
+/// 通配层名字查找(内层优先):命中返回值;全层未命中且无回落则报
+/// 与 typst 同款 "unknown variable"。
+pub fn wild_get(layers: &[&typst::foundations::Scope], name: &str, at: Span) -> SourceResult<Value> {
+    wild_lookup(layers, name).ok_or_else(|| {
+        eco_vec![SourceDiagnostic::error(at, eco_format!("unknown variable: {name}"))]
+    })
+}
+
+fn wild_lookup(layers: &[&typst::foundations::Scope], name: &str) -> Option<Value> {
+    layers
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(name).map(|b| b.read().clone()))
+}
+
+/// 通配层查找 + 静态链回落(名字同时有静态绑定时:层命中优先,
+/// 对照 typst 作用域链——通配名 bind 进内层作用域,遮蔽外层)。
+pub fn wild_or(
+    layers: &[&typst::foundations::Scope],
+    name: &str,
+    fallback: Value,
+    _at: Span,
+) -> SourceResult<Value> {
+    Ok(wild_lookup(layers, name).unwrap_or(fallback))
+}
+
+/// 通配层查找 + 全局回落(名字无静态绑定时)。
+pub fn wild_or_global(
+    layers: &[&typst::foundations::Scope],
+    name: &str,
+    engine: &mut Engine,
+    at: Span,
+) -> SourceResult<Value> {
+    wild_lookup(layers, name)
+        .map(Ok)
+        .unwrap_or_else(|| global(engine, name, at))
+}
+
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for
 /// ast::Contextual`,realize/layout 期带 location/styles 求值)。
 pub fn context_closure(
@@ -1913,12 +1978,25 @@ pub fn context_closure(
         hit.clone()
     } else {
         let text = body_src.trim().to_string();
-        let root = typst_syntax::parse_code(&text);
-        let node = root
+        // 括号包裹后解析:片段脱离了原解析上下文——原处若在括号/块内
+        // (参数默认值、数组元素、代码块等),换行只是 trivia、表达式
+        // 跨行续接;顶层 `parse_code` 却在换行处终止表达式(仅 else/.
+        // 续接,对照 parser.rs AtNewline::ContextualContinue),多行体
+        // 会被截断成首个表达式(touying 页脚 `context a\n+ " / "\n+ b`
+        // 曾只剩 a)。包一对括号恢复 Continue 语义,再剥 Parenthesized
+        // 层取内层表达式(对照 typst-eval `Eval for ast::Contextual`
+        // 直接持有原位 body 节点的形态)。CLOSURE_SOURCES 登记包裹后
+        // 的文本,span 与源逐字节对应。
+        let wrapped = format!("({text})");
+        let root = typst_syntax::parse_code(&wrapped);
+        let first = root
             .children()
             .find(|child| child.cast::<ast::Expr>().is_some())
-            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"))
-            .clone();
+            .unwrap_or_else(|| panic!("context body parses to an expression: {text:?}"));
+        let node = match first.cast::<ast::Expr>() {
+            Some(ast::Expr::Parenthesized(paren)) => paren.expr().to_untyped().clone(),
+            _ => first.clone(),
+        };
         let n = CLOSURE_SOURCES.read().unwrap().len();
         let id = typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Project,
@@ -1926,7 +2004,7 @@ pub fn context_closure(
                 .expect("valid closure path"),
         )
         .intern();
-        CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
+        CLOSURE_SOURCES.write().unwrap().push((id, wrapped.clone()));
         CACHE
             .write()
             .unwrap()

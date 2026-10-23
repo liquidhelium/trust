@@ -55,13 +55,37 @@ pub(super) struct Ctx {
     span_index: std::collections::HashMap<u64, usize>,
 }
 
+/// 点分名字的字段链(`process.aabb` → 两层 rt::field;单名直访)。
+/// 对照 typst 字段访问语义:名字里的点号逐段取字段。
+pub(super) fn field_access_chain(expr: &str, dotted: &str) -> String {
+    let mut segs = dotted.split('.');
+    let first = segs.next().unwrap_or(dotted);
+    let mut out = format!(
+        "rt::field(&({expr}), \"{first}\", engine, context, SPAN)?"
+    );
+    for seg in segs {
+        out = format!(
+            "rt::field(&({out}), \"{seg}\", engine, context, SPAN)?"
+        );
+    }
+    out
+}
+
 /// 模块绑定的引用形态(统一指向 per-build 槽板字段)。
 #[derive(Clone)]
+
 pub(super) enum Ref {
     /// 顶层绑定槽(每构建写一次)。
     Slot(String),
-    /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`)。
-    ModuleField { expr: String, name: String },
+    /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`):
+    /// `file` 为该项的**目标文件身份**(入口导出表→槽→文件链式解析
+    /// 得出,仅静态可达时携带)——体内 `import 项名: *` 据此静态展开
+    /// (alchemist 的 `import draw: *`);None 则通配落运行期层。
+    ModuleField {
+        expr: String,
+        name: String,
+        file: Option<String>,
+    },
     /// 直接以表达式求值的绑定(模块值本身或其字段)。
     Value(String),
     /// 创建期物化的全局名:槽有值读槽(typst 创建期捕获),无值
@@ -74,6 +98,11 @@ pub(super) enum Ref {
 pub(super) struct Env {
     pub(super) locals: Vec<(String, String)>,
     pub(super) module: Vec<(String, Ref)>,
+    /// 运行期通配层(`import <运行期模块值>: *` 在体内引入,仅该
+    /// 作用域生效;元素为层的 Rust 局部名,内层在尾)。名字查找:
+    /// 局部 → 层(运行期,遮蔽外层模块名/全局,对照 typst-eval
+    /// 通配 import 的 scopes.top.bind)→ 模块 → 全局。
+    pub(super) wildcards: Vec<String>,
 }
 
 impl Ctx {
@@ -169,8 +198,8 @@ impl Ctx {
         self.used_state = true;
         match module_ref {
             Ref::Slot(id) => format!("rt::read(&__st.{id})?"),
-            Ref::ModuleField { expr, name } => {
-                format!("rt::field(&({expr}), \"{name}\", engine, context, SPAN)?")
+            Ref::ModuleField { expr, name, .. } => {
+                field_access_chain(expr, name)
             }
             Ref::Value(expr) => expr.clone(),
             Ref::GlobalFallback { slot, name } => {

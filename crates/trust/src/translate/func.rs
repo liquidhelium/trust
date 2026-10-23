@@ -145,6 +145,7 @@ pub(super) fn gen_closure_fn(
     let mut fn_env = super::ctx::Env {
         locals: Vec::new(),
         module: Vec::new(),
+        wildcards: Vec::new(),
     };
     let saved = self.used_state;
     self.used_state = false;

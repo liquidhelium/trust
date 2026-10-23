@@ -158,6 +158,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     env: Env {
                         locals: Vec::new(),
                         module: visible.clone(),
+                        wildcards: Vec::new(),
                     },
                 });
             }
@@ -186,16 +187,19 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         let env = Env {
             locals: Vec::new(),
             module: slots_of(0..=i),
+            wildcards: Vec::new(),
         };
         let init_env = if i > 0 {
             Env {
                 locals: Vec::new(),
                 module: slots_of(0..=i - 1),
+                wildcards: Vec::new(),
             }
         } else {
             Env {
                 locals: Vec::new(),
                 module: Vec::new(),
+                wildcards: Vec::new(),
             }
         };
         for (_, slot) in &top.names {

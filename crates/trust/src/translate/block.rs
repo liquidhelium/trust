@@ -102,12 +102,20 @@ impl Ctx {
                     ast::Expr::Ident(_) | ast::Expr::FieldAccess(_) => {
                         match parse_module_access(source) {
                             Some((root, fields)) => {
-                                let base = match env.module.iter().rev().find(|(n, _)| *n == root) {
-                                    Some((_, module_ref)) => self.ref_value(module_ref),
-                                    None => {
-                                        // 全局模块(如 `import calc: abs`)。
-                                        let at = self.span_of(stmt.span());
-                                        format!("rt::global(engine, \"{root}\", {at})?")
+                                let base = if let Some((_, rust)) =
+                                    env.locals.iter().rev().find(|(n, _)| *n == root)
+                                {
+                                    // 局部/参数(tidy 的 `import style: *`):
+                                    // 运行期模块值,遮蔽同名模块绑定。
+                                    format!("{rust}.clone()")
+                                } else {
+                                    match env.module.iter().rev().find(|(n, _)| *n == root) {
+                                        Some((_, module_ref)) => self.ref_value(module_ref),
+                                        None => {
+                                            // 全局模块(如 `import calc: abs`)。
+                                            let at = self.span_of(stmt.span());
+                                            format!("rt::global(engine, \"{root}\", {at})?")
+                                        }
                                     }
                                 };
                                 let mut expr = base;
@@ -279,6 +287,18 @@ impl Ctx {
                                     self.export_table.as_ref().and_then(|t| t.get(f).cloned())
                                 });
                         }
+                        // 模块字段绑定名(`import cetz: draw` / 顶层通配项,
+                        // alchemist/diagraph 驱动):Ref 携带的目标文件 →
+                        // 导出表静态展开,零运行期开销。
+                        if expanded.is_none()
+                            && let Some((root, _)) = parse_module_access(source)
+                            && let Some((
+                                _,
+                                super::ctx::Ref::ModuleField { file: Some(f), .. },
+                            )) = env.module.iter().rev().find(|(n, _)| *n == root)
+                        {
+                            expanded = self.export_table.as_ref().and_then(|t| t.get(f).cloned());
+                        }
                         match expanded {
                             Some(exports) => {
                                 for (name, slot) in exports {
@@ -290,11 +310,18 @@ impl Ctx {
                                 }
                             }
                             None => {
-                                self.diag(
-                                    stmt.span(),
-                                    "体内通配 import 仅支持已翻译的包内文件(模块值目标暂不支持)"
-                                        .into(),
+                                // 静态链不通:运行期通配层(对照 typst-eval
+                                // import.rs 通配分支——源求值为模块,scope
+                                // 逐名 bind 进当前作用域;此后本作用域的
+                                // 名字先查层再沿静态链回落)。仅此作用域
+                                // 受影响;静态可达的通配 import 不走此路。
+                                let w = format!("__wild{}", self.fresh_id());
+                                let at = self.span_of(stmt.span());
+                                let _ = writeln!(
+                                    out,
+                                    "    let {w} = rt::wild_import(&({module_expr}), {at})?;"
                                 );
+                                env.wildcards.push(w);
                             }
                         }
                     }

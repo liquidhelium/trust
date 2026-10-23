@@ -124,6 +124,7 @@ pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
 pub(super) fn build_export_table(
     plans: &[FilePlan],
     order: &[usize],
+    dep_entries: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
     let mut table: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
         plans
@@ -194,7 +195,47 @@ pub(super) fn build_export_table(
                             exports.entry(as_name).or_insert(slot);
                         }
                     }
-                    ImportItems::Wildcard => {}
+                    ImportItems::Wildcard => {
+                        // 模块值链通配(`import t4t: *`,finite 驱动):
+                        // 根名槽 → 文件身份(通用解析器),逐字段经导出
+                        // 表到目标文件,按其导出面**转出**(下游具名/通配
+                        // import 可达;此前此臂为空,`src/util.typ 不包含
+                        // 导出 get` 即此缺口)。与 package.rs
+                        // process_import_edge 的同型链一致。
+                        let root_slot = exports.get(root).cloned();
+                        let mut cur = root_slot.as_deref().and_then(|slot| {
+                            resolve_import_slot_file(slot, plans, &table, dep_entries, plans.len())
+                        });
+                        for field in fields {
+                            let next = cur
+                                .as_deref()
+                                .and_then(|f| table.get(f))
+                                .and_then(|exports| exports.get(field))
+                                .and_then(|slot| {
+                                    resolve_import_slot_file(
+                                        slot,
+                                        plans,
+                                        &table,
+                                        dep_entries,
+                                        plans.len(),
+                                    )
+                                });
+                            match next {
+                                Some(f) => cur = Some(f),
+                                None => {
+                                    cur = None;
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(target) = cur.as_deref()
+                            && let Some(target_exports) = table.get(target)
+                        {
+                            for (wname, wslot) in target_exports {
+                                exports.entry(wname.clone()).or_insert_with(|| wslot.clone());
+                            }
+                        }
+                    }
                 }
                 continue;
             }
@@ -205,7 +246,7 @@ pub(super) fn build_export_table(
                 if let ImportItems::Bare | ImportItems::Rename(_) = &edge.items {
                     let bound = match &edge.items {
                         ImportItems::Rename(name) => name.clone(),
-                        _ => super::package::spec_name(&edge.target),
+                        _ => spec_name(&edge.target),
                     };
                     let slot = format!(
                         "IMPORT_{}_{}",
@@ -267,7 +308,13 @@ pub(super) fn build_export_table(
                     exports.entry(bound).or_insert(slot);
                 }
                 ImportItems::List(items) => {
-                    let target_exports = &table[&edge.target];
+                    // 目标不在计划集(模板占位 spec 等未解析边,eggs
+                    // 驱动曾在此裸索引 panic):安全查找,miss 时该项
+                    // 无从展开,留空——真正的缺口由后续具名使用点报。
+                    let Some(target_exports) = table.get(&edge.target) else {
+                        continue;
+                    };
+                    let target_exports = &target_exports.clone();
                     for (original, rename) in items {
                         // 点分项:首段解析,余段物化进独立槽(package.rs
                         // 同公式;hydra 驱动)。
@@ -292,8 +339,11 @@ pub(super) fn build_export_table(
                     }
                 }
                 ImportItems::Wildcard => {
-                    for (name, slot) in &table[&edge.target] {
-                        exports.entry(name.clone()).or_insert_with(|| slot.clone());
+                    // 同 List:目标不在计划集时安全跳过(eggs 模板边)。
+                    if let Some(target_exports) = table.get(&edge.target) {
+                        for (name, slot) in target_exports {
+                            exports.entry(name.clone()).or_insert_with(|| slot.clone());
+                        }
                     }
                 }
             }
@@ -313,3 +363,126 @@ pub(super) fn module_stem(path: &str) -> String {
         .unwrap_or("m")
         .to_string()
 }
+
+pub(super) fn spec_prefix(target: &str) -> String {
+    if !target.starts_with('@') {
+        return String::new();
+    }
+    match target.find(':').and_then(|colon| {
+        target[colon..].find('/').map(|rel| colon + rel)
+    }) {
+        Some(end) => target[..end].to_string(),
+        // 无后续路径:整个串就是 spec(未翻译外部边,target 即原始
+        // spec,如 "@preview/oxifmt:1.0.0")。
+        None => target.to_string(),
+    }
+}
+
+pub(super) fn spec_name(spec: &str) -> String {
+    spec.split('/')
+        .nth(1)
+        .unwrap_or("pkg")
+        .split(':')
+        .next()
+        .unwrap_or("pkg")
+        .to_string()
+}
+
+/// IMPORT 槽 → 该绑定模块的**文件身份**(通用递归解析,深度以计划
+/// 数为界):内部 bare/rename → 边目标文件;内部 list 项 → 目标文件
+/// 导出表该项的槽再解一跳;外部边 → 已并入依赖的入口合并键。供
+/// slot_files 索引与体内/顶层模块值链通配使用(finite 的
+/// `import t4t: *`,t4t 经内部 list 引入)。
+pub(super) fn resolve_import_slot_file(
+    slot: &str,
+    plans: &[super::plan::FilePlan],
+    export_table: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    dep_entries: &std::collections::BTreeMap<String, String>,
+    depth: usize,
+) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    // IMPORT_{mod}_{bound}:mod 名可含下划线(sanitize_key 不去下划
+    // 线),按计划前缀匹配定界(与前缀匹配 plan 的既有做法一致)。
+    let (plan, bound): (&super::plan::FilePlan, String) = plans
+        .iter()
+        .find_map(|p| {
+            let prefix = format!("IMPORT_{}_", sanitize_key(&p.mod_name));
+            slot.strip_prefix(&prefix)
+                .map(|b| (p, b.to_string()))
+        })
+        .or_else(|| {
+            // 模块名不含下划线的常规形态也要兜底(前缀匹配按计划序
+            // 首个命中;无可行分隔时返回 None)。
+            None
+        })?;
+    let bound = &bound[..];
+    for edge in &plan.imports {
+        if edge.is_include {
+            continue;
+        }
+        // 本边可能产出该槽的绑定名集合(bare/rename/list/rename-list)。
+        let names: Vec<String> = if edge.external {
+            match &edge.items {
+                ImportItems::Rename(n) | ImportItems::RenameList(n, _) => vec![n.clone()],
+                ImportItems::Bare => vec![spec_name(&edge.target)],
+                ImportItems::List(list) => list
+                    .iter()
+                    .map(|(item, rename)| rename.clone().unwrap_or_else(|| item.clone()))
+                    .collect(),
+                ImportItems::Wildcard => Vec::new(),
+            }
+        } else {
+            match &edge.items {
+                ImportItems::Rename(n) => vec![n.clone()],
+                ImportItems::Bare => vec![module_stem(&edge.target)],
+                ImportItems::RenameList(n, list) => {
+                    let mut v = vec![n.clone()];
+                    v.extend(
+                        list.iter()
+                            .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone())),
+                    );
+                    v
+                }
+                ImportItems::List(list) => list
+                    .iter()
+                    .map(|(item, rename)| {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        // 点分项只取首段为绑定名。
+                        as_name.split('.').next().unwrap_or(&as_name).to_string()
+                    })
+                    .collect(),
+                ImportItems::Wildcard => Vec::new(),
+            }
+        };
+        if !names.iter().any(|n| sanitize_key(n) == bound) {
+            continue;
+        }
+        if !edge.external {
+            // 模块名绑定(bare 的 stem / rename / rename-list 的模块名)
+            // → 边目标文件即模块身份。
+            let module_binding = match &edge.items {
+                ImportItems::Bare => module_stem(&edge.target),
+                ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
+                _ => String::new(),
+            };
+            if !module_binding.is_empty() && sanitize_key(&module_binding) == bound {
+                return Some(edge.target.clone());
+            }
+            // list/rename-list 项:目标文件导出表该项 → 槽,再解一跳。
+            let table_key = if bound.contains('.') {
+                bound.split('.').next().unwrap_or(bound)
+            } else {
+                bound
+            };
+            let next = export_table.get(&edge.target)?.get(table_key)?.clone();
+            return resolve_import_slot_file(&next, plans, export_table, dep_entries, depth - 1);
+        }
+        // 外部边:已并入依赖 → 入口合并键。
+        let spec = spec_prefix(&edge.target);
+        return dep_entries.get(&spec).cloned();
+    }
+    None
+}
+

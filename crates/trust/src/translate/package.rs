@@ -28,8 +28,7 @@ use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 use super::paths::{normalize_import, parse_module_access};
 use super::plan::{
     FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, module_stem, nth_slot,
-    topo_order,
-};
+    topo_order, spec_name, spec_prefix, resolve_import_slot_file};
 
 /// 待翻译的多文件包。
 pub struct PackageInput {
@@ -354,7 +353,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     // 拓扑序(被依赖者在前):求值顺序。导出查找表按同序展开,
     // 下游 list/wildcard import 可达上游的 import 转出名。
     let order = topo_order(&plans);
-    let export_table = build_export_table(&plans, &order);
+    let export_table = build_export_table(&plans, &order, &input.dep_entries);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
     // 槽名→文件索引(第二遍开始前一次性构建,体内模块值链通配用):
@@ -396,6 +395,50 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     );
     }
     }
+    // 回填:LIST/RenameList 项槽与跨文件链式身份,经通用解析器
+    // (finite 的 `import t4t: *`,t4t 为内部 list 项引入的模块)。
+    for p in plans.iter() {
+        for edge in &p.imports {
+            if edge.is_include {
+                continue;
+            }
+            let names: Vec<String> = match &edge.items {
+                ImportItems::List(list) => list
+                    .iter()
+                    .map(|(item, rename)| {
+                        rename.clone().unwrap_or_else(|| item.clone())
+                    })
+                    .collect(),
+                ImportItems::RenameList(n, list) => {
+                    let mut v = vec![n.clone()];
+                    v.extend(
+                        list.iter()
+                            .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone())),
+                    );
+                    v
+                }
+                _ => continue,
+            };
+            for name in names {
+                let slot = format!(
+                    "IMPORT_{}_{}",
+                    sanitize_key(&p.mod_name),
+                    sanitize_key(&name)
+                );
+                if !idx.contains_key(&slot)
+                    && let Some(file) = resolve_import_slot_file(
+                        &slot,
+                        &plans,
+                        &export_table,
+                        &input.dep_entries,
+                        plans.len(),
+                    )
+                {
+                    idx.insert(slot, file);
+                }
+            }
+        }
+    }
     cx.slot_files = Some(std::rc::Rc::new(idx));
     }
     // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
@@ -411,6 +454,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let mut env = Env {
             locals: Vec::new(),
             module: Vec::new(),
+            wildcards: Vec::new(),
         };
         // 当前文件的 import 抄入:可见绑定(env) + 槽位填充(eval)
         // + 导出面(module)。
@@ -996,32 +1040,28 @@ fn dedent4(s: &str) -> String {
     out
 }
 
+
+
+/// 项绑定(模块字段)的目标文件:基础模块入口导出表 → 项槽 →
+/// 文件索引(仅 IMPORT 槽——其边目标即模块文件身份)。供体内
+/// `import 项名: *` 静态展开(alchemist/diagraph 驱动);链不通
+/// 返回 None,通配落运行期层。
+fn item_file(
+    export_table: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    slot_files: &Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
+    base_target: &str,
+    item: &str,
+) -> Option<String> {
+    let slot = export_table.get(base_target)?.get(item)?;
+    if !slot.starts_with("IMPORT_") {
+        return None;
+    }
+    slot_files.as_ref()?.get(slot).cloned()
+}
+
 /// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
 /// 合并键 `{spec}/{包内路径}` 的 spec 前缀提取(spec 自含 `/`,
 /// 以冒号后的首个 `/` 为界);非合并键返回空串。
-pub(super) fn spec_prefix(target: &str) -> String {
-    if !target.starts_with('@') {
-        return String::new();
-    }
-    match target.find(':').and_then(|colon| {
-        target[colon..].find('/').map(|rel| colon + rel)
-    }) {
-        Some(end) => target[..end].to_string(),
-        // 无后续路径:整个串就是 spec(未翻译外部边,target 即原始
-        // spec,如 "@preview/oxifmt:1.0.0")。
-        None => target.to_string(),
-    }
-}
-
-pub(super) fn spec_name(spec: &str) -> String {
-    spec.split('/')
-        .nth(1)
-        .unwrap_or("pkg")
-        .split(':')
-        .next()
-        .unwrap_or("pkg")
-        .to_string()
-}
 
 /// 槽名→所属文件(`V{i}_…` 的 i 是 plan 序号;`IMPORT_{mod}_…`
 /// 反查该 mod 的内部 import 边目标)。模块值链通配解析用。
@@ -1166,13 +1206,17 @@ impl Ctx {
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{slot})?"),
                                     name: item.clone(),
+                                    file: item_file(export_table, &cx.slot_files, &edge.target, item),
                                 },
                             ));
                             let _ = writeln!(
                                 file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                "    scope.define(\"{}\", {});",
                                 escape(&as_name),
-                                escape(item)
+                                super::ctx::field_access_chain(
+                                    &format!("rt::read(&__st.{slot})?"),
+                                    item
+                                )
                             );
                         }
                     }
@@ -1184,13 +1228,17 @@ impl Ctx {
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{slot})?"),
                                     name: item.clone(),
+                                    file: item_file(export_table, &cx.slot_files, &edge.target, item),
                                 },
                             ));
                             let _ = writeln!(
                                 file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                "    scope.define(\"{}\", {});",
                                 escape(&as_name),
-                                escape(item)
+                                super::ctx::field_access_chain(
+                                    &format!("rt::read(&__st.{slot})?"),
+                                    item
+                                )
                             );
                         }
                     }
@@ -1207,13 +1255,17 @@ impl Ctx {
                                     Ref::ModuleField {
                                         expr: format!("rt::read(&__st.{slot})?"),
                                         name: wname.clone(),
+                                        file: item_file(export_table, &cx.slot_files, &edge.target, wname),
                                     },
                                 ));
                                 let _ = writeln!(
                                     file_defines,
-                                    "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{slot})?), \"{}\", engine, context, SPAN)?);",
+                                    "    scope.define(\"{}\", {});",
                                     escape(wname),
-                                    escape(wname)
+                                    super::ctx::field_access_chain(
+                                        &format!("rt::read(&__st.{slot})?"),
+                                        wname
+                                    )
                                 );
                             }
                         } else {
@@ -1269,13 +1321,17 @@ impl Ctx {
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{mslot})?"),
                                     name: item.clone(),
+                                    file: None,
                                 },
                             ));
                             let _ = writeln!(
                                 file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                                "    scope.define(\"{}\", {});",
                                 escape(&as_name),
-                                escape(item)
+                                super::ctx::field_access_chain(
+                                    &format!("rt::read(&__st.{mslot})?"),
+                                    item
+                                )
                             );
                         }
                     }
@@ -1287,13 +1343,17 @@ impl Ctx {
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{mslot})?"),
                                     name: item.clone(),
+                                    file: None,
                                 },
                             ));
                             let _ = writeln!(
                                 file_defines,
-                                "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                                "    scope.define(\"{}\", {});",
                                 escape(&as_name),
-                                escape(item)
+                                super::ctx::field_access_chain(
+                                    &format!("rt::read(&__st.{mslot})?"),
+                                    item
+                                )
                             );
                         }
                     }
@@ -1477,6 +1537,7 @@ impl Ctx {
                                     Ref::ModuleField {
                                         expr: base.clone(),
                                         name: wname.clone(),
+                                        file: item_file(export_table, &cx.slot_files, &target, wname),
                                     },
                                 ));
                                 let _ = writeln!(
@@ -1568,6 +1629,7 @@ impl Ctx {
                             Ref::ModuleField {
                                 expr: format!("rt::read(&__st.{mslot})?"),
                                 name: name.clone(),
+                                file: item_file(export_table, &cx.slot_files, &edge.target, name),
                             },
                         ));
                         let _ = writeln!(

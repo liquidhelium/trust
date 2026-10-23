@@ -48,6 +48,9 @@ pub(super) struct Ctx {
     /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
     /// 仅在该上下文合法——外层 Rust 函数返回类型不同)。
     pub(super) in_fn: usize,
+    /// 循环嵌套深度(break/continue 循环外形态的翻译期判定,
+    /// scripting-loop 错误测试驱动)。
+    pub(super) in_loop: usize,
     /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
     /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
     /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
@@ -118,6 +121,7 @@ impl Ctx {
             export_table: None,
             used_state: false,
             in_fn: 0,
+            in_loop: 0,
             closure_dedup: std::collections::HashMap::new(),
             next_closure_id: 0,
             closure_items: String::new(),

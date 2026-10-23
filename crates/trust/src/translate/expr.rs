@@ -56,6 +56,12 @@ impl Ctx {
             ast::Expr::Auto(_) => "Value::Auto".into(),
             ast::Expr::Bool(b) => format!("Value::Bool({})", b.get()),
             ast::Expr::Int(i) => format!("Value::Int({})", i.get()),
+            // inf/nan 的 Debug 形态不是合法 Rust 字面量,走常量。
+            ast::Expr::Float(f) if f.get().is_infinite() => format!(
+                "Value::Float(f64::{}INFINITY)",
+                if f.get() > 0.0 { "" } else { "-" }
+            ),
+            ast::Expr::Float(f) if f.get().is_nan() => "Value::Float(f64::NAN)".to_string(),
             ast::Expr::Float(f) => format!("Value::Float({:?})", f.get()),
             ast::Expr::Numeric(n) => {
                 let (value, unit) = n.get();
@@ -243,7 +249,9 @@ impl Ctx {
             }
             ast::Expr::WhileLoop(while_loop) => {
                 let condition = self.expr(while_loop.condition(), env);
+                self.in_loop += 1;
                 let body = self.expr(while_loop.body(), env);
+                self.in_loop -= 1;
                 let cond_at = self.span_of(while_loop.condition().span());
                 let join_at = self.span_of(while_loop.body().span());
                 let loop_at = self.span_of(while_loop.span());
@@ -254,7 +262,7 @@ impl Ctx {
                     && !can_diverge(while_loop.body().to_untyped())
                 {
                     return format!(
-                        "{{ rt::boolean({condition}, {cond_at})?; bail!({cond_at}, \"condition is always true\") }}"
+                        "{{ rt::boolean({condition}, {cond_at})?; bail!({cond_at}, \"condition is always true\") }} /* never */"
                     );
                 }
                 // 迭代护栏(对照原生 MAX_ITERATIONS:超出报 "loop
@@ -263,9 +271,9 @@ impl Ctx {
                     "{{ let mut __out = Value::None; let mut __guard = 0usize;\n  \
                      while rt::boolean({condition}, {cond_at})? {{\n  \
                      \x20   if __guard >= rt::MAX_ITERATIONS {{ bail!({loop_at}, \"loop seems to be infinite\"); }}\n  \
+                     \x20   __guard += 1usize;\n  \
                      \x20   let __v = {body};\n  \
                      \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
-                     \x20   __guard += 1usize;\n  \
                      }}\n  \
                      __out }}"
                 )
@@ -287,10 +295,26 @@ impl Ctx {
                     Some(expr) => self.expr(expr, env),
                     None => "Value::None".into(),
                 };
-                format!("return Ok({value})")
+                format!("return Ok({value}) /* never */")
             }
-            ast::Expr::LoopBreak(_) => "{ break; Value::None }".into(),
-            ast::Expr::LoopContinue(_) => "{ continue; Value::None }".into(),
+            ast::Expr::LoopBreak(lb) => {
+                // 循环外 break(对照 typst-eval 的语义错误;错误测试
+                // 驱动):降级为运行期同信息错误。
+                if self.in_loop == 0 {
+                    let message = "cannot use `break` outside of a loop".to_string();
+                    self.diag(lb.span(), message.clone());
+                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
+                }
+                "{ break; Value::None }".into()
+            }
+            ast::Expr::LoopContinue(lc) => {
+                if self.in_loop == 0 {
+                    let message = "cannot use `continue` outside of a loop".to_string();
+                    self.diag(lc.span(), message.clone());
+                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
+                }
+                "{ continue; Value::None }".into()
+            }
             ast::Expr::ForLoop(for_loop) => {
                 let iterable = self.expr(for_loop.iterable(), env);
                 let id = self.fresh_id();
@@ -312,7 +336,9 @@ impl Ctx {
                         self.destructure(pattern, inner, &mut body_env, false)
                     }
                 };
+                self.in_loop += 1;
                 let body = self.expr(for_loop.body(), &body_env);
+                self.in_loop -= 1;
                 let iter_at = self.span_of(for_loop.iterable().span());
                 let join_at = self.span_of(for_loop.body().span());
                 format!(
@@ -330,6 +356,16 @@ impl Ctx {
             // 缺口;其余子集外表达式仍走诊断降级)。自由标识符(含
             // 数学名)按闭包同款捕获分析物化。
             ast::Expr::Label(l) => format!("rt::label({:?})", l.get()),
+            ast::Expr::Ref(r) => {
+                // `@target` 引用缩写(对照 Eval for ast::Ref → RefElem;
+                // supplement 为 `[...]` 补充内容,值经 display 内容化)。
+                let target = r.target().to_string();
+                let supp = match r.supplement() {
+                    Some(block) => format!("Some({})", self.expr(ast::Expr::ContentBlock(block), env)),
+                    None => "None".to_string(),
+                };
+                format!("Value::Content(rt::ref_elem({:?}, {supp}))", target)
+            }
             ast::Expr::Equation(_) => {
                 let src = expr.to_untyped().full_text().trim().to_string();
                 let mut names: Vec<String> = Vec::new();
@@ -905,7 +941,17 @@ impl Ctx {
             // 其余值 display 入序(glossarium 驱动的查询语义)。
             let items = parts
                 .iter()
-                .map(|p| format!("({p}).into_value()"))
+                .map(|p| {
+                    if p.contains("/* never */") {
+                        // never 型项(`#return`、常真 while 的发散检查):
+                        // 尾式 never 使裸块为 never 型,协变入 Vec<Value>;
+                        // `.into_value()` 不可作用于 never。发射侧以
+                        // ` /* never */` 标记(scripting-return/while 驱动)。
+                        format!("{{ {p} }}")
+                    } else {
+                        format!("({p}).into_value()")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("rt::attach_labels(vec![{items}])")

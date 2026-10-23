@@ -1289,6 +1289,16 @@ pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
     Ok(Value::None)
 }
 
+/// 翻译期降级点的**错误**形态(语义错误而非功能缺口:循环外
+/// break/continue 等;与 [`degraded`] 的警告形态互补,信息按 typst
+/// 原文,错误测试按信息命中)。
+pub fn bail_value(_engine: &mut Engine, message: &str) -> SourceResult<Value> {
+    Err(eco_vec![SourceDiagnostic::error(
+        Span::detached(),
+        eco_format!("{message}"),
+    )])
+}
+
 /// 可变位置(赋值 / 可变方法的目标)的路径段,对照 typst-eval 的
 /// `access.rs`:字段访问与 accessor 方法(`first`/`last`/`at`)。
 ///
@@ -1954,6 +1964,25 @@ pub fn wild_or_global(
     wild_lookup(layers, name)
         .map(Ok)
         .unwrap_or_else(|| global(engine, name, at))
+}
+
+/// `@target` 引用缩写(对照 typst-eval markup.rs 的 `Eval for
+/// ast::Ref` → `RefElem::new(label)` + 可选 supplement;bibliography/
+/// cite 测试族驱动——缺失时引用与参考文献整体为空)。
+pub fn ref_elem(target: &str, supplement: Option<Value>) -> typst::foundations::Content {
+    use typst::foundations::IntoValue;
+    let label = typst::foundations::Label::construct(target.into())
+        .unwrap_or_else(|_| panic!("reference target must not be empty: {target}"));
+    let mut elem = typst::model::RefElem::new(label);
+    if let Some(v) = supplement {
+        elem.supplement.set(typst::foundations::Smart::Custom(Some(
+            typst::model::Supplement::Content(v.display()),
+        )));
+    }
+    match elem.into_value() {
+        typst::foundations::Value::Content(c) => c,
+        _ => unreachable!("RefElem packs to content"),
+    }
 }
 
 /// `#context expr`:构造推迟求值的闭包(对照 `Eval for

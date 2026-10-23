@@ -64,6 +64,8 @@ struct PackageParts {
     header: String,
     eval_flat: String,
     eval_tree: String,
+    registry_flat: String,
+    registry_tree: String,
     files: Vec<FileOut>,
     /// C2 值位置闭包的原生体汇集(去重后跨文件共用,发射到产物根部)。
     closure_items: String,
@@ -447,6 +449,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let mut files: Vec<FileOut> = Vec::new();
     let mut eval_flat = String::new();
     let mut eval_tree = String::new();
+    let mut registry_flat = String::new();
+    let mut registry_tree = String::new();
     for &idx in &order {
         let plan = &plans[idx];
         cx.current_file = Some(plan.path.clone());
@@ -823,6 +827,38 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             plan.mod_name
         );
         let _ = writeln!(eval_tree, "    {tree_path}::eval(&__st, engine, context)?;");
+        // 按路径装配臂:依赖闭包拓扑序求值 + 自身求值与装配(fresh
+        // 槽板,单测试只装配该文件——与解释器单文件编译同阶)。
+        let closure = dep_closure(&plans, idx);
+        let mut arm_flat = format!("        \"{}\" => Some((|| {{\n", plan.path);
+        let mut arm_tree = arm_flat.clone();
+        for &j in &closure {
+            let _ = writeln!(
+                arm_flat,
+                "            {}::eval(board, engine, context)?;",
+                plans[j].mod_name
+            );
+            let dep_tree = plans[j]
+                .path
+                .strip_suffix(".typ")
+                .unwrap_or(&plans[j].path)
+                .split('/')
+                .map(sanitize_key)
+                .collect::<Vec<_>>()
+                .join("::");
+            let _ = writeln!(arm_tree, "            {dep_tree}::eval(board, engine, context)?;");
+        }
+        let _ = writeln!(
+            arm_flat,
+            "            {}::module(board, engine, context)\n        }})()),",
+            plan.mod_name
+        );
+        let _ = writeln!(
+            arm_tree,
+            "            {tree_path}::module(board, engine, context)\n        }})()),"
+        );
+        registry_flat.push_str(&arm_flat);
+        registry_tree.push_str(&arm_tree);
     }
 
     let degraded_header = if cx.lenient && !cx.diags.is_empty() {
@@ -845,8 +881,14 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         .map(|p| p.mod_name.clone())
         .expect("entry in plans");
     let mut fields = String::new();
+    // 去重:源面的重复参数名(如 `f(v: 1, v: 2)` 的错误测试)会对
+    // 同名默认槽登记两次,重复字段让生成物无法编译(scripting-closure
+    // 驱动);重复参数的语义分歧由该错误测试自然承载。
+    let mut seen_fields = std::collections::BTreeSet::new();
     for slot in &state_fields {
-        let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
+        if seen_fields.insert(slot.clone()) {
+            let _ = writeln!(fields, "    {slot}: std::sync::OnceLock<Value>,");
+        }
     }
 
     let span_consts = cx.span_consts();
@@ -864,17 +906,26 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          const SPAN: Span = Span::detached();\n{span_consts}\n\
          /// 本包的求值状态:全部顶层绑定槽与 import 槽(每构建一份)。\n\
          #[derive(Default)]\n\
-         struct __State {{\n{fields}}}\n\n\
+         pub struct __State {{\n{fields}}}\n\n\
          /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
          pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n\n\
          /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
          /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
-         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{{ITEMS}}"
+         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n\n\
+         /// 新建求值槽板(批驱动自管生命周期时用)。\n\
+         pub fn new_state() -> std::sync::Arc<__State> {{ std::sync::Arc::new(__State::default()) }}\n\n\
+         /// 按文件路径按需装配:在给定槽板上先按拓扑序求值该文件的\n\
+         /// 依赖闭包,再求值自身并装配模块。官方 tests/suite 批驱动:\n\
+         /// 每测试 fresh 槽板 + 单文件装配,全程只构建**一个**二进制\n\
+         /// (翻译产物整体一次编译,编译次数与测试数无关)。\n\
+         pub fn module_by_path(path: &str, board: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> Option<SourceResult<Module>> {{\n    match path {{\n{{REGISTRY}}        _ => None,\n    }}\n}}\n{{ITEMS}}"
     );
     PackageParts {
         header,
         eval_flat,
         eval_tree,
+        registry_flat,
+        registry_tree,
         files,
         closure_items: std::mem::take(&mut cx.closure_items),
         closure_nodes: std::mem::take(&mut cx.closure_nodes),
@@ -899,6 +950,7 @@ fn render_single(parts: &PackageParts) -> String {
     parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_flat)
+        .replace("{REGISTRY}", &parts.registry_flat)
         .replace("{ITEMS}", &items)
 }
 
@@ -953,6 +1005,7 @@ fn tree_impl(
     let mut root = parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_tree)
+        .replace("{REGISTRY}", &parts.registry_tree)
         .replace("{ITEMS}", &root_decls);
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
     // C2 闭包段与文件体同款:体内对其他文件的扁平模块引用
@@ -1041,6 +1094,33 @@ fn dedent4(s: &str) -> String {
 }
 
 
+
+/// 文件的依赖闭包(含自身),依赖在前(与 topo_order 的访问一致,
+/// include 边亦为依赖)。
+fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
+    fn visit(
+        i: usize,
+        plans: &[super::plan::FilePlan],
+        order: &mut Vec<usize>,
+        state: &mut Vec<u8>,
+    ) {
+        if state[i] != 0 {
+            return;
+        }
+        state[i] = 1;
+        for edge in &plans[i].imports {
+            if let Some(j) = plans.iter().position(|p| p.path == edge.target) {
+                visit(j, plans, order, state);
+            }
+        }
+        state[i] = 2;
+        order.push(i);
+    }
+    let mut order = Vec::new();
+    let mut state = vec![0u8; plans.len()];
+    visit(idx, plans, &mut order, &mut state);
+    order
+}
 
 /// 项绑定(模块字段)的目标文件:基础模块入口导出表 → 项槽 →
 /// 文件索引(仅 IMPORT 槽——其边目标即模块文件身份)。供体内

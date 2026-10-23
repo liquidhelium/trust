@@ -57,11 +57,33 @@ pub struct InjectWorld {
     /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
     /// (如 wasm 插件等非源文件)。
     fs_root: Option<PathBuf>,
+    /// 套件模式固定日期(typst 官方 tests 世界:1970-01-01 12:00,
+    /// today 任意 offset 均返回同一时刻)。None = 系统当前时间。
+    suite_today: Option<Datetime>,
     /// 包回退源的**解析缓存**(FileId → Source):没有它,每次
     /// `source()` 回退都 `Source::new` 完整重解析——comemo 命中校验
     /// 重放读取时也不例外,稳态编译会每轮重解析全部外部包文件
     /// (基准"热稳态不对称"的主要制品,2026-10-22 基准剖析发现)。
     package_sources: std::sync::RwLock<HashMap<FileId, Source>>,
+}
+
+/// 世界的廉价克隆(字段皆 Arc/值语义;批驱动共享基座:字体、
+/// 源表、文件表克隆后各测试只改 main 与注入模块)。
+impl Clone for InjectWorld {
+    fn clone(&self) -> Self {
+        Self {
+            library: self.library.clone(),
+            book: self.book.clone(),
+            fonts: self.fonts.clone(),
+            main: self.main,
+            sources: self.sources.clone(),
+            files: self.files.clone(),
+            packages_root: self.packages_root.clone(),
+            fs_root: self.fs_root.clone(),
+            suite_today: self.suite_today,
+            package_sources: std::sync::RwLock::new(self.package_sources.read().unwrap().clone()),
+        }
+    }
 }
 
 impl InjectWorld {
@@ -111,8 +133,43 @@ impl InjectWorld {
             files: HashMap::new(),
             packages_root,
             fs_root,
+            suite_today: None,
             package_sources: std::sync::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// 套件模式:镜像 typst 官方测试世界(tests/src/world.rs)——
+    /// Features::all、测试全局(`test`/`test-repr`/`print`/`lines`/
+    /// `bounds`、色 `conifer`/`forest`)、默认样式(页宽 120pt、
+    /// 边距 10pt、页高 auto、字号 10pt——内页恰好 100pt 宽)与固定
+    /// 日期。驱动官方 tests/suite 对拍时,golden 与 gen 两侧都要在
+    /// 注入模块**之前**调用。
+    pub fn enable_suite(&mut self) {
+        let mut lib = typst::Library::builder()
+            .with_features(typst::Features::all())
+            .build();
+        lib.global.scope_mut().define_func::<suite::test>();
+        lib.global.scope_mut().define_func::<suite::test_repr>();
+        lib.global.scope_mut().define_func::<suite::print>();
+        lib.global.scope_mut().define_func::<suite::lines>();
+        lib.global.scope_mut().define_func::<suite::bounds>();
+        lib.global.scope_mut().define("conifer", suite::conifer());
+        lib.global.scope_mut().define("forest", suite::forest());
+        {
+            use typst::foundations::Smart;
+            use typst::layout::{Abs, Margin, PageElem};
+            use typst::text::{TextElem, TextSize};
+            lib.styles.set(PageElem::width, Smart::Custom(Abs::pt(120.0).into()));
+            lib.styles.set(PageElem::height, Smart::Auto);
+            lib.styles.set(
+                PageElem::margin,
+                Smart::Custom(Margin::splat(Some(Smart::Custom(Abs::pt(10.0).into())))),
+            );
+            lib.styles.set(TextElem::size, TextSize(Abs::pt(10.0).into()));
+        }
+        lib.std = Binding::detached(lib.global.clone().into_value());
+        self.library = LazyHash::new(lib);
+        self.suite_today = Some(Datetime::from_ymd(1970, 1, 1).expect("valid fixed date"));
     }
 
     /// 注入原生模块:驱动 `module_init`(模块求值的镜像,per-build 槽板
@@ -155,6 +212,26 @@ impl InjectWorld {
             }
         }
         path.exists().then_some(path)
+    }
+
+    /// 换主文件(批驱动:基座克隆后逐测试设 main;path 为项目根
+    /// 相对路径,如 `tests/suite/model/x.typ`——相对 import 按真实
+    /// 目录解析,与官方 tests 世界的 vpath 一致)。
+    pub fn set_main(&mut self, path: &str, text: &str) {
+        let id = RootedPath::new(
+            VirtualRoot::Project,
+            VirtualPath::new(path).unwrap_or_else(|_| panic!("invalid path {path}")),
+        )
+        .intern();
+        self.main = id;
+        self.sources.insert(id, Source::new(id, text.to_string()));
+    }
+
+    /// 直连注入模块(不经 comemo memo):批驱动每测试单文件装配,
+    /// memo 键对纯原生求值不稳定(世界读取为空约束会串味),直接
+    /// 求值后绑定。
+    pub fn inject_module(&mut self, name: &'static str, module: Module) {
+        self.library = trust_runtime::bind_module(&self.library, name, module);
     }
 
     /// 追加一个相对主文件的源文件(多文件包形态)。
@@ -372,6 +449,34 @@ impl World for InjectWorld {
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        // 套件模式:对照官方 tests 世界 Time::fixed(1970-01-01
+        // 12:00).today——结果**只含日期**(时刻截断),offset 秒须在
+        // i32 范围内(越界 None → "unable to get the current
+        // date"),时刻随 offset 平移可跨日。
+        if self.suite_today.is_some() {
+            let secs = match offset {
+                None => 0.0f64,
+                Some(d) => {
+                    let [w, dd, h, m, s] = d.decompose();
+                    let total: f64 = w as f64 * 604_800.0
+                        + dd as f64 * 86_400.0
+                        + h as f64 * 3_600.0
+                        + m as f64 * 60.0
+                        + s as f64;
+                    if !total.is_finite()
+                        || total < f64::from(i32::MIN)
+                        || total > f64::from(i32::MAX)
+                    {
+                        return None;
+                    }
+                    total
+                }
+            };
+            let shifted = 43_200.0 + secs; // 12:00 起算
+            let days = shifted.div_euclid(86_400.0) as i64;
+            let (y, m, d) = civil_from_days(days);
+            return Datetime::from_ymd(y as i32, m as u8, d as u8);
+        }
         // 系统当前时间(带时区偏移;测试世界两侧同源,touying 的
         // `sys.datetime` 等日期访问曾因 None 报 "unable to get the
         // current date")。
@@ -498,5 +603,109 @@ mod tests {
             .eval_code("add2(3)", scope)
             .expect("call composed func");
         assert_eq!(v, Value::Int(5));
+    }
+}
+
+/// 官方测试套件的全局函数(逐字对照 tests/src/world.rs 的 #[func]
+/// 定义;`bounds` 的 BoundsElem 经 mark_box_in_place 画界框)。
+mod suite {
+    use typst::diag::{At, SourceResult, StrResult, bail};
+    use typst::engine::Engine;
+    use typst::foundations::{
+        Content, IntoValue, NativeElement, NoneValue, Packed, Repr, Value, elem, func,
+    };
+    use typst::introspection::Locator;
+    use typst::layout::{BlockElem, Fragment, Regions};
+    use typst::model::{Numbering, NumberingPattern};
+    use typst::syntax::Span;
+    use typst::visualize::Color;
+
+    pub fn conifer() -> Color {
+        Color::from_u8(0x9f, 0xEB, 0x52, 0xFF)
+    }
+
+    pub fn forest() -> Color {
+        Color::from_u8(0x43, 0xA1, 0x27, 0xFF)
+    }
+
+
+    #[func]
+    pub fn test(lhs: Value, rhs: Value) -> StrResult<NoneValue> {
+        if lhs != rhs {
+            bail!("Assertion failed: {} != {}", lhs.repr(), rhs.repr());
+        }
+        Ok(NoneValue)
+    }
+
+    #[func]
+    pub fn test_repr(lhs: Value, rhs: Value) -> StrResult<NoneValue> {
+        if lhs.repr() != rhs.repr() {
+            bail!("Assertion failed: {} != {}", lhs.repr(), rhs.repr());
+        }
+        Ok(NoneValue)
+    }
+
+    #[func]
+    pub fn print(values: Vec<Value>) -> NoneValue {
+        let mut out = std::io::stdout().lock();
+        use std::io::Write;
+        write!(out, "> ").unwrap();
+        for (i, value) in values.into_iter().enumerate() {
+            if i > 0 {
+                write!(out, ", ").unwrap();
+            }
+            write!(out, "{value:?}").unwrap();
+        }
+        writeln!(out).unwrap();
+        NoneValue
+    }
+
+    /// Generates `count` lines of text based on the numbering.
+    #[func]
+    pub fn lines(
+        engine: &mut Engine,
+        context: comemo::Tracked<typst::foundations::Context>,
+        span: Span,
+        count: u64,
+        #[default(Numbering::Pattern("A".parse::<NumberingPattern>().unwrap()))]
+        numbering: Numbering,
+    ) -> SourceResult<Value> {
+        (1..=count)
+            .map(|n| numbering.apply(engine, context, span, &[n]))
+            .collect::<SourceResult<typst::foundations::Array>>()?
+            .join(Some('\n'.into_value()), None, None)
+            .at(span)
+    }
+
+    /// Display boundaries and the baseline around some content's frames.
+    #[func]
+    pub fn bounds(content: Content) -> SourceResult<Content> {
+        Ok(BlockElem::multi_layouter(
+            Packed::new(BoundsElem::new(content)),
+            layout_bounds,
+        )
+        .pack())
+    }
+
+    #[elem]
+    struct BoundsElem {
+        #[positional]
+        #[required]
+        body: Content,
+    }
+
+    fn layout_bounds(
+        elem: &Packed<BoundsElem>,
+        engine: &mut Engine,
+        locator: Locator,
+        styles: typst::foundations::StyleChain,
+        regions: Regions,
+    ) -> SourceResult<Fragment> {
+        let mut fragment =
+            typst_layout::layout_fragment(engine, &elem.body, locator, styles, regions)?;
+        for frame in &mut fragment {
+            frame.mark_box_in_place();
+        }
+        Ok(fragment)
     }
 }

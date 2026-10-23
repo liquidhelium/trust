@@ -2168,7 +2168,10 @@ dependencies = [
  "trust-runtime",
  "typst",
  "typst-eval",
+ "typst-layout",
+ "typst-library",
  "typst-syntax",
+ "typst-utils",
 ]
 
 [[package]]

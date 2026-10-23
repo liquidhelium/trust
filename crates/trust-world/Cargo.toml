@@ -9,5 +9,8 @@ publish = false
 typst = "0.15.1"
 typst-eval = "0.15.1"
 typst-syntax = "0.15.1"
+typst-layout = "0.15.1"
+typst-library = "0.15.1"
+typst-utils = "0.15.1"
 comemo = "0.5.1"
 trust-runtime = { path = "../trust-runtime" }

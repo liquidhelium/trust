@@ -11,7 +11,7 @@ use typst_syntax::ast::{self, AstNode};
 pub(super) fn collect_idents(  // WALK 计数供 TRUST_TRACE_CAPS 调试
     node: &typst_syntax::SyntaxNode,
     bound: &mut Vec<String>,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, bool)>,
 ) {
     use typst_syntax::SyntaxKind as K;
     match node.kind() {
@@ -143,12 +143,16 @@ pub(super) fn collect_idents(  // WALK 计数供 TRUST_TRACE_CAPS 调试
             bound.truncate(mark);
         }
         K::Ident | K::MathIdent => {
-            // 对照原生 CapturesVisitor:Ident 与 MathIdent 都是潜在
-            // 捕获(数学名先查常规作用域再查数学作用域;仅存于数学
-            // 作用域的符号名捕获落空,调用期由数学作用域解析)。
+            // 对照原生 CapturesVisitor 的分档:Ident → capture(get)
+            //(局部→全局→std),MathIdent → capture(get_in_math)
+            //(局部→数学作用域→std)。类别随名字贯穿到运行期物化
+            //(capture_code_opt / capture_math_opt)——数学名不回退
+            // 全局(issue-2885:`$rgb$` 该报 unknown variable),
+            // 代码名不回退数学作用域。
+            let in_math = node.kind() == K::MathIdent;
             let name = node.full_text().to_string();
             if !bound.contains(&name) {
-                out.push(name);
+                out.push((name, in_math));
             }
         }
         _ => {
@@ -170,7 +174,7 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.contains(&"from-check".to_string()),
+            !out.iter().any(|(n, _)| n == "from-check"),
             "内联闭包参数不应被收集: {out:?}"
         );
     }
@@ -194,7 +198,7 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.contains(&"from-check".to_string()),
+            !out.iter().any(|(n, _)| n == "from-check"),
             "多行内联闭包参数不应被收集: {out:?}"
         );
     }
@@ -243,7 +247,7 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.contains(&"from-check".to_string()) && !out.contains(&"from-cast".to_string()),
+            !out.iter().any(|(n, _)| n == "from-check") && !out.iter().any(|(n, _)| n == "from-cast"),
             "elembic 真实形态:内联闭包参数不应被收集: {out:?}"
         );
     }
@@ -255,7 +259,7 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.contains(&"from-check".to_string()),
+            !out.iter().any(|(n, _)| n == "from-check"),
             "declare 切片:from-check 不应被收集: {out:?}"
         );
     }
@@ -267,9 +271,9 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.contains(&"twohead".to_string()) && !out.contains(&"tt".to_string()),
+            !out.iter().any(|(n, _)| n == "twohead") && !out.iter().any(|(n, _)| n == "tt"),
             "数学字段名不应被收集: {out:?}"
         );
-        assert!(out.contains(&"arrow".to_string()), "目标名应收集: {out:?}");
+        assert!(out.iter().any(|(n, _)| n == "arrow"), "目标名应收集: {out:?}");
     }
 }

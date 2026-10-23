@@ -386,45 +386,47 @@ pub fn read_content(slot: &std::sync::OnceLock<Value>) -> SourceResult<Content> 
     }
 }
 
-/// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`:
-/// 局部之外查 `library.global`,miss 且名字为 `std` 时特判指向
-/// `library.std`;未命中报同款 `unknown variable`)。读取走
-/// `read_checked`,与原生一致地发出弃用警告。
+/// 在标准库全局作用域解析一个名字(对照解释器的 `Scopes::get`,**直接
+/// 复用**:局部之外查 `library.global`,miss 且名字为 `std` 时特判;
+/// miss 的 unknown variable 错误带减号 hint——文案与 hint 由 typst
+/// 侧生成,零漂移)。
 pub fn global(engine: &mut Engine, name: &str, span: Span) -> SourceResult<Value> {
-    match engine.library.global.scope().get(name) {
-        Some(binding) => Ok(binding.read_checked((engine, span)).clone()),
-        None if name == "std" => Ok(engine.library.std.read().clone()),
-        None => bail!(span, "unknown variable: {name}"),
-    }
+    let library: &Library = engine.library;
+    let scopes = Scopes::new(Some(library));
+    let binding = scopes.get(name).at(span)?;
+    Ok(binding.read_checked((engine, span)).clone())
 }
 
-/// **捕获路径**的创建期物化查找:全局 → 数学作用域 → `std`
-/// (对照原生 CapturesVisitor 的 `get` / `get_in_math`——函数体内的
-/// 数学名如 `$arrow$` 经创建点作用域捕获;普通解析用 [`global`],
-/// 不查数学作用域)。
-pub fn capture_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
-    Ok(
-        if let Some(binding) = engine.library.global.scope().get(name) {
-            Some(binding.read_checked((engine, Span::detached())).clone())
-        } else if let Some(binding) = engine.library.math.scope().get(name) {
-            Some(binding.read_checked((engine, Span::detached())).clone())
-        } else if name == "std" {
-            Some(engine.library.std.read().clone())
-        } else {
-            None
-        },
-    )
+/// **代码名捕获**的创建期物化查找(对照 CapturesVisitor 的
+/// `Ident → capture(Scopes::get)`):经 `Scopes::get` 解析,未命中
+/// 返回 None(调用期由闭包体内自己的绑定解析)。
+pub fn capture_code_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
+    let library: &Library = engine.library;
+    let scopes = Scopes::new(Some(library));
+    Ok(scopes
+        .get(name)
+        .ok()
+        .map(|b| b.read_checked((engine, Span::detached())).clone()))
 }
 
-/// 全局查找,不存在返回 `None`(对照 typst 捕获语义:创建期不可见的
-/// 名字不捕获,由闭包体内自己的 import 在调用期绑定;`std` 特判
-/// 与 [`global`] 同款)。
+/// **数学名捕获**的创建期物化查找(对照 CapturesVisitor 的
+/// `MathIdent → capture(Scopes::get_in_math)`):仅查数学作用域
+/// (与局部链)——**全局-only 名不在捕获面**(对照 issue-2885:
+/// `$rgb$` 该报 "unknown variable: rgb" 而非解析成全局函数)。
+pub fn capture_math_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
+    let library: &Library = engine.library;
+    let scopes = Scopes::new(Some(library));
+    Ok(scopes
+        .get_in_math(name)
+        .ok()
+        .map(|b| b.read_checked((engine, Span::detached())).clone()))
+}
+
+/// 全局查找(代码名),不存在返回 `None`(对照 typst 捕获语义:
+/// 创建期不可见的名字不捕获,由闭包体内自己的 import 在调用期
+/// 绑定)。
 pub fn global_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
-    Ok(match engine.library.global.scope().get(name) {
-        Some(binding) => Some(binding.read_checked((engine, Span::detached())).clone()),
-        None if name == "std" => Some(engine.library.std.read().clone()),
-        None => None,
-    })
+    capture_code_opt(engine, name)
 }
 
 /// 字段访问 `target.name`(对照 `access_field`:`Value::field` +
@@ -706,13 +708,18 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
 fn resolve_pending(
     engine: &mut Engine,
     captured: &mut Vec<(&'static str, Value)>,
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
 ) {
-    for name in pending {
+    for (name, in_math) in pending {
         if captured.iter().any(|(n, _)| n == name) {
             continue;
         }
-        if let Some(value) = capture_opt(engine, name).ok().flatten() {
+        let found = if *in_math {
+            capture_math_opt(engine, name)
+        } else {
+            capture_code_opt(engine, name)
+        };
+        if let Ok(Some(value)) = found {
             captured.push((name, value));
         }
     }
@@ -722,7 +729,7 @@ pub fn closure(
     src: &str,
     defaults: Vec<Value>,
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
     let (node, num_pos_params) = cached_closure_node(src);
@@ -924,7 +931,7 @@ pub fn closure_node_at(
     node: &(typst_syntax::SyntaxNode, usize),
     defaults: Vec<Value>,
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
     let (node, num_pos_params) = node.clone();
@@ -1434,45 +1441,9 @@ fn elements_mismatch_diagnostic(
 /// typst-eval 的 `import_package` + `import_file`:sink/route 透传
 /// (警告与调用深度进入同一链)、环检测、模块挂包短名)。
 pub fn import_external(engine: &mut Engine, spec: &str, span: Span) -> SourceResult<Module> {
-    use typst::syntax::{RootedPath, VirtualPath, VirtualRoot, package::PackageSpec};
-    let spec: PackageSpec = match spec.parse() {
-        Ok(spec) => spec,
-        Err(_) => bail!(span, "invalid package spec"),
-    };
-    let manifest_id = RootedPath::new(
-        VirtualRoot::Package(spec.clone()),
-        VirtualPath::new("typst.toml").expect("path"),
-    )
-    .intern();
-    let bytes = engine.world.file(manifest_id).at(span)?;
-    let text = bytes
-        .as_str()
-        .map_err(typst::diag::FileError::from)
-        .at(span)?;
-    let manifest: typst::syntax::package::PackageManifest = match toml::from_str(text) {
-        Ok(manifest) => manifest,
-        Err(err) => bail!(span, "package manifest is malformed ({})", err.message()),
-    };
-    manifest.validate(&spec).at(span)?;
-    let entry_id = RootedPath::new(
-        VirtualRoot::Package(spec),
-        VirtualPath::new(&manifest.package.entrypoint).expect("entry"),
-    )
-    .intern();
-    let source = engine.world.source(entry_id).at(span)?;
-    // Prevent cyclic importing.
-    if engine.route.contains(source.id()) {
-        bail!(span, "cyclic import");
-    }
-    typst_eval::eval(
-        engine.world,
-        engine.library,
-        engine.traced,
-        comemo::TrackedMut::reborrow_mut(&mut engine.sink),
-        engine.route.track(),
-        &source,
-    )
-    .map(|module| module.with_name(manifest.package.name.clone()))
+    // 直接复用 pub 的 `typst_eval::import`(对照手搓版的三处漂移:
+    // spec 解析错误文案、manifest 校验链、包名映射——原版一处不差)。
+    typst_eval::import(engine, spec, span)
 }
 
 /// 显式降级占位:发出 warning 并返回 none(不静默降级原则——
@@ -2245,7 +2216,7 @@ pub fn write_ms(slot: &std::sync::Mutex<Value>, v: Value) -> SourceResult<()> {
 pub fn context_closure(
     body_src: &str,
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
     let node = cached_body_node(body_src);
@@ -2311,7 +2282,7 @@ fn cached_body_node(body_src: &str) -> typst_syntax::SyntaxNode {
 /// `scopes.top = closure.captured.clone()`)。
 fn captured_scope(
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Scope {
     let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
@@ -2354,7 +2325,7 @@ pub fn label(name: &str) -> Value {
 pub fn eval_expr(
     src: &str,
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
     context: Tracked<Context>,
 ) -> SourceResult<Value> {
@@ -2372,7 +2343,7 @@ pub fn eval_vm_exports(
     src: &str,
     exports: &[&str],
     captured: &[(&'static str, Value)],
-    pending: &[&'static str],
+    pending: &[(&'static str, bool)],
     engine: &mut Engine,
     context: Tracked<Context>,
 ) -> SourceResult<(Value, Vec<Value>)> {

@@ -586,7 +586,7 @@ return;
                         &mut names,
                     );
                     let mut g_seen = std::collections::HashSet::new();
-                for gname in names {
+                for (gname, g_in_math) in names {
                         if !g_seen.insert(gname.clone()) {
                             continue;
                         }
@@ -596,9 +596,10 @@ return;
                         let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
                         state_fields.push(gslot.clone());
                         let gname_escaped = escape(&gname);
+                        let resolver = if g_in_math { "capture_math_opt" } else { "capture_code_opt" };
                         let _ = writeln!(
                             self.binding_code,
-                            "    if let Some(v) = rt::capture_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                            "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
                         );
                         g_env.module.push((
                             gname,

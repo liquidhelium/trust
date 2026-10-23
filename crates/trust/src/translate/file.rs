@@ -286,7 +286,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     &mut g_bound,
                     &mut names,
                 );
-                for gname in names {
+                for (gname, g_in_math) in names {
                     if !g_seen.insert(gname.clone()) {
                         continue;
                     }
@@ -296,9 +296,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
                     let _ = writeln!(fields, "    {gslot}: std::sync::OnceLock<Value>,");
                     let gname_escaped = escape(&gname);
+                    let resolver = if g_in_math { "capture_math_opt" } else { "capture_code_opt" };
                     let _ = writeln!(
                         g_code,
-                        "    if let Some(v) = rt::capture_opt(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                        "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
                     );
                     g_env.module.push((
                         gname,

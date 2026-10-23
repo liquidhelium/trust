@@ -157,7 +157,7 @@ impl Ctx {
                 // `#context expr`:构造推迟求值的闭包(对照 `Eval for
                 // ast::Contextual`),realize/layout 期带 location/styles 求值。
                 let body = ctx.body().to_untyped().full_text().to_string();
-                let mut names: Vec<String> = Vec::new();
+                let mut names: Vec<(String, bool)> = Vec::new();
                 collect_idents(ctx.body().to_untyped(), &mut Vec::new(), &mut names);
                 let (captured, pending) = self.capture_entries(&names, env);
                 // pending(局部/模块槽之外的名字)运行期经全局+数学
@@ -436,7 +436,7 @@ impl Ctx {
             }
             ast::Expr::Equation(_) => {
                 let src = expr.to_untyped().full_text().trim().to_string();
-                let mut names: Vec<String> = Vec::new();
+                let mut names: Vec<(String, bool)> = Vec::new();
                 collect_idents(expr.to_untyped(), &mut Vec::new(), &mut names);
                 let (captured, pending) = self.capture_entries(&names, env);
                 let pending_lit = pending_list(&pending);
@@ -839,7 +839,7 @@ impl Ctx {
                 defaults.push(self.expr(named.expr(), env));
             }
         }
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<(String, bool)> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let (captured, captured_globals) = self.capture_entries(&names, env);
         let defaults = if defaults.is_empty() {
@@ -892,13 +892,14 @@ impl Ctx {
         // 捕获:局部/模块槽即时物化(Some 包值);创建期不可见的名字
         // 运行期经全局+数学作用域物化(Option),调用期 None 报
         // unknown variable(对照 CapturesVisitor 的 `Err(_) => return`)。
-        let mut names: Vec<String> = Vec::new();
+        let mut names: Vec<(String, bool)> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let (mut pairs, pending) = self.capture_pairs(&names, env);
-        for name in &pending {
+        for (name, in_math) in &pending {
+            let resolver = if *in_math { "capture_math_opt" } else { "capture_code_opt" };
             pairs.push((
                 name.clone(),
-                format!("rt::capture_opt(engine, \"{}\")?", escape(name)),
+                format!("rt::{resolver}(engine, \"{}\")?", escape(name)),
             ));
         }
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
@@ -974,7 +975,7 @@ impl Ctx {
             tuple.push("__st.clone()".to_string());
         }
         for (name, expr) in &pairs {
-            if pending.iter().any(|p| p == name) {
+            if pending.iter().any(|(p, _)| p == name) {
                 tuple.push(expr.clone());
             } else {
                 tuple.push(format!("Some({expr})"));
@@ -1229,7 +1230,11 @@ impl Ctx {
 
     /// 捕获列表构造(闭包与 context 共用):局部/模块槽直接物化,
     /// 全局名存在才物化(创建期不可见的交给体内 import)。
-    fn capture_entries(&mut self, names: &[String], env: &mut Env) -> (Vec<String>, Vec<String>) {
+    fn capture_entries(
+        &mut self,
+        names: &[(String, bool)],
+        env: &mut Env,
+    ) -> (Vec<String>, Vec<(String, bool)>) {
         let (pairs, globals) = self.capture_pairs(names, env);
         (
             pairs
@@ -1242,14 +1247,19 @@ impl Ctx {
 
     /// 结构化捕获表:(名字, 求值表达式) 列表 + 待运行期物化的全局名
     /// (C2 闭包按名排序组捕获元组,需要名字与表达式分离)。
-    fn capture_pairs(&mut self, names: &[String], env: &mut Env) -> (Vec<(String, String)>, Vec<String>) {
+    fn capture_pairs(
+        &mut self,
+        names: &[(String, bool)],
+        env: &mut Env,
+    ) -> (Vec<(String, String)>, Vec<(String, bool)>) {
         let mut captured: Vec<(String, String)> = Vec::new();
-        let mut globals = Vec::new();
+        let mut globals: Vec<(String, bool)> = Vec::new();
         let mut seen = HashSet::new();
-        for name in names {
+        for (name, in_math) in names {
             if !seen.insert(name.clone()) {
                 continue;
             }
+            let _ = in_math;
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
                 captured.push((name.clone(), format!("{rust}.clone()")));
             } else if !env.wildcards.is_empty() {
@@ -1287,7 +1297,7 @@ impl Ctx {
                 let value = self.ref_value(module_ref);
                 captured.push((name.clone(), value));
             } else {
-                globals.push(name.clone());
+                globals.push((name.clone(), *in_math));
             }
         }
         (captured, globals)
@@ -1318,7 +1328,7 @@ fn is_invariant(expr: &typst_syntax::SyntaxNode) -> bool {
 
 /// pending 名单的字面量形态(`&["a", "b"]`;创建期经全局+数学作用域
 /// 物化,见 rt::resolve_pending)。
-fn pending_list(names: &[String]) -> String {
+fn pending_list(names: &[(String, bool)]) -> String {
     if names.is_empty() {
         "&[]".to_string()
     } else {
@@ -1326,7 +1336,7 @@ fn pending_list(names: &[String]) -> String {
             "&[{}]",
             names
                 .iter()
-                .map(|n| format!("{:?}", n))
+                .map(|(n, m)| format!("({n:?}, {m})"))
                 .collect::<Vec<_>>()
                 .join(", ")
         )

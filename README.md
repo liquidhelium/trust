@@ -66,6 +66,10 @@ trust translate-pkg <package-root> -o <output.rs | <output-dir>/ [flags]
   interpretation at runtime, with a warning.
 - `-o <dir>/` (trailing slash) — emit a multi-file tree mirroring the source
   package instead of one generated source file.
+- `--no-fmt` — emit the translator's raw output. By default the output is
+  pretty-printed (prettyplease for plain Rust, the translator's own layout
+  for the runtime DSL macros; token streams are preserved exactly, verified
+  per chunk with any mismatch falling back to the original text).
 
 Additional subcommands: `trust coverage <dir-or-file>` translates every
 `.typ` file and clusters the gaps by diagnostic kind; `trust -V` prints the

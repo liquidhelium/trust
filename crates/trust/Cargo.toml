@@ -14,5 +14,12 @@ typst-syntax = "0.15.1"
 # Package manifest (entrypoint parsing)
 toml = "0.8"
 trust-runtime = { path = "../trust-runtime" }
+# Output formatting (fmt module): parse the generated code back and
+# pretty-print it — prettyplease for real Rust, our own layout for the
+# runtime DSL macros. span-locations gives exact byte ranges outside a
+# proc-macro context.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "printing", "clone-impls"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+prettyplease = { version = "0.2", features = ["verbatim"] }
 # Command-line interface
 clap = { version = "4", features = ["derive"] }

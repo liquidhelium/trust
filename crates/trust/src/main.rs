@@ -107,6 +107,9 @@ enum Command {
         /// Module name; defaults to the input file stem
         #[arg(long)]
         name: Option<String>,
+        /// Emit the translator's raw output without pretty-printing
+        #[arg(long)]
+        no_fmt: bool,
     },
     /// Translate a local package directory (entrypoint auto-detected)
     TranslatePkg {
@@ -124,6 +127,9 @@ enum Command {
         /// local package cache into the translation
         #[arg(long)]
         with_deps: bool,
+        /// Emit the translator's raw output without pretty-printing
+        #[arg(long)]
+        no_fmt: bool,
     },
     /// Measure language coverage of a file or directory
     Coverage {
@@ -139,6 +145,7 @@ fn main() {
             input,
             output,
             name,
+            no_fmt,
         } => {
             let input = &input;
             let output = output.as_deref();
@@ -157,18 +164,22 @@ fn main() {
                     .unwrap_or("module")
             });
             match trust::translate(&src, name) {
-                Ok(code) => match output {
-                    Some(path) => {
-                        if let Err(err) = std::fs::write(path, code) {
-                            eprintln!("failed to write {path}: {err}");
-                            std::process::exit(1);
+                Ok(code) => {
+                    // Pretty-print unless opted out (see the `fmt` module).
+                    let code = if no_fmt { code } else { trust::format_generated(&code) };
+                    match output {
+                        Some(path) => {
+                            if let Err(err) = std::fs::write(path, code) {
+                                eprintln!("failed to write {path}: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                        None => {
+                            let mut out = std::io::stdout();
+                            let _ = writeln!(out, "{code}");
                         }
                     }
-                    None => {
-                        let mut out = std::io::stdout();
-                        let _ = writeln!(out, "{code}");
-                    }
-                },
+                }
                 Err(diags) => {
                     for diag in diags {
                         let mut one = std::collections::BTreeMap::new();
@@ -193,6 +204,7 @@ fn main() {
             output,
             lenient,
             with_deps,
+            no_fmt,
         } => {
             let input = pkg_root.as_str();
             let output = output.as_str();
@@ -300,7 +312,13 @@ fn main() {
                             let path = out_root.join(rel);
                             std::fs::create_dir_all(path.parent().expect("parent"))
                                 .expect("create dirs");
-                            std::fs::write(&path, content).expect("write");
+                            // Pretty-print unless opted out (see `fmt`).
+                            let content = if no_fmt {
+                                content.clone()
+                            } else {
+                                trust::format_generated(content)
+                            };
+                            std::fs::write(&path, &content).expect("write");
                             bytes += content.len();
                         }
                         println!("generated tree of {} files ({} bytes) at {output}", tree.len(), bytes);
@@ -319,6 +337,7 @@ fn main() {
                 for d in &diags {
                     eprintln!("degraded {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
                 }
+                let code = if no_fmt { code } else { trust::format_generated(&code) };
                 std::fs::write(output, &code).expect("write");
                 println!(
                     "generated {output} ({} bytes, {} degradations; list above and in the file header)",
@@ -328,6 +347,7 @@ fn main() {
             } else {
                 match trust::translate_package(&pkg, &name) {
                     Ok(code) => {
+                        let code = if no_fmt { code } else { trust::format_generated(&code) };
                         std::fs::write(output, &code).expect("write");
                         println!("generated {output} ({} bytes)", code.len());
                     }

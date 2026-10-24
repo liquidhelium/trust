@@ -6,8 +6,10 @@
 //! system. Host integration injects a custom World (see `trust-world`)
 //! without changing a single line of typst.
 
+pub mod fmt;
 pub mod translate;
 
+pub use fmt::format_generated;
 pub use translate::{
     Diag, PackageInput, translate, translate_package, translate_package_lenient,
     translate_package_tree,

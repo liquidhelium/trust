@@ -335,7 +335,7 @@ fn main() {
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
-                    eprintln!("degraded {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
+                    eprintln!("degraded {:?}{}: {}", d.span, diag_snippet(d, &pkg.files), d.message);
                 }
                 let code = if no_fmt { code } else { trust::format_generated(&code) };
                 std::fs::write(output, &code).expect("write");
@@ -546,7 +546,6 @@ fn collect_translatable_deps(
         // escapes).
         let mut specs: Vec<String> = Vec::new();
         for text in files.values() {
-            let bytes = text.as_bytes();
             // Skip doc-comment lines (///) — a README example's @spec would
             // be a false dependency hit (scan noise).
             let text = text
@@ -625,7 +624,6 @@ fn collect_translatable_deps(
             };
             let src_root = entry.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
             let mut stack = vec![dir.join(&src_root)];
-            let base = src_root;
             while let Some(d) = stack.pop() {
                 let Ok(entries) = std::fs::read_dir(&d) else { continue };
                 for e in entries.flatten() {

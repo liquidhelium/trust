@@ -20,7 +20,7 @@ use typst_syntax::ast::{self, AstNode};
 use super::Diag;
 use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
-use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
+use super::naming::{escape, lowercase, sanitize_key, uppercase};
 
 /// Top-level binding: a list of (name, slot) pairs + its kind (function
 /// closure node or value init; a destructuring binding contributes several

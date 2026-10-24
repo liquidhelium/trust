@@ -299,6 +299,9 @@ pub fn bind_module(
 /// drops cold-compile throughput to 0.43× — the accounting is load-bearing,
 /// not overhead. Non-stub closures fall through unchanged to typst-eval's
 /// default routine.
+// The engine parts arrive as separate tracked parameters, mirroring
+// typst-eval's own closure-eval entry signature.
+#[allow(clippy::too_many_arguments)]
 pub fn trust_eval_closure(
     func: &Func,
     closure: &LazyHash<Closure>,
@@ -360,6 +363,7 @@ fn stub_routine(closure: &LazyHash<Closure>) -> Option<(&TrustRoutine, Option<&S
 /// order; internally performs default injection + state-handle insertion +
 /// the native body call in one step, skipping the stub body's
 /// interpretation and inner dispatch).
+#[allow(clippy::too_many_arguments)]
 #[comemo::memoize]
 fn eval_stub_native(
     func: &Func,
@@ -1049,8 +1053,8 @@ pub fn attach_labels(
             } else {
                 engine.sink.warn(typst::diag::warning!(
                     Span::detached(),
-                    "label `{}` is not attached to anything",
-                    format!("<{}>", label.resolve()),
+                    "label `<{}>` is not attached to anything",
+                    label.resolve(),
                 ));
             }
         } else {
@@ -1986,15 +1990,18 @@ impl std::hash::Hash for StateSlot {
 /// inject defaults for missing named arguments (mirroring `eval_closure`'s
 /// `default.clone()` at binding time), and call the native body directly
 /// instead of the memoized interpretation.
-#[derive(Clone)]
-pub struct TrustRoutine {
-    pub f: &'static (dyn Fn(
+/// The native-body signature driven by translated closures.
+pub type TrustRoutineFn = dyn Fn(
         &mut Engine,
         Tracked<'_, Context>,
         &mut Args,
     ) -> SourceResult<Value>
         + Send
-        + Sync),
+        + Sync;
+
+#[derive(Clone)]
+pub struct TrustRoutine {
+    pub f: &'static TrustRoutineFn,
     /// (named-argument name, creation-time default), in declaration order.
     /// The fast path injects only items the caller did not provide;
     /// provided ones are skipped (injected items go before the caller's
@@ -2258,11 +2265,11 @@ fn stub_signature(params_src: &str) -> (String, String) {
 /// cached by (function name, signature) (zero formatting on the frequent
 /// creation path).
 fn stub_source(name: &str, params: &str, args: &str, stateful: bool) -> String {
-    static CACHE: std::sync::LazyLock<
-        std::sync::RwLock<
-            std::collections::HashMap<String, std::collections::HashMap<(String, bool), String>>,
-        >,
-    > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    /// function name → (params, stateful) → source text
+    type StubCache =
+        std::collections::HashMap<String, std::collections::HashMap<(String, bool), String>>;
+    static CACHE: std::sync::LazyLock<std::sync::RwLock<StubCache>> =
+        std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
     let key = (params.to_string(), stateful);
     if let Some(inner) = CACHE.read().unwrap().get(name)
         && let Some(hit) = inner.get(&key)

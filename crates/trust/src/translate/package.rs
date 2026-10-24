@@ -99,13 +99,13 @@ struct PackageParts {
 /// returns (code, diagnostic list).
 pub fn translate_package_lenient(input: &PackageInput, module_name: &str) -> (String, Vec<Diag>) {
     let mut cx = Ctx::new(true);
-    let mut parts = translate_package_parts(input, module_name, &mut cx);
+    let parts = translate_package_parts(input, module_name, &mut cx);
     (render_single(&parts), cx.diags)
 }
 
 pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<String, Vec<Diag>> {
     let mut cx = Ctx::new(false);
-    let mut parts = translate_package_parts(input, module_name, &mut cx);
+    let parts = translate_package_parts(input, module_name, &mut cx);
     if !cx.diags.is_empty() {
         return Err(cx.diags);
     }
@@ -520,7 +520,7 @@ fn assemble_package_world(
                 if !idx.contains_key(&slot)
                     && let Some(file) = resolve_import_slot_file(
                         &slot,
-                        &plans,
+                        plans,
                         &export_table,
                         &input.dep_entries,
                         plans.len(),
@@ -726,7 +726,7 @@ return;
                     // Declaration without initializer (`#let x`): binds
                     // none (mirrors typst-eval LetBinding's define(name,
                     // None) for the no-init case).
-                    let Some(init_expr) = lets.init().map(|e| e) else {
+                    let Some(init_expr) = lets.init() else {
                         if let Some(name) = pattern.bindings().first() {
                             let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
                             self.own_seen.insert(name.as_str().to_string(), nth + 1);
@@ -922,7 +922,6 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             input,
                             &plans,
                             &export_table,
-                            &package_mods,
                             &mut top.env,
                             &top.own,
                             &mut state_fields,
@@ -1224,7 +1223,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 /// eval driver and all `mod` blocks. Assembled from `push_str` segments
 /// (the `{{}}}}` escapes of a `writeln!` format string are error-prone);
 /// byte-identical to the pre-refactor output and locked by snapshots.
-
+///
 /// Render module_by_path arms from the registry table. `module_path`
 /// maps a plan to its reference path (flat `m5_foo` or tree
 /// `dir::foo`); the arm assembles the dependency closure in
@@ -1236,7 +1235,7 @@ fn render_registry(
     let pick = |p: &(String, String)| if tree { p.1.clone() } else { p.0.clone() };
     let mut out = String::new();
     for (path, closure) in registry {
-        let _ = write!(out, "        \"{path}\" => Some((|| {{\n");
+        let _ = writeln!(out, "        \"{path}\" => Some((|| {{");
         for pair in closure {
             let _ = writeln!(out, "            {}::eval(board, engine, context)?;", pick(pair));
         }
@@ -1427,15 +1426,12 @@ fn dedent4(s: &str) -> String {
 /// assignments/compound assignments (mirrors typst's mutable access
 /// semantics — module bindings are likewise mutable in place).
 pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
-    use typst_syntax::SyntaxKind as K;
     if let Some(fc) = node.cast::<typst_syntax::ast::FuncCall>()
         && let typst_syntax::ast::Expr::FieldAccess(access) = fc.callee()
         && matches!(access.field().as_str(), "push" | "pop" | "insert" | "remove")
-    {
-        if let Some(root) = place_root(access.target().to_untyped()) {
+        && let Some(root) = place_root(access.target().to_untyped()) {
             out.push(root);
         }
-    }
     if let Some(bin) = node.cast::<typst_syntax::ast::Binary>()
         && matches!(
             bin.op(),
@@ -1546,7 +1542,7 @@ fn item_file(
 /// `{spec}/{path-inside-package}` (the spec itself contains `/`; bounded
 /// by the first `/` after the colon); returns an empty string for
 /// non-merge keys.
-
+///
 /// Slot name → owning file (`V{i}_…` where i is the plan index;
 /// `IMPORT_{mod}_…` reverse-looks-up that mod's internal import edge
 /// target). Used by module-value-chain wildcard resolution.
@@ -1719,8 +1715,6 @@ impl Ctx {
     /// native statement-by-statement evaluation, so it must not be hoisted
     /// wholesale).
     #[allow(clippy::too_many_arguments)]
-
-
 /// Zone-1 glue edge handling: the statement text drives the original
 /// `Eval for ast::ModuleImport` via `rt::eval_import` (source
 /// dispatch/loading including file-not-found plus the cycle/bare-name
@@ -1741,7 +1735,6 @@ impl Ctx {
             String,
             std::collections::BTreeMap<String, String>,
         >,
-        package_mods: &std::collections::BTreeMap<String, String>,
         env: &mut Env,
         own: &[(String, String)],
         state_fields: &mut Vec<String>,
@@ -1856,7 +1849,7 @@ impl Ctx {
                             // Wildcard of a merged dependency: expanded via
                             // the entry export table (same shape as LIST,
                             // materializing field accesses).
-                            for (wname, _) in &export_table[&edge.target] {
+                            for wname in export_table[&edge.target].keys() {
                                 if env.module.iter().any(|(n, _)| n == wname) {
                                     continue;
                                 }
@@ -2013,7 +2006,7 @@ impl Ctx {
                         let slot = format!(
                             "IMPORT_{}_{}",
                             sanitize(&plan.mod_name),
-                            sanitize(&name)
+                            sanitize(name)
                         );
                         state_fields.push(slot.clone());
                         let _ = writeln!(
@@ -2024,7 +2017,7 @@ impl Ctx {
                         let _ = writeln!(
                             file_defines,
                             "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
+                            escape(name)
                         );
                     }
                     // Module rename + member list: double binding.
@@ -2103,20 +2096,18 @@ impl Ctx {
                         let mut cur: Option<String> = None;
                         if let Some((_, r#ref)) =
                             env.module.iter().rev().find(|(n, _)| n == root)
-                        {
-                            if let super::ctx::Ref::Slot(slot) = r#ref {
-                                cur = slot_target_file(slot, &plans);
+                            && let super::ctx::Ref::Slot(slot) = r#ref {
+                                cur = slot_target_file(slot, plans);
                                 if std::env::var_os("TRUST_TRACE_WILD").is_some() {
                                     eprintln!("[wild] root={root} slot={slot} → {cur:?}");
                                 }
                             }
-                        }
                         for field in fields {
                             let next = cur
                                 .as_ref()
                                 .and_then(|f| export_table.get(f.as_str()))
                                 .and_then(|exports| exports.get(field))
-                                .and_then(|slot| slot_target_file(slot, &plans));
+                                .and_then(|slot| slot_target_file(slot, plans));
                             match next {
                                 Some(f) => cur = Some(f),
                                 None => {
@@ -2128,7 +2119,7 @@ impl Ctx {
                         if let Some(target) = cur
                             && let Some(exports) = export_table.get(target.as_str())
                         {
-                            for (wname, _wslot) in exports {
+                            for wname in exports.keys() {
                                 if env.module.iter().any(|(n, _)| n == wname) {
                                     continue;
                                 }

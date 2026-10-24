@@ -35,6 +35,7 @@
 //!   children walk of its catch-all, same behavior; made explicit here
 //!   with the reason noted (a computed key is a real evaluation)
 //! - catch-all children walk → call.rs:843-847
+//!
 //! The original manages scopes with `internal.enter()/exit()`; we implement
 //! the equivalent with push/pop on the bound stack plus truncation at block
 //! boundaries; membership semantics match (original

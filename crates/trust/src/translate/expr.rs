@@ -34,6 +34,10 @@ fn unit_variant(unit: ast::Unit) -> &'static str {
     }
 }
 
+/// Capture analysis result: (captured name → Rust expr) and
+/// (global-fallback name → in-math).
+type CapturePairs = (Vec<(String, String)>, Vec<(String, bool)>);
+
 /// A content item + the binding set visible when it was generated
 /// (top-level content has per-item visibility in source order, mirroring
 /// typst's sequential markup evaluation; uniform inside a content block).
@@ -390,7 +394,6 @@ impl Ctx {
                     }
                 };
                 self.in_loop += 1;
-                let mut body_env = body_env;
                 let body = self.expr(for_loop.body(), &mut body_env);
                 self.in_loop -= 1;
                 let iter_at = self.span_of(for_loop.iterable().span());
@@ -770,7 +773,7 @@ impl Ctx {
                 // Mutating method (mirrors `maybe_resolve_mutating`:
                 // **arguments evaluate before the target**; the target
                 // resolves mutably via `Access`).
-                let args = self.gen_args(call.args(), env, &at);
+                let args = self.gen_args(call.args(), env);
                 let access_text = access.to_untyped().full_text().to_string();
                 match self.classify_place(access.target(), env) {
                     super::block::Place::Local { root, path } => {
@@ -844,7 +847,7 @@ impl Ctx {
             let tgt_at = self.span_of(access.target().span());
             let field_at = self.span_of(access.field().span());
             let access_text = access.to_untyped().full_text().to_string();
-            let args = self.gen_args(call.args(), env, &at);
+            let args = self.gen_args(call.args(), env);
             return format!(
                 "rt::mcall!(engine, context, {at}, {target}, \"{}\", {access_text:?}, {field_at}, {tgt_at}; {args})",
                 escape(field)
@@ -855,7 +858,7 @@ impl Ctx {
         // not evaluated.
         let callee_at = self.span_of(call.callee().span());
         let callee = self.expr(call.callee(), env);
-        let args = self.gen_args(call.args(), env, &at);
+        let args = self.gen_args(call.args(), env);
         format!(
             "rt::call!(engine, context, {at}, rt::callee({callee}, {callee_at})?; {args})"
         )
@@ -868,7 +871,7 @@ impl Ctx {
     /// Argument-list builder: emits the body of a closure receiving the
     /// `&mut Args` builder (consumed by the `rt::call!`/`rt::mcall!`
     /// macros), so a call site is one readable line.
-    fn gen_args(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> String {
+    fn gen_args(&mut self, args: ast::Args, env: &mut Env) -> String {
         let mut out = String::new();
         for arg in args.items() {
             let item_at = self.span_of(arg.span());
@@ -1208,7 +1211,7 @@ impl Ctx {
     /// (Args.span and the rule span share their origin). Shared by the
     /// set/show-set arms.
     pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &mut Env, call_at: &str) -> String {
-        let args = self.gen_args(set.args(), env, call_at);
+        let args = self.gen_args(set.args(), env);
         let args_val = format!("rt::args!({call_at}; {args})");
         let target = self.expr(set.target(), env);
         match set.condition() {
@@ -1241,10 +1244,7 @@ impl Ctx {
             _ => None,
         };
         let hoist = match scan_root {
-            Some(root) => {
-                let d = self.open_let_hoists(std::iter::once(root));
-                d
-            }
+            Some(root) => self.open_let_hoists(std::iter::once(root)),
             None => String::new(),
         };
         let out = self.content_part_inner(top, &mut env);
@@ -1397,7 +1397,7 @@ impl Ctx {
         &mut self,
         names: &[(String, bool)],
         env: &mut Env,
-    ) -> (Vec<(String, String)>, Vec<(String, bool)>) {
+    ) -> CapturePairs {
         let mut captured: Vec<(String, String)> = Vec::new();
         let mut globals: Vec<(String, bool)> = Vec::new();
         let mut seen = HashSet::new();
@@ -1509,7 +1509,6 @@ fn can_diverge(expr: &typst_syntax::SyntaxNode) -> bool {
 /// let nested in a LetBinding's init still binds this scope, so the scan
 /// keeps descending.
 pub(super) fn scan_let_exprs(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
-    use typst_syntax::ast::AstNode as _;
     if let Some(expr) = node.cast::<ast::Expr>() {
         match expr {
             ast::Expr::Closure(_)

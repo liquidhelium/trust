@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use typst_syntax::ast::{self, AstNode as _};
 
 use super::ctx::{Ctx, Env, bind_local};
-use super::naming::{escape, sanitize, sanitize_key};
+use super::naming::{escape, sanitize_key};
 
 impl Ctx {
     /// Generate one function: parameter destructuring + direct body
@@ -184,7 +184,6 @@ pub(super) fn gen_closure_fn(
         module: Vec::new(),
         wildcards: Vec::new(),
     };
-    let saved = self.used_state;
     self.used_state = false;
     self.in_fn += 1;
     self.in_closure += 1;

@@ -462,7 +462,7 @@ pub(super) fn resolve_import_slot_file(
             slot.strip_prefix(&prefix)
                 .map(|b| (p, b.to_string()))
         })
-        .or_else(|| {
+        .or({
             // The regular shape (module name without underscores) also
             // needs a fallback (prefix matching takes the first plan in
             // order; None when no split is possible).

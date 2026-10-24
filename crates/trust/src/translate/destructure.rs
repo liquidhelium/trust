@@ -182,56 +182,6 @@ impl Ctx {
                 ));
                 out
             }
-            ast::Pattern::Normal(other) => {
-                // At-position leaf of a destructuring assignment:
-                // `(a.at(i), b.c.at(j)) = ...` (DestructAssignment goes
-                // through access() i.e. at_mut and does **not** insert
-                // missing keys — unlike plain assignment's insert-on-*
-                // missing-tail semantics). Non-identifier leaves of let
-                // patterns report "cannot assign to this expression" as
-                // the original does (mirrors the leaf f of binding.rs
-                // `destructure`).
-                if assign {
-                    let at = self.span_of(other.span());
-                    match self.classify_place(other, env) {
-                        super::block::Place::Local { root, path } => {
-                            let path_lit = super::block::place_path_lit(&path);
-                            return format!(
-                                "{{ let __p = rt::place_mut(&mut {root}, {path_lit}, {at})?; *__p = {value}; }}\n"
-                            );
-                        }
-                        super::block::Place::Slot { slot, path } => {
-                            self.used_state = true;
-                            let path_lit = super::block::place_path_lit(&path);
-                            return format!(
-                                "{{ let mut __msv = rt::read_ms(&__st.{slot})?; let __p = rt::place_mut(&mut __msv, {path_lit}, {at})?; *__p = {value}; rt::write_ms(&__st.{slot}, __msv)?; }}\n"
-                            );
-                        }
-                        super::block::Place::Captured => {
-                            return format!(
-                                "{{ let _ = {value}; rt::bail_captured(typest_capturer())?; }}\n"
-                            )
-                        }
-                        super::block::Place::Unresolved { name } => {
-                            return format!(
-                                "{{ let _ = {value}; rt::check_mut_unknown(engine, \"{}\", {at})?; }}\n",
-                                escape(&name)
-                            )
-                        }
-                        super::block::Place::Temporary => {
-                            return format!(
-                                "{{ let _ = {value}; rt::bail_temporary({at})?; }}\n"
-                            )
-                        }
-                        super::block::Place::Deferred => {
-                            self.diag(other.span(), "destructuring-assignment target is a runtime module reference".into());
-                            return String::new();
-                        }
-                    }
-                }
-                format!("{{ let _ = {value}; bail!({at_span}, \"cannot assign to this expression\"); }}\n",
-                    at_span = self.span_of(other.span()))
-            }
         }
     }
 }

@@ -321,19 +321,15 @@ fn pp_shell(text: &str, mode: Mode, indent: usize) -> String {
         return text.to_string();
     };
     let out = prettyplease::unparse(&file);
-    let (body, shell_indent) = match mode {
-        Mode::Stmts => (
-            out.strip_prefix(&format!("fn {SHELL_FN}() {{\n"))
-                .and_then(|b| b.strip_suffix("}\n"))
-                .map(|b| b.to_string()),
-            4,
-        ),
-        Mode::Expr => (
-            out.strip_prefix(&format!("static {SHELL_LET}: _ = "))
-                .and_then(|b| b.strip_suffix(";\n"))
-                .map(|b| b.to_string()),
-            4,
-        ),
+    let body = match mode {
+        Mode::Stmts => out
+            .strip_prefix(&format!("fn {SHELL_FN}() {{\n"))
+            .and_then(|b| b.strip_suffix("}\n"))
+            .map(str::to_string),
+        Mode::Expr => out
+            .strip_prefix(&format!("static {SHELL_LET}: _ = "))
+            .and_then(|b| b.strip_suffix(";\n"))
+            .map(str::to_string),
     };
     let Some(body) = body else {
         return text.to_string();
@@ -352,12 +348,6 @@ fn pp_shell(text: &str, mode: Mode, indent: usize) -> String {
         return text.to_string();
     }
     shift_all_lines(&extracted, indent)
-}
-
-/// Format one expression (token slice) via the shell trick, relative to
-/// column 0.
-fn pp_expr(tts: &[TokenTree]) -> String {
-    pp_shell(&TokenStream::from_iter(tts.iter().cloned()).to_string(), Mode::Expr, 0)
 }
 
 /// Single-line text for head expressions (receiver lists, segment
@@ -407,10 +397,11 @@ fn spaced(a: &TokenTree, b: &TokenTree, prev: Option<&TokenTree>) -> bool {
     if is_joint(b) || is_joint(a) {
         return false;
     }
-    if let Some(p) = prev {
-        if is_joint(p) && punct(a, ':') {
-            return false;
-        }
+    if let Some(p) = prev
+        && is_joint(p)
+        && punct(a, ':')
+    {
+        return false;
     }
     let _ = punct;
     if let TokenTree::Punct(q) = b {
@@ -428,15 +419,16 @@ fn spaced(a: &TokenTree, b: &TokenTree, prev: Option<&TokenTree>) -> bool {
         if matches!(p.as_char(), '(' | '[' | '.' | '!') {
             return false;
         }
-        if matches!(p.as_char(), '&' | '*') && !prev.is_some_and(|p| is_value(p)) {
+        if matches!(p.as_char(), '&' | '*') && !prev.is_some_and(is_value) {
             return false;
         }
     }
     // Call/index position: `f(x)`, `a[i]`, `g()(y)`.
-    if let TokenTree::Group(g) = b {
-        if matches!(g.delimiter(), Delimiter::Parenthesis | Delimiter::Bracket) && is_value(a) {
-            return false;
-        }
+    if let TokenTree::Group(g) = b
+        && matches!(g.delimiter(), Delimiter::Parenthesis | Delimiter::Bracket)
+        && is_value(a)
+    {
+        return false;
     }
     true
 }
@@ -465,21 +457,20 @@ fn walk_tokens(ts: TokenStream, out: &mut Vec<Range<usize>>) {
     let tts: Vec<TokenTree> = ts.into_iter().collect();
     let mut i = 0usize;
     while i < tts.len() {
-        if let TokenTree::Punct(p) = &tts[i] {
-            if p.as_char() == '!' && i + 1 < tts.len() {
-                if let TokenTree::Group(g) = &tts[i + 1] {
-                    if let Some(start) = rt_macro_path_start(&tts[..i]) {
-                        out.push(start..g.span().byte_range().end);
-                        i += 2;
-                        continue;
-                    }
-                }
-            }
+        if let TokenTree::Punct(p) = &tts[i]
+            && p.as_char() == '!'
+            && i + 1 < tts.len()
+            && let TokenTree::Group(g) = &tts[i + 1]
+            && let Some(start) = rt_macro_path_start(&tts[..i])
+        {
+            out.push(start..g.span().byte_range().end);
+            i += 2;
+            continue;
         }
-        if let TokenTree::Group(g) = &tts[i] {
-            if g.delimiter() != Delimiter::None {
-                walk_tokens(g.stream(), out);
-            }
+        if let TokenTree::Group(g) = &tts[i]
+            && g.delimiter() != Delimiter::None
+        {
+            walk_tokens(g.stream(), out);
         }
         i += 1;
     }
@@ -514,11 +505,11 @@ fn split_comma(tts: &[TokenTree]) -> Vec<Vec<TokenTree>> {
     let mut parts = Vec::new();
     let mut cur = Vec::new();
     for tt in tts {
-        if let TokenTree::Punct(p) = tt {
-            if p.as_char() == ',' {
-                parts.push(std::mem::take(&mut cur));
-                continue;
-            }
+        if let TokenTree::Punct(p) = tt
+            && p.as_char() == ','
+        {
+            parts.push(std::mem::take(&mut cur));
+            continue;
         }
         cur.push(tt.clone());
     }
@@ -766,8 +757,7 @@ fn normalize_ts(ts: TokenStream) -> TokenStream {
 
 fn ts_eq(a: &TokenStream, b: &TokenStream) -> bool {
     let mut bi = b.clone().into_iter();
-    let mut k = 0usize;
-    for ta in a.clone() {
+    for (k, ta) in a.clone().into_iter().enumerate() {
         let Some(tb) = bi.next() else { return false };
         if !tt_eq(ta.clone(), tb.clone()) {
             if std::env::var_os("TRUST_FMT_DEBUG").is_some() {
@@ -785,7 +775,6 @@ fn ts_eq(a: &TokenStream, b: &TokenStream) -> bool {
             }
             return false;
         }
-        k += 1;
     }
     bi.next().is_none()
 }
@@ -875,7 +864,7 @@ mod tests {
         let src = "fn f() { rt::call!(engine, context, sp(1), callee; p(sp(2), { rt::mcall!(engine, context, sp(3), target, \"field\", \"access\", sp(4), sp(5); p(sp(6), { Value::None })) })); }\n";
         let out = format_items(src);
         assert!(out.contains("rt::mcall!("), "{out}");
-        assert!(tokens_equal(&src, &out), "{out}");
+        assert!(tokens_equal(src, &out), "{out}");
     }
 
     #[test]
@@ -889,17 +878,17 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("fn helper() -> i32 {\n            1 + 2\n        }"), "{out}");
-        assert!(tokens_equal(&src, &out), "{out}");
+        assert!(tokens_equal(src, &out), "{out}");
     }
 
     #[test]
     fn macro_inside_vec_items() {
         let src = "fn f() { let items = vec![(rt::space()).into_value(), (rt::call!(engine, context, sp(1), callee; p(sp(2), { Value::Int(0) }))?).into_value(), (rt::call!(engine, context, sp(3), callee2; p(sp(4), { Value::Int(1) }))?).into_value(), (rt::call!(engine, context, sp(5), callee3; p(sp(6), { Value::Int(2) }))?).into_value()]; g(items); }\n";
-        let out = format_items(&src);
+        let out = format_items(src);
         // Long enough to force a break: one item per line, the call
         // sites spliced at their columns.
         assert!(out.contains("vec![\n"), "{out}");
-        assert!(tokens_equal(&src, &out), "{out}");
+        assert!(tokens_equal(src, &out), "{out}");
     }
 
     #[test]

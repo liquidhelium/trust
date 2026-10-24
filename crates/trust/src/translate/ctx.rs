@@ -136,9 +136,6 @@ pub(super) enum Ref {
         name: String,
         file: Option<String>,
     },
-    /// Binding evaluated directly as an expression (the module value itself
-    /// or one of its fields).
-    Value(String),
     /// Global name materialized at creation time: read the slot when it
     /// holds a value (typst's creation-time capture), otherwise fall back
     /// to a call-time global lookup (the semantics of names invisible at
@@ -273,7 +270,6 @@ impl Ctx {
             Ref::ModuleField { expr, name, .. } => {
                 field_access_chain(expr, name)
             }
-            Ref::Value(expr) => expr.clone(),
             Ref::GlobalFallback { slot, name } => {
                 let name = escape(name);
                 format!("rt::read_or(&__st.{slot}, engine, \"{name}\")?")

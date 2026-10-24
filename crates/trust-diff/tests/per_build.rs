@@ -1,7 +1,8 @@
-//! per-build 槽板的边界验收(见 `_things/DESIGN-per-build.md` §4):
-//! 同进程两次构建、`sys.inputs` 取不同值 → 各自正确、无旧值残留。
-//! 旧实现(进程级 static 槽)在此用例下第二次构建拿到旧值
-//! (KNOWN-ISSUES #5)。
+//! Boundary acceptance for the per-build slot scheme: two builds in the same
+//! process with different `sys.inputs` values → each correct, with no stale
+//! values leaking from one build into the other. The old implementation
+//! (process-wide static slots) returned the first build's value on the
+//! second build here.
 
 use trust_world::InjectWorld;
 use typst::foundations::{Dict, IntoValue};
@@ -14,7 +15,7 @@ fn build_who(who: &str) -> String {
     let value = module
         .scope()
         .get("who")
-        .expect("who 已定义")
+        .expect("who is defined")
         .read()
         .clone();
     format!("{value:?}")
@@ -24,9 +25,6 @@ fn build_who(who: &str) -> String {
 fn inputs_isolated_per_build() {
     let a = build_who("alice");
     let b = build_who("bob");
-    assert!(a.contains("alice"), "第一构建应见 alice:{a}");
-    assert!(
-        b.contains("bob"),
-        "第二构建应见 bob(旧实现此处是 alice,KNOWN-ISSUES #5):{b}"
-    );
+    assert!(a.contains("alice"), "first build should see alice: {a}");
+    assert!(b.contains("bob"), "second build should see bob: {b}");
 }

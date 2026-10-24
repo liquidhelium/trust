@@ -1,7 +1,9 @@
-//! 表达式直译:typst 表达式 → 返回 `Value` 的 Rust 表达式(可含 `?`)。
+//! Direct expression translation: typst expressions → Rust expressions
+//! returning `Value` (may contain `?`).
 //!
-//! 入口 `Ctx::expr` 按表达式种类分派;其余方法(ident 解析、二元运算、
-//! 调用、调用点参数、闭包)均为其内部步骤。
+//! The entry point `Ctx::expr` dispatches on expression kind; the other
+//! methods (ident resolution, binary operations, calls, call-site
+//! arguments, closures) are its internal steps.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -13,8 +15,9 @@ use super::captures::collect_idents;
 use super::ctx::{Ctx, Env};
 use super::naming::{escape, sanitize_key};
 
-/// `ast::Unit` → Rust 变体名的显式映射(不依赖 Debug 输出形态,
-/// typst 改名即编译错,而非静默错值)。
+/// Explicit mapping `ast::Unit` → Rust variant name (does not depend on
+/// Debug output shape, so a typst rename becomes a compile error instead of
+/// a silently wrong value).
 fn unit_variant(unit: ast::Unit) -> &'static str {
     match unit {
         ast::Unit::Pt => "Pt",
@@ -29,29 +32,33 @@ fn unit_variant(unit: ast::Unit) -> &'static str {
     }
 }
 
-/// 内容项 + 生成该项时可见的绑定集(顶层内容按源序逐项可见性,
-/// 对照 typst 的 markup 顺序求值;content 块内均匀)。
+/// A content item + the binding set visible when it was generated
+/// (top-level content has per-item visibility in source order, mirroring
+/// typst's sequential markup evaluation; uniform inside a content block).
 pub(super) struct TopItem<'a> {
     pub item: ContentItem<'a>,
     pub env: Env,
 }
 
-/// 内容流的一项:普通表达式 / set 规则 / show 规则 / include。
-/// 顶层内容与 content 块共用同一条折叠管线。
+/// One item of a content stream: a plain expression / set rule / show
+/// rule / include. Top-level content and content blocks share the same
+/// folding pipeline.
 #[derive(Clone)]
 pub(super) enum ContentItem<'a> {
     Part(ast::Expr<'a>),
     Set(ast::SetRule<'a>),
     Show(ast::ShowRule<'a>),
-    /// 包模式:目标文件 body 槽名。
+    /// Package mode: the target file's body slot name.
     Include(String),
-    /// 动态源 include(区 1 胶水):携带发射好的求值代码
-    /// (`rt::eval_include` 驱动原版 Eval,file-not-found 等原版报)。
+    /// Dynamic-source include (zone-1 glue): carries the emitted
+    /// evaluation code (`rt::eval_include` drives the original Eval;
+    /// file-not-found and friends are reported by the original).
     DynamicInclude(String),
 }
 
 impl Ctx {
-    /// 表达式直译:返回类型为 `Value` 的 Rust 表达式(可含 `?`)。
+    /// Direct expression translation: returns a Rust expression of type
+    /// `Value` (may contain `?`).
     pub(super) fn expr(&mut self, expr: ast::Expr, env: &mut Env) -> String {
         match expr {
             ast::Expr::Ident(ident) => self.ident(ident, env),
@@ -59,7 +66,8 @@ impl Ctx {
             ast::Expr::Auto(_) => "Value::Auto".into(),
             ast::Expr::Bool(b) => format!("Value::Bool({})", b.get()),
             ast::Expr::Int(i) => format!("Value::Int({})", i.get()),
-            // inf/nan 的 Debug 形态不是合法 Rust 字面量,走常量。
+            // inf/nan Debug shapes are not valid Rust literals; go through
+            // constants.
             ast::Expr::Float(f) if f.get().is_infinite() => format!(
                 "Value::Float(f64::{}INFINITY)",
                 if f.get() > 0.0 { "" } else { "-" }
@@ -72,9 +80,10 @@ impl Ctx {
             }
             ast::Expr::Str(s) => format!("Value::Str({:?}.into())", s.get().as_str()),
             ast::Expr::Raw(raw) => {
-                // 代码位 Raw(对照 typst-eval markup.rs 的 `Eval for
-                // ast::Raw`):行表 + 语言 + 块标记构造 RawElem;
-                // `.text` 等字段访问走元素字段(与原生同语义)。
+                // Code-position Raw (mirrors typst-eval markup.rs's `Eval
+                // for ast::Raw`): build RawElem from the line table +
+                // language + block flag; field accesses like `.text` go
+                // through element fields (same semantics as native).
                 let lines = raw
                     .lines()
                     .map(|l| format!("{:?}.into()", l.get().as_str()))
@@ -92,26 +101,33 @@ impl Ctx {
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
             ast::Expr::DestructAssignment(assign) => {
-                // 解构赋值(表达式位置,顶层标记语句同走此臂;对照
-                // binding.rs `Eval for ast::DestructAssignment`:值先求,
-                // 叶子走 access 写回)。assign 叶子不绑新名,env 克隆
-                // 仅为满足 &mut 签名。
+                // Destructuring assignment (expression position; top-level
+                // marked statements take this same arm; mirrors binding.rs
+                // `Eval for ast::DestructAssignment`: value evaluated
+                // first, leaves written back via access). Assign leaves
+                // bind no new names; the env clone only satisfies the &mut
+                // signature.
                 let value = self.expr(assign.value(), env);
                 let mut env2 = env.clone();
                 let stmts = self.destructure(assign.pattern(), value, &mut env2, true);
                 format!("{{ {} Value::None }}", stmts)
             }
             ast::Expr::LetBinding(lets) => {
-                // 表达式位置 `let`(对照 `Eval for ast::LetBinding`:init
-                // 先求,再绑定,值为 none):绑定名在**位点**压入 env(位点
-                // 前的引用仍解析外层),值写块顶提升槽(扫描期登记,
-                // 见 block/content_part 的扫描;未扫描上下文降级)。
+                // Expression-position `let` (mirrors `Eval for
+                // ast::LetBinding`: init evaluated first, then bound, value
+                // is none): the binding name is pushed into env **at its
+                // position** (references before the position still resolve
+                // to the outer scope), and the value goes into a hoisted
+                // slot registered by the enclosing scan (see the scans in
+                // block/content_part; unscanned contexts degrade).
                 self.let_expr(lets, env)
             }
             ast::Expr::ContentBlock(block) => {
-                // content 块直译:子集 Text/Space/Linebreak/Parbreak/Escape/
-                // 嵌入表达式 + set/show 规则,构造方式对照
-                // typst-eval/src/markup.rs(规则包装后续全部内容)。
+                // Direct translation of a content block: the subset
+                // Text/Space/Linebreak/Parbreak/Escape/embedded expressions
+                // + set/show rules; construction mirrors
+                // typst-eval/src/markup.rs (rules wrap all subsequent
+                // content).
                 let items: Vec<ContentItem> = block
                     .body()
                     .exprs()
@@ -124,8 +140,9 @@ impl Ctx {
                 format!("Value::Content({})", self.content_seq(&items, env))
             }
             ast::Expr::ModuleInclude(include) => {
-                // `#include "x.typ"`(包模式):目标模块的 body 内容
-                // (对照 `Eval for ast::ModuleInclude` -> Content)。
+                // `#include "x.typ"` (package mode): the target module's
+                // body content (mirrors `Eval for ast::ModuleInclude` ->
+                // Content).
                 match include.source() {
                     ast::Expr::Str(path) => {
                         let raw = path.get().to_string();
@@ -134,7 +151,7 @@ impl Ctx {
                             self.package_files.clone(),
                             self.package_mods.clone(),
                         ) else {
-                            self.diag(path.span(), "include 仅在包模式支持".into());
+                            self.diag(path.span(), "include is only supported in package mode".into());
                             return "Value::None".into();
                         };
                         let target = super::paths::normalize_import(&file, &raw);
@@ -144,9 +161,11 @@ impl Ctx {
                                 self.used_state = true;
                                 format!("Value::Content(rt::read_content(&__st.BODY_{mod_name})?)")
                             }
-                            // 不在文件集/任意表达式源:区 1 胶水——
-                            // rt::eval_include 驱动原版 Eval,世界可能
-                            // 仍能解析,file-not-found 等由原版报。
+                            // Not in the file set / arbitrary expression
+                            // source: zone-1 glue — rt::eval_include drives
+                            // the original Eval; the world may still
+                            // resolve it, and file-not-found and friends
+                            // are reported by the original.
                             _ => self.include_glue_expr(expr, env),
                         }
                     }
@@ -154,21 +173,24 @@ impl Ctx {
                 }
             }
             ast::Expr::Contextual(ctx) => {
-                // `#context expr`:构造推迟求值的闭包(对照 `Eval for
-                // ast::Contextual`),realize/layout 期带 location/styles 求值。
+                // `#context expr`: build a deferred-evaluation closure
+                // (mirrors `Eval for ast::Contextual`), evaluated during
+                // realize/layout with location/styles.
                 let body = ctx.body().to_untyped().full_text().to_string();
                 let mut names: Vec<(String, bool)> = Vec::new();
                 collect_idents(ctx.body().to_untyped(), &mut Vec::new(), &mut names);
                 let (captured, pending) = self.capture_entries(&names, env);
-                // pending(局部/模块槽之外的名字)运行期经全局+数学
-                // 作用域物化(对照原生 CapturesVisitor 的 get/get_in_math)。
+                // pending (names outside locals/module slots) materialize
+                // at runtime through the global + math scopes (mirrors the
+                // original CapturesVisitor's get/get_in_math).
                 let pending_lit = pending_list(&pending);
                 if captured.is_empty() {
                     format!(
                         "Value::Content(rt::context_body(rt::context_closure({body:?}, &[], {pending_lit}, engine)))"
                     )
                 } else {
-                    // 块内构造、块内消费(&__caps 不逃出块)。
+                    // Constructed and consumed inside the block (&__caps
+                    // never escapes it).
                     let init = format!("vec![{}]", captured.join(", "));
                     format!(
                         "{{ let __caps: Vec<(&'static str, Value)> = {init}; Value::Content(rt::context_body(rt::context_closure({body:?}, &__caps, {pending_lit}, engine))) }}"
@@ -207,8 +229,9 @@ impl Ctx {
                             );
                         }
                         ast::DictItem::Keyed(keyed) => {
-                            // 键是表达式:求值后 cast 到字符串(对照
-                            // `Eval for ast::Dict::Keyed`)。
+                            // The key is an expression: evaluate then cast
+                            // to string (mirrors `Eval for
+                            // ast::Dict::Keyed`).
                             let key = self.expr(keyed.key(), env);
                             let key_at = self.span_of(keyed.key().span());
                             let value = self.expr(keyed.expr(), env);
@@ -244,7 +267,8 @@ impl Ctx {
                 let target = self.expr(access.target(), env);
                 let field = access.field().as_str();
                 {
-                    // 对照 access_field:求值/报错站点为字段名 span。
+                    // Mirrors access_field: the evaluation/error site is
+                    // the field-name span.
                     let at = self.span_of(access.field().span());
                     format!(
                         "rt::field(&({target}), \"{}\", engine, context, {at})?",
@@ -272,10 +296,13 @@ impl Ctx {
                 let cond_at = self.span_of(while_loop.condition().span());
                 let join_at = self.span_of(while_loop.body().span());
                 let loop_at = self.span_of(while_loop.span());
-                // 静态"常真"检测(对照原生 i==0 分支的 is_invariant/
-                // can_diverge:条件不变式且体不含 break/return 时,首次
-                // 求值为真即报错;**条件为假则合法退出**——`while false
-                // {}` 返回 none,不报错(条件副作用仍先求值)。
+                // Static "always true" detection (mirrors the original's
+                // i==0 branch with is_invariant/can_diverge): when the
+                // condition is invariant and the body contains no
+                // break/return, a truthy first evaluation is an error;
+                // **a false condition is a legal exit** — `while false {}`
+                // returns none without an error (the condition's side
+                // effects are still evaluated first).
                 if is_invariant(while_loop.condition().to_untyped())
                     && !can_diverge(while_loop.body().to_untyped())
                 {
@@ -283,8 +310,9 @@ impl Ctx {
                         "{{ let __c = rt::boolean({condition}, {cond_at})?; if __c {{ bail!({cond_at}, \"condition is always true\") }} else {{ Value::None }} }}"
                     );
                 }
-                // 迭代护栏(对照原生 MAX_ITERATIONS:超出报 "loop
-                // seems to be infinite",而非挂死)。
+                // Iteration guard (mirrors the original MAX_ITERATIONS:
+                // exceeding it reports "loop seems to be infinite" instead
+                // of hanging).
                 format!(
                     "{{ let mut __out = Value::None; let mut __guard = 0usize;\n  \
                      while rt::boolean({condition}, {cond_at})? {{\n  \
@@ -297,12 +325,13 @@ impl Ctx {
                 )
             }
             ast::Expr::FuncReturn(func_return) => {
-                // return 编译为 Rust return(从生成的 f_ 函数返回);
-                // 函数体之外(模块求值/默认值等上下文)外层 Rust 函数
-                // 返回类型不同,直接 return 会让生成物无法编译——按
-                // 缺口降级诊断。
+                // `return` compiles to a Rust return (from the generated
+                // f_ function); outside a function body (module
+                // evaluation, default values, ...) the enclosing Rust
+                // function has a different return type, and a direct
+                // return would not compile — degrade with a diagnostic.
                 if self.in_fn == 0 {
-                    let message = "return 仅在函数体内支持(v1 语言子集)".to_string();
+                    let message = "return is only supported inside a function body (v1 language subset)".to_string();
                     self.diag(func_return.span(), message.clone());
                     return format!(
                         "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
@@ -316,8 +345,9 @@ impl Ctx {
                 format!("return Ok({value}) /* never */")
             }
             ast::Expr::LoopBreak(lb) => {
-                // 循环外 break(对照 typst-eval 的语义错误;错误测试
-                // 驱动):降级为运行期同信息错误。
+                // break outside a loop (mirrors typst-eval's semantic
+                // error; driven by the error tests): degrades to a
+                // runtime error with the same message.
                 if self.in_loop == 0 {
                     let message = "cannot use `break` outside of a loop".to_string();
                     self.diag(lb.span(), message.clone());
@@ -337,17 +367,20 @@ impl Ctx {
                 let iterable = self.expr(for_loop.iterable(), env);
                 let id = self.fresh_id();
                 let binder = format!("__it{id}");
-                // 模式解构在循环体首展开;简单标识符模式直接绑定迭代
-                // 值(零克隆,对照原生 destructure 的 Ident 分支=define;
-                // 读取侧的按次克隆与原生一致)。
+                // Pattern destructuring expands at the head of the loop
+                // body; a simple identifier pattern binds the iterated
+                // value directly (zero clones, mirroring the original
+                // destructure's Ident branch = define; per-read cloning on
+                // the use side matches the original).
                 let mut body_env = env.clone();
                 let pattern_code = match for_loop.pattern() {
                     ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
                         let rust = super::ctx::bind_local(&mut body_env, ident.as_str());
                         format!("let mut {rust} = {binder};\n")
                     }
-                    // 占位模式:不绑定(对照原生 iter! 宏对 Placeholder
-                    // 同样只迭代不取名),零克隆。
+                    // Placeholder pattern: binds nothing (the original's
+                    // iter! macro likewise just iterates without naming for
+                    // Placeholder), zero clones.
                     ast::Pattern::Placeholder(_) => String::new(),
                     pattern => {
                         let inner = format!("{{ {binder}.clone() }}");
@@ -370,13 +403,16 @@ impl Ctx {
                      __out }}"
                 )
             }
-            // math/Equation:体量大、几乎不构成性能问题——源码片段
-            // 经 typst-eval 解释求值(与解释闭包同一保真路径,不是
-            // 缺口;其余子集外表达式仍走诊断降级)。自由标识符(含
-            // 数学名)按闭包同款捕获分析物化。
+            // math/Equation: large and essentially never a performance
+            // problem — the source snippet is evaluated by the typst-eval
+            // interpreter (the same fidelity path as interpreted closures,
+            // not a gap; other out-of-subset expressions still degrade via
+            // diagnostics). Free identifiers (including math names)
+            // materialize through the same capture analysis as closures.
             ast::Expr::Label(l) => format!("rt::label({:?})", l.get()),
             ast::Expr::Heading(h) => {
-                // `= body`(depth = 等号数):对照 Eval for ast::Heading。
+                // `= body` (depth = number of equals signs): mirrors `Eval
+                // for ast::Heading`.
                 let items: Vec<ContentItem> = h
                     .body()
                     .exprs()
@@ -417,7 +453,8 @@ impl Ctx {
                 format!("Value::Content(rt::term_item({term}, {desc}))")
             }
             ast::Expr::Link(l) => {
-                // 标记裸链接:对照 Eval for ast::Link(Url::new 可错)。
+                // Markup bare link: mirrors `Eval for ast::Link`
+                // (Url::new can fail).
                 let at = self.span_of(l.span());
                 format!(
                     "Value::Content(rt::link({:?}, {at})?)",
@@ -425,8 +462,9 @@ impl Ctx {
                 )
             }
             ast::Expr::Ref(r) => {
-                // `@target` 引用缩写(对照 Eval for ast::Ref → RefElem;
-                // supplement 为 `[...]` 补充内容,值经 display 内容化)。
+                // `@target` reference shorthand (mirrors `Eval for
+                // ast::Ref` → RefElem; supplement is the `[...]` extra
+                // content, its value contentified via display).
                 let target = r.target().to_string();
                 let supp = match r.supplement() {
                     Some(block) => format!("Some({})", self.expr(ast::Expr::ContentBlock(block), env)),
@@ -440,9 +478,12 @@ impl Ctx {
                 collect_idents(expr.to_untyped(), &mut Vec::new(), &mut names);
                 let (captured, pending) = self.capture_entries(&names, env);
                 let pending_lit = pending_list(&pending);
-                // 嵌入 `#let`(math 内代码嵌入)按原版逃逸到外围代码
-                // 作用域:经导出包裹解释求值,导出写回块级提升槽
-                //(名字须已在提升面——块扫描对 Equation 下行)。
+                // Embedded `#let` (code embedded in math) escapes to the
+                // surrounding code scope as in the original: evaluated
+                // through the export-wrapped interpreter, with exports
+                // written back to block-level hoisted slots (the names must
+                // already be on the hoisting surface — the block scan
+                // descends into Equation).
                 let mut lets: Vec<String> = Vec::new();
                 scan_let_exprs(expr.to_untyped(), &mut lets);
                 let frame = self.let_hoists.last().cloned();
@@ -498,7 +539,7 @@ impl Ctx {
             }
             other => {
                 let kind = other.to_untyped().kind();
-                let message = format!("表达式 {kind:?} 暂不支持(v1 语言子集)");
+                let message = format!("expression {kind:?} is not yet supported (v1 language subset)");
                 self.diag(other.span(), message.clone());
                 format!(
                     "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
@@ -509,9 +550,11 @@ impl Ctx {
         }
     }
 
-    /// 表达式位置 `let` 的发射(对照 `Eval for ast::LetBinding`:init
-    /// 先求、再绑定、值为 none):绑定名在**位点**压入 env(位点前的
-    /// 引用仍解析外层),值写外层作用域登记的提升槽。
+    /// Emission of expression-position `let` (mirrors `Eval for
+    /// ast::LetBinding`: init evaluated first, then bound, value is none):
+    /// the binding name is pushed into env **at its position** (references
+    /// before the position still resolve to the outer scope), and the value
+    /// goes into a hoisted slot registered by the enclosing scope.
     fn let_expr(&mut self, lets: ast::LetBinding, env: &mut Env) -> String {
         let names: Vec<String> = match lets.kind() {
             ast::LetBindingKind::Closure(name) => vec![name.as_str().to_string()],
@@ -521,10 +564,12 @@ impl Ctx {
                 .map(|i| i.as_str().to_string())
                 .collect(),
         };
-        // 提升槽须由外层可扫描作用域(块/裸表达式函数体/内容项)登记;
-        // 未登记(content 序列跨项等)降级。
+        // The hoisted slots must be registered by an enclosing scannable
+        // scope (block / bare-expression function body / content item);
+        // unregistered contexts (content sequences across items, etc.)
+        // degrade.
         let Some(map) = self.let_hoists.last().cloned() else {
-            self.diag(lets.span(), "此位置的 let 绑定暂不支持(作用域未扫描)".into());
+            self.diag(lets.span(), "let binding at this position is not supported (scope not scanned)".into());
             return "Value::None".into();
         };
         let hoisted: Vec<(String, String)> = match names
@@ -534,11 +579,12 @@ impl Ctx {
         {
             Some(v) => v,
             None => {
-                self.diag(lets.span(), "此位置的 let 绑定暂不支持(未入扫描面)".into());
+                self.diag(lets.span(), "let binding at this position is not supported (name not registered by the scan)".into());
                 return "Value::None".into();
             }
         };
-        // init 先求(绑定生效前,同名引用解析外层)。
+        // init is evaluated first (before the binding takes effect;
+        // same-name references resolve to the outer scope).
         let init = match lets.init() {
             Some(e) => self.expr(e, env),
             None => "Value::None".into(),
@@ -550,8 +596,9 @@ impl Ctx {
                 format!("{{ {rust} = {init}; Value::None }}")
             }
             ast::LetBindingKind::Normal(pattern) => {
-                // 模式名先全部指向提升槽(destructure 的 assign 叶子经
-                // classify 找到它们),再按模式写入。
+                // Pattern names first all point at the hoisted slots (the
+                // assign leaves of destructure find them via classify),
+                // then write per pattern.
                 for (name, rust) in &hoisted {
                     env.locals.push((name.clone(), rust.clone()));
                 }
@@ -561,8 +608,9 @@ impl Ctx {
         }
     }
 
-    /// 开一层提升槽帧(扫描给定语句/表达式根集),返回声明代码;
-    /// 帧由 [`Self::close_let_hoists`] 关闭。
+    /// Open a hoisted-slot frame (scanning the given statement/expression
+    /// root set) and return the declaration code; the frame is closed by
+    /// [`Self::close_let_hoists`].
     pub(super) fn open_let_hoists<'n>(
         &mut self,
         roots: impl Iterator<Item = &'n typst_syntax::SyntaxNode>,
@@ -585,7 +633,7 @@ impl Ctx {
         decls
     }
 
-    /// 关闭最上层提升槽帧。
+    /// Close the topmost hoisted-slot frame.
     pub(super) fn close_let_hoists(&mut self) {
         self.let_hoists.pop();
     }
@@ -595,9 +643,10 @@ impl Ctx {
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
             return format!("{rust}.clone()");
         }
-        // 运行期通配层(`import <运行期值>: *` 之后):层内名字遮蔽
-        // 外层模块名与全局;未命中沿链回落(对照 typst 作用域链,
-        // 多层内层优先)。
+        // Runtime wildcard layer (after `import <runtime value>: *`): names
+        // in the layer shadow outer module names and globals; a miss falls
+        // back along the chain (mirrors the typst scope chain, inner layer
+        // first across multiple layers).
         if !env.wildcards.is_empty() {
             let at = self.span_of(ident.span());
             let name_escaped = escape(name);
@@ -619,8 +668,9 @@ impl Ctx {
     }
 
 
-    /// include 的区 1 胶水表达式:`rt::eval_include(语句原文, span,
-    /// 可见名, engine, context)` 驱动原版 `Eval for ast::ModuleInclude`。
+    /// Zone-1 glue expression for includes: `rt::eval_include(statement
+    /// text, span, visible names, engine, context)` drives the original
+    /// `Eval for ast::ModuleInclude`.
     fn include_glue_expr(&mut self, expr: ast::Expr, env: &mut Env) -> String {
         let stmt_text = expr.to_untyped().full_text().trim().to_string();
         let at = self.span_of(expr.span());
@@ -648,12 +698,13 @@ impl Ctx {
     fn binary(&mut self, binary: ast::Binary, env: &mut Env) -> String {
         use ast::BinOp::*;
         let op = binary.op();
-        // 赋值族(表达式位置与语句位置同一语义,对照 `apply_assignment`
-        // 是 Binary 求值的一个分支):统一走分类发射。
+        // The assignment family (expression and statement positions share
+        // one semantics; mirrors `apply_assignment` being a branch of
+        // Binary evaluation): uniformly emitted through classification.
         if matches!(op, Assign | AddAssign | SubAssign | MulAssign | DivAssign) {
             return self.assign_code(binary, env);
         }
-        // and/or 短路(对照 typst-eval/src/ops.rs)。
+        // and/or short-circuit (mirrors typst-eval/src/ops.rs).
         if matches!(op, And | Or) {
             let lhs = self.expr(binary.lhs(), env);
             let rhs = self.expr(binary.rhs(), env);
@@ -696,7 +747,7 @@ impl Ctx {
                 format!("ops::not_in({lhs}, {rhs}).at({{at}})?"),
             ),
             other => {
-                let message = format!("二元运算 {other:?} 暂不支持");
+                let message = format!("binary operation {other:?} is not yet supported");
                 self.diag(binary.span(), message.clone());
                 format!(
                     "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
@@ -708,13 +759,15 @@ impl Ctx {
 
     fn func_call(&mut self, call: ast::FuncCall, env: &mut Env) -> String {
         let at = self.span_of(call.span());
-        // 参数按源序求值(对照 `Eval for ast::Args`);Args.span 为整个
-        // 调用的 span(对照 `.spanned(self.span())`)。
+        // Arguments evaluate in source order (mirrors `Eval for
+        // ast::Args`); Args.span is the whole call's span (mirrors
+        // `.spanned(self.span())`).
         if let ast::Expr::FieldAccess(access) = call.callee() {
             let field = access.field().as_str();
             if matches!(field, "push" | "pop" | "insert" | "remove") {
-                // 可变方法(对照 `maybe_resolve_mutating`:**实参先于
-                // 目标求值**,目标经 `Access` 可变解析)。
+                // Mutating method (mirrors `maybe_resolve_mutating`:
+                // **arguments evaluate before the target**; the target
+                // resolves mutably via `Access`).
                 let args = self.gen_args(call.args(), env, &at);
                 let access_text = access.to_untyped().full_text().to_string();
                 match self.classify_place(access.target(), env) {
@@ -726,8 +779,10 @@ impl Ctx {
                         );
                     }
                     super::block::Place::Slot { slot, path } => {
-                        // 可变模块槽:读改写回(就地修改语义);体引用
-                        // __st 须置 used_state(函数序言按它带状态)。
+                        // Mutable module slot: read-modify-write (in-place
+                        // mutation semantics); the body's reference to
+                        // __st must set used_state (the function prologue
+                        // carries state based on it).
                         self.used_state = true;
                         let path_lit = super::block::place_path_lit(&path);
                         return format!(
@@ -735,24 +790,29 @@ impl Ctx {
                             escape(field), access_text
                         );
                     }
-                    // 写捕获(含模块槽在闭包内的形态):实参已求,对照
-                    // `Access` 对 Captured 绑定的拒绝——symbol 上的
-                    // push 修饰符同样在此报只读错。
+                    // Write to a capture (including the module-slot-inside-
+                    // closure form): arguments already evaluated; mirrors
+                    // `Access` rejecting Captured bindings — a push
+                    // modifier on a symbol reports the read-only error here
+                    // as well.
                     super::block::Place::Captured => {
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::bail_captured(typst::foundations::Capturer::Function)? }}"
                         );
                     }
-                    // 词法层未命中:实参已求,运行期查全局(常量/未知
-                    // 变量错,对照 `Scopes::get_mut`)。
+                    // Lexical miss: arguments already evaluated; look up
+                    // the global at runtime (constant / unknown-variable
+                    // error, mirroring `Scopes::get_mut`).
                     super::block::Place::Unresolved { name } => {
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {args}; rt::check_mut_unknown(engine, \"{}\", {at})?; Value::None }}",
                             escape(&name)
                         );
                     }
-                    // 非左值:实参已求,目标按 `Access` 递归求副作用
-                    //(FieldAccess 只求目标链)后报 temporary。
+                    // Not an lvalue: arguments already evaluated; the
+                    // target evaluates for side effects via `Access`
+                    // recursion (FieldAccess evaluates only the target
+                    // chain), then reports temporary.
                     super::block::Place::Temporary => {
                         let target = self.eval_for_access(access.target(), env);
                         return format!(
@@ -762,15 +822,17 @@ impl Ctx {
                     super::block::Place::Deferred => {
                         self.diag(
                             call.span(),
-                            "可变方法的目标为运行期模块引用(本轮不承载)".into(),
+                            "target of a mutating method is a runtime module reference (not yet supported)".into(),
                         );
                         return "Value::None".into();
                     }
                 }
             }
-            // 方法/字段调用:先解析被调值(不可调用则在实参求值前报错,
-            // 对照 `eval_field_callee` 先于 args.eval;方法调用把目标
-            // 作为首个位置参数,插入位点为目标表达式 span)。
+            // Method/field call: resolve the callee value first (a
+            // non-callable reports before argument evaluation, mirroring
+            // `eval_field_callee` preceding args.eval; a method call passes
+            // the target as the first positional argument, inserted at the
+            // target expression's span).
             let target = self.expr(access.target(), env);
             let tgt_at = self.span_of(access.target().span());
             let field_at = self.span_of(access.field().span());
@@ -781,8 +843,9 @@ impl Ctx {
                 escape(field)
             );
         }
-        // 普通调用:callee 先于实参求值(对照 `Eval for ast::FuncCall`),
-        // 不可调用时实参不被求值。
+        // Plain call: the callee evaluates before the arguments (mirrors
+        // `Eval for ast::FuncCall`); when not callable, the arguments are
+        // not evaluated.
         let callee_at = self.span_of(call.callee().span());
         let callee = self.expr(call.callee(), env);
         let args = self.gen_args(call.args(), env, &at);
@@ -791,8 +854,10 @@ impl Ctx {
         )
     }
 
-    /// 调用点参数:按源序构造 `Args`;每项用**自身** span(项 span 与
-    /// 值 span 分开,对照原生 `Eval for ast::Args`),整体 span 为调用点。
+    /// Call-site arguments: build `Args` in source order; each item uses
+    /// its **own** span (item span and value span are separate, mirroring
+    /// the original `Eval for ast::Args`); the overall span is the call
+    /// site.
     fn gen_args(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> String {
         let mut out = format!(
             "{{ let mut __call_args_v = Args::new({call_at}, std::iter::empty::<Value>());"
@@ -827,22 +892,27 @@ impl Ctx {
         out
     }
 
-    /// 闭包:保留源码片段交由 typst-eval 解释(保真路径);
-    /// 默认值创建期求值;捕获 = 子树标识符 ∩ 外层可解析名字
-    /// (保守过捕,解释器按参数/局部遮蔽覆盖,语义不变)。
+    /// Closures: the source snippet is kept and interpreted by typst-eval
+    /// (the fidelity path); defaults evaluate at creation time; captures =
+    /// subtree identifiers ∩ outer resolvable names (conservative
+    /// over-capture; the interpreter overrides via parameter/local
+    /// shadowing, so semantics are unchanged).
     fn closure_expr(&mut self, closure: ast::Closure, env: &mut Env) -> String {
-        // 微型闭包(谓词/投影,如 `i => i * 2`)保持解释:体的解释成本
-        // 低于一次 stub 跳数(eval_closure 记账 + 转发体解释 + 原生调用
-        // 协议开销),C2 反而净亏(map-heavy 实测 1.0× → 0.4×)。阈值取
-        // 体的 AST 节点数:≤ 8 视为微型;cetz/fletcher 的 ctx thunk 均
-        // 为百节点级,不受影响。
+        // Micro closures (predicates/projections like `i => i * 2`) stay
+        // interpreted: interpreting the body costs less than one stub hop
+        // (eval_closure bookkeeping + forwarded body interpretation + the
+        // native call protocol overhead), so C2 is a net loss for them
+        // (measured ~1.0× → 0.4× on map-heavy code). The threshold is the
+        // body's AST node count: ≤ 8 counts as micro; ctx thunks are
+        // hundred-node scale and stay unaffected.
         let body_nodes = closure.body().to_untyped().len();
         if body_nodes <= 32 {
             return self.closure_expr_interp(closure, env);
         }
-        // 命名闭包若体引用自身(局部递归,如 cetz 的 split-rec):
-        // 走 C2 的自引用协议(SelfFuncCell:每实例一次重建同身份
-        // stub,序言绑定自身名)。
+        // A named closure whose body references itself (local recursion):
+        // take the C2 self-reference protocol (SelfFuncCell: rebuild the
+        // same-identity stub once per instance, prologue binds its own
+        // name).
         let self_name = closure
             .name()
             .filter(|name| closure.body().to_untyped().full_text().contains(name.as_str()))
@@ -850,10 +920,12 @@ impl Ctx {
         self.closure_expr_c2(closure, env, self_name)
     }
 
-    /// 微型闭包的解释路径(v1 原形态:片段源经 typst-eval 解释)。
+    /// Interpreted path for micro closures (the original v1 shape: the
+    /// snippet source is interpreted by typst-eval).
     fn closure_expr_interp(&mut self, closure: ast::Closure, env: &mut Env) -> String {
-        // 命名闭包(`#let f(x) = ..` 或局部 `let f(x) = ..`)的节点文本
-        // 形如 `f(x) = ..`,补 `let` 前缀才是可独立解析的源码。
+        // A named closure (`#let f(x) = ..` or a local `let f(x) = ..`) has
+        // node text shaped `f(x) = ..`; prepending `let` makes it
+        // independently parseable source.
         let raw = closure.to_untyped().full_text().to_string();
         let src_text = if closure.name().is_some() {
             format!("let {raw}")
@@ -880,31 +952,39 @@ impl Ctx {
         } else {
             format!("&[{}]", captured.join(", "))
         };
-        // 每调用点静态:parse 一次,创建零锁零查找。
+        // Per-call-site static: parsed once; creation takes zero locks and
+        // zero lookups.
         let node = self.closure_node_static(&src_text);
         format!("Value::Func(rt::closure_node_at(&{node}, {defaults}, {captured}, {pending_lit}, engine))")
     }
 
-    /// C2:值位置闭包的原生路径。
+    /// C2: the native path for value-position closures.
     fn closure_expr_c2(
         &mut self,
         closure: ast::Closure,
         env: &mut Env,
         self_name: Option<String>,
     ) -> String {
-        // C2:值位置闭包也走原生——闭包表达式编译为顶层 `f_c{id}`
-        // 原生体,经签名保真 stub 暴露;捕获值按名排序打成元组随闭包
-        // 值走(StateSlot 装元组,与顶层 C 装包状态同协议)。同定义
-        // (同原文 + 同捕获名集)去重,多调用点共用一份原生体。
+        // C2: value-position closures go native too — the closure
+        // expression compiles to a top-level `f_c{id}` native body exposed
+        // through a signature-faithful stub; captured values travel with
+        // the closure value as a name-sorted tuple (StateSlot packs the
+        // tuple, same protocol as the top-level C packed state). Identical
+        // definitions (same source text + same captured-name set) dedup;
+        // multiple call sites share one native body.
         let raw = closure.to_untyped().full_text().to_string();
-        // stub 签名用参数原文(含默认值形态;stub 绑定期由求值器用
-        // defaults 填齐缺失命名参数,转发到原生体时参数必然齐全)。
+        // The stub signature uses the parameter source text (including
+        // default-value shapes; at stub binding time the evaluator fills
+        // missing named arguments from defaults, so parameters are always
+        // complete when forwarded to the native body).
         let mut params_src = closure.params().to_untyped().full_text().to_string();
-        // 匿名单参可写 `x => ..`(无括号),stub 解析需参数表形态。
+        // An anonymous single parameter can be written `x => ..` (no
+        // parentheses); the stub parse needs the parameter-list form.
         if !params_src.trim_start().starts_with('(') {
             params_src = format!("({params_src})");
         }
-        // 默认值在创建期求值(每次创建;typst 闭包语义)。
+        // Defaults evaluate at creation time (on every creation; typst
+        // closure semantics).
         let mut defaults = Vec::new();
         for param in closure.params().children() {
             if let ast::Param::Named(named) = param {
@@ -916,9 +996,11 @@ impl Ctx {
         } else {
             format!("vec![{}]", defaults.join(", "))
         };
-        // 捕获:局部/模块槽即时物化(Some 包值);创建期不可见的名字
-        // 运行期经全局+数学作用域物化(Option),调用期 None 报
-        // unknown variable(对照 CapturesVisitor 的 `Err(_) => return`)。
+        // Captures: locals/module slots materialize immediately (Some
+        // wrapping the value); names invisible at creation time materialize
+        // at runtime through the global + math scopes (Option); None at
+        // call time reports unknown variable (mirrors CapturesVisitor's
+        // `Err(_) => return`).
         let mut names: Vec<(String, bool)> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let (mut pairs, pending) = self.capture_pairs(&names, env);
@@ -950,10 +1032,12 @@ impl Ctx {
                 if dbg {
                     eprintln!("[dedup=alloc] {id}");
                 }
-                // 体生成在独立计数下(gen_closure_fn 内部会置
-                // used_state=false 再追踪体自身引用),生成后取出
-                // has_st 并把外层计数并回(捕获点/默认值表达式引用
-                // __st 时外层需要 __st 前言)。
+                // The body is generated under an independent counter
+                // (gen_closure_fn internally resets used_state=false and
+                // then tracks the body's own references); afterwards has_st
+                // is read out and the outer counter merged back (when the
+                // capture point / default expressions reference __st, the
+                // outer scope needs the __st prologue).
                 let saved = self.used_state;
                 let item = self.gen_closure_fn(
                     &format!("f_{id}"),
@@ -963,12 +1047,15 @@ impl Ctx {
                     self_name.as_deref(),
                     &params_src,
                 );
-                // gen_closure_fn 末尾 used_state = 体是否引用 __st
-                //(模块槽/体内字符串 import),取出后并回外层计数。
+                // At the end of gen_closure_fn, used_state = whether the
+                // body references __st (module slots / in-body string
+                // imports); read it out and merge the outer counter back.
                 let has_st = std::mem::replace(&mut self.used_state, saved);
-                // 提升到产物根的闭包体:file_span 引用按来源文件模块限定
-                //(根作用域不可见;树/扁平两形态的文件模块都是根的兄弟,
-                // `{mod}::file_span()` 同构可达)。
+                // Closure bodies hoisted to the output root: file_span
+                // references are module-qualified by their source file
+                // (invisible from the root scope; in both the tree and
+                // flat forms a file module is a sibling of the root, so
+                // `{mod}::file_span()` is reachable isomorphically).
                 let item = match (&self.current_file, &self.package_mods) {
                     (Some(path), Some(mods)) => match mods.get(path.as_str()) {
                         Some(mod_name) => {
@@ -993,10 +1080,11 @@ impl Ctx {
             }
         };
         if has_st {
-            // 创建点引用 __st.clone():外层函数必须携带状态前言。
+            // The creation point references __st.clone(): the enclosing
+            // function must carry the state prologue.
             self.used_state = true;
         }
-        // 创建点:捕获元组 + StateSlot + stub。
+        // Creation point: capture tuple + StateSlot + stub.
         let mut tuple: Vec<String> = Vec::new();
         if has_st {
             tuple.push("__st.clone()".to_string());
@@ -1009,13 +1097,15 @@ impl Ctx {
             }
         }
         if self_name.is_some() {
-            // 自递归:defaults 随实例携带(重建 stub 用)。
+            // Self-recursion: defaults travel with the instance (used when
+            // rebuilding the stub).
             tuple.push(format!(
                 "std::sync::Arc::new(rt::self_func_cell({defaults}))"
             ));
         }
-        // stub 源翻译期组合(纯函数),节点进每调用点静态——创建
-        // 零查找零锁(native_closure_node)。
+        // The stub source is composed at translation time (a pure
+        // function); its node goes into a per-call-site static — creation
+        // takes zero lookups and zero locks (native_closure_node).
         let stub_name = closure
             .name()
             .map(|n| n.as_str().to_string())
@@ -1030,8 +1120,9 @@ impl Ctx {
 
 
 
-    /// content 序列:遇 set/show 规则处切分,规则包装"后续全部"
-    /// (对照 `eval_markup` 的尾部递归:`tail.styled_with_map/_recipe`)。
+    /// Content sequence: split at set/show rules; a rule wraps "everything
+    /// after it" (mirrors `eval_markup`'s tail recursion:
+    /// `tail.styled_with_map/_recipe`).
     pub(super) fn content_seq(&mut self, items: &[ContentItem], env: &mut Env) -> String {
         let tops: Vec<TopItem> = items
             .iter()
@@ -1043,7 +1134,8 @@ impl Ctx {
         self.content_seq_top(&tops)
     }
 
-    /// 顶层内容折叠:各项按自己的可见绑定集生成(规则包装后续项)。
+    /// Top-level content folding: each item is generated with its own
+    /// visible binding set (rules wrap subsequent items).
     pub(super) fn content_seq_top(&mut self, items: &[TopItem]) -> String {
         for (i, top) in items.iter().enumerate() {
             let mut env = top.env.clone();
@@ -1052,9 +1144,10 @@ impl Ctx {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
                     let tail = self.content_seq_top(&items[i + 1..]);
-                    // 样式先于尾部内容求值(对照 eval_code/eval_markup:
-                    // set.eval 之后才是 tail;Rust 实参从左到右,故用
-                    // 局部先物化样式)。
+                    // Styles evaluate before the tail content (mirrors
+                    // eval_code/eval_markup: set.eval precedes the tail;
+                    // Rust evaluates arguments left to right, so the styles
+                    // are materialized in a local first).
                     let rule_at = self.span_of(set.span());
                     let styles = self.set_styles_code(*set, &mut env, &rule_at);
                     parts.push(format!("{{ let __s = {styles}; rt::styled_with_map({tail}, __s) }}"));
@@ -1064,8 +1157,9 @@ impl Ctx {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
                     let tail = self.content_seq_top(&items[i + 1..]);
-                    // 求值序对照 `Eval for ast::ShowRule`:selector →
-                    // transform(set 或表达式)→ 尾部内容。
+                    // Evaluation order mirrors `Eval for ast::ShowRule`:
+                    // selector → transform (set or expression) → tail
+                    // content.
                     let show_at = self.span_of(show.span());
                     let (sel_arg, sel_at) = match show.selector() {
                         Some(sel) => {
@@ -1076,8 +1170,9 @@ impl Ctx {
                     };
                     let recipe = match show.transform() {
                         ast::Expr::SetRule(set) => {
-                            // show-set:transform 是样式;set 的条件在
-                            // set.eval 内处理(条件假 → 空样式)。
+                            // show-set: the transform is styles; the set's
+                            // condition is handled inside set.eval (a false
+                            // condition → empty styles).
                             let set_at = self.span_of(set.span());
                             let styles = self.set_styles_code(set, &mut env, &set_at);
                             format!(
@@ -1103,9 +1198,11 @@ impl Ctx {
         self.content_join(parts)
     }
 
-    /// set 规则的样式求值代码(条件假 → 空样式;条件先于目标与实参
-    /// 求值,对照 `Eval for ast::SetRule`)。`call_at` 为调用点 span
-    /// (Args.span 与规则 span 同源)。set/show-set 两臂共用。
+    /// Style evaluation code for a set rule (false condition → empty
+    /// styles; the condition evaluates before target and arguments,
+    /// mirroring `Eval for ast::SetRule`). `call_at` is the call-site span
+    /// (Args.span and the rule span share their origin). Shared by the
+    /// set/show-set arms.
     pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &mut Env, call_at: &str) -> String {
         let args = self.gen_args(set.args(), env, call_at);
         let target = self.expr(set.target(), env);
@@ -1121,14 +1218,16 @@ impl Ctx {
         }
     }
 
-    /// content 的单个部分(表达式产出 Content 构造代码;env 取该项
-    /// 自身的可见绑定集)。
+    /// A single part of content (an expression produces Content
+    /// construction code; env is that item's own visible binding set).
     fn content_part(&mut self, top: &TopItem) -> String {
         let mut env = top.env.clone();
-        // 项内 let 表达式提升壳:项是单条 Rust 表达式,提升槽在项的
-        // 块顶声明,绑定随项弃(content 块作用域近似;对照 typst 内容
-        // 块的自作用域)。语句形态的 Part(let/import/include)由
-        // 外层语句机制处理,不入提升面。
+        // Hoisting shell for let expressions inside the item: the item is a
+        // single Rust expression, so hoisted slots are declared at the
+        // item's block top and discarded with it (approximating the content
+        // block's own scope; mirrors typst's content-block scoping).
+        // Statement-shaped Parts (let/import/include) are handled by the
+        // outer statement machinery and stay off the hoisting surface.
         let scan_root: Option<&typst_syntax::SyntaxNode> = match &top.item {
             ContentItem::Part(ast::Expr::LetBinding(_))
             | ContentItem::Part(ast::Expr::ModuleImport(_))
@@ -1166,23 +1265,26 @@ impl Ctx {
             }
             ContentItem::Part(ast::Expr::Space(_)) => "rt::space()".into(),
             ContentItem::Part(ast::Expr::Shorthand(s)) => {
-                // markup 简写(`~` nbsp、`--` en 等):对照原版
-                // `Value::Symbol(runtime_char)`,经 display 进序列
-                // (Symbol 元素与文本元素不同型——等值判断可区分)。
+                // Markup shorthands (`~` nbsp, `--` en, etc.): mirrors the
+                // original `Value::Symbol(runtime_char)`, entering the
+                // sequence via display (a Symbol element and a text element
+                // have different types — equality tells them apart).
                 format!("rt::symbol_value({:?})", s.get())
             }
             ContentItem::Part(ast::Expr::SmartQuote(q)) => {
-                // 智能引号:构造 smartquote 元素,解析留给 layout 期。
+                // Smart quotes: build the smartquote element; resolution is
+                // left to layout time.
                 format!("rt::smartquote({})", q.double())
             }
             ContentItem::Part(ast::Expr::Label(l)) => {
-                // label 不 embed:以 Value::Label 入序,由 attach_labels
-                // 贴到末个可贴元素(对照 eval_markup 的 Label 分支)。
+                // Labels are not embedded: they enter the sequence as
+                // Value::Label and attach_labels sticks them onto the last
+                // attachable element (mirrors eval_markup's Label branch).
                 format!("rt::label({:?})", l.get())
             }
             ContentItem::Part(ast::Expr::Strong(strong)) => {
-                // `*body*`(对照 eval_markup:StrongElem::new(body)),
-                // 体按嵌套 markup 序列翻译。
+                // `*body*` (mirrors eval_markup: StrongElem::new(body));
+                // the body translates as a nested markup sequence.
                 let items: Vec<ContentItem> = strong
                     .body()
                     .exprs()
@@ -1195,7 +1297,7 @@ impl Ctx {
                 format!("rt::strong({})", self.content_seq(&items, env))
             }
             ContentItem::Part(ast::Expr::Emph(emph)) => {
-                // `_body_`(对照 eval_markup:EmphElem::new(body))。
+                // `_body_` (mirrors eval_markup: EmphElem::new(body)).
                 let items: Vec<ContentItem> = emph
                     .body()
                     .exprs()
@@ -1210,19 +1312,21 @@ impl Ctx {
             ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
             ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),
             ContentItem::Part(ast::Expr::Escape(e)) => {
-                // 转义 `\[`:对照原版 `Value::Symbol(runtime_char)`
-                // (不是 text——physica 的 `== [\[]` 靠类型区分)。
+                // The escape `\[`: mirrors the original
+                // `Value::Symbol(runtime_char)` (not text — `== [\[]`
+                // relies on the type distinction).
                 format!("rt::symbol_value({:?})", e.get())
             }
             ContentItem::Part(ast::Expr::LetBinding(_))
             | ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
             ContentItem::Part(other) => {
-                // 值**不经 embed** 直接入序:attach_labels 里的
-                // display 与 eval_markup 的 value.display() 同形;
-                // 尤其 `#label(表达式)`(函数调用,计算名)产出
-                // Value::Label,由 attach_labels 贴附而非独立内容项
-                // (glossarium 驱动:`#label(prefix + key)` 曾被 embed,
-                // 词条标签查询不到)。
+                // Values enter the sequence **without** embed: the display
+                // in attach_labels has the same shape as eval_markup's
+                // value.display(); in particular `#label(expression)` (a
+                // function call with a computed name) yields Value::Label,
+                // attached by attach_labels rather than standing as its own
+                // content item (an embedded computed label was unfindable
+                // by the entry's label query).
                 self.expr(*other, env)
             }
             ContentItem::Set(_) | ContentItem::Show(_) => {
@@ -1235,16 +1339,21 @@ impl Ctx {
         if parts.is_empty() {
             "Content::sequence(Vec::new())".into()
         } else {
-            // 对照 eval_markup:label 贴到末个可贴元素(attach_labels),
-            // 其余值 display 入序(glossarium 驱动的查询语义)。
+            // Mirrors eval_markup: labels attach to the last attachable
+            // element (attach_labels); other values display into the
+            // sequence (the lookup semantics exercised by glossary-style
+            // code).
             let items = parts
                 .iter()
                 .map(|p| {
                     if p.contains("/* never */") {
-                        // never 型项(`#return`、常真 while 的发散检查):
-                        // 尾式 never 使裸块为 never 型,协变入 Vec<Value>;
-                        // `.into_value()` 不可作用于 never。发射侧以
-                        // ` /* never */` 标记(scripting-return/while 驱动)。
+                        // Never-typed items (`#return`, the divergence
+                        // check of always-true while): a trailing
+                        // never-typed expression makes the bare block
+                        // never-typed, covariant into Vec<Value>;
+                        // `.into_value()` cannot apply to never. The
+                        // emitter marks them with ` /* never */`
+                        // (scripting-return/while driven).
                         format!("{{ {p} }}")
                     } else {
                         format!("({p}).into_value()")
@@ -1256,8 +1365,10 @@ impl Ctx {
         }
     }
 
-    /// 捕获列表构造(闭包与 context 共用):局部/模块槽直接物化,
-    /// 全局名存在才物化(创建期不可见的交给体内 import)。
+    /// Capture-list construction (shared by closures and context):
+    /// locals/module slots materialize directly; a global name materializes
+    /// only if it exists (names invisible at creation time are left to
+    /// in-body import).
     fn capture_entries(
         &mut self,
         names: &[(String, bool)],
@@ -1273,8 +1384,10 @@ impl Ctx {
         )
     }
 
-    /// 结构化捕获表:(名字, 求值表达式) 列表 + 待运行期物化的全局名
-    /// (C2 闭包按名排序组捕获元组,需要名字与表达式分离)。
+    /// Structured capture table: a list of (name, evaluation expression)
+    /// plus global names left for runtime materialization (C2 closures
+    /// assemble their capture tuple sorted by name, so names and
+    /// expressions must be separate).
     fn capture_pairs(
         &mut self,
         names: &[(String, bool)],
@@ -1291,9 +1404,11 @@ impl Ctx {
             if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
                 captured.push((name.clone(), format!("{rust}.clone()")));
             } else if !env.wildcards.is_empty() {
-                // 通配层内名(或可能经层遮蔽):创建期快照(对照
-                // CapturesVisitor——创建期可见即捕获;层内未命中沿
-                // 链回落,与 ident 同序)。
+                // A name inside the wildcard layer (or one that may be
+                // shadowed by it): snapshot at creation time (mirrors
+                // CapturesVisitor — visible at creation means captured; a
+                // layer miss falls back along the chain, same order as
+                // ident).
                 let name_escaped = escape(name);
                 let layers = wild_layers(env);
                 if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
@@ -1313,12 +1428,14 @@ impl Ctx {
                     ));
                 }
             } else if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name)
-                // 全局物化名(G_ 槽/GlobalFallback):创建期可能不可见
-                // ——走 pending 协议(resolve_pending 的 capture_opt 软物
-                // 化,空则 None,调用期才报;与 typst 捕获时机一致。
-                // elembic 驱动:`from-error => value => … from-check(…)`
-                // 的 from-check 是兄弟闭包参数,真自由名,创建期必空,
-                // 曾经 read_or 急切报错)。
+                // Materialized global names (G_ slots / GlobalFallback)
+                // may be invisible at creation time — they take the pending
+                // protocol (resolve_pending's soft capture_opt
+                // materialization; empty means None, reported only at call
+                // time; same capture timing as typst. A sibling closure
+                // parameter is a genuinely free name, always empty at
+                // creation time, and an eager read_or once errored
+                // immediately).
                 && !matches!(module_ref, super::ctx::Ref::GlobalFallback { .. })
                 && !matches!(module_ref, super::ctx::Ref::Slot(s) if s.starts_with("G_"))
             {
@@ -1332,16 +1449,17 @@ impl Ctx {
     }
 }
 
-/// 运行期通配层切片表达式(`&[&__w1, &__w2]`,内层在尾,查找自尾
-/// 向首=内层遮蔽外层)。
+/// Slice expression for the runtime wildcard layers (`&[&__w1, &__w2]`,
+/// innermost last; lookup runs from tail to head = inner shadows outer).
 fn wild_layers(env: &mut Env) -> String {
     let refs: Vec<String> = env.wildcards.iter().map(|w| format!("&{w}")).collect();
     format!("&[{}]", refs.join(", "))
 }
 
-/// 表达式是否恒值(对照 typst-eval flow.rs 的 `is_invariant`:
-/// 标识符与数学标识符视作可变,字段访问随目标,调用随被调+实参,
-/// 其余节点看全部子节点)。
+/// Whether an expression is invariant (mirrors typst-eval flow.rs's
+/// `is_invariant`: identifiers and math identifiers count as mutable,
+/// field access follows its target, calls follow callee + arguments, all
+/// other nodes look at every child).
 fn is_invariant(expr: &typst_syntax::SyntaxNode) -> bool {
     match expr.cast() {
         Some(ast::Expr::Ident(_)) => false,
@@ -1354,8 +1472,8 @@ fn is_invariant(expr: &typst_syntax::SyntaxNode) -> bool {
     }
 }
 
-/// pending 名单的字面量形态(`&["a", "b"]`;创建期经全局+数学作用域
-/// 物化,见 rt::resolve_pending)。
+/// Literal form of the pending-name list (`&["a", "b"]`; materialized at
+/// creation time via the global + math scopes, see rt::resolve_pending).
 fn pending_list(names: &[(String, bool)]) -> String {
     if names.is_empty() {
         "&[]".to_string()
@@ -1371,17 +1489,20 @@ fn pending_list(names: &[(String, bool)]) -> String {
     }
 }
 
-/// 表达式是否含 break/return(对照 typst-eval flow.rs 的 `can_diverge`)。
+/// Whether an expression contains break/return (mirrors typst-eval
+/// flow.rs's `can_diverge`).
 fn can_diverge(expr: &typst_syntax::SyntaxNode) -> bool {
     matches!(expr.kind(), SyntaxKind::Break | SyntaxKind::Return)
         || expr.children().any(can_diverge)
 }
 
-/// 扫描表达式位置 `let` 绑定的名字(为提升槽登记)。作用域边界
-/// 对照 typst:不穿越闭包/代码块/内容块(各有自身作用域——闭包经
-/// CapturesVisitor 自管,代码块由 block() 递归自扫,内容块由
-/// content_part 项内自包);LetBinding 的 init 内再嵌 let 仍绑定本
-/// 作用域,继续下行。
+/// Scan the names bound by expression-position `let` (for hoisted-slot
+/// registration). Scope boundaries mirror typst: do not cross
+/// closures/code blocks/content blocks (each has its own scope — closures
+/// self-manage via CapturesVisitor, code blocks re-scan recursively in
+/// block(), content blocks are self-contained per content_part item); a
+/// let nested in a LetBinding's init still binds this scope, so the scan
+/// keeps descending.
 pub(super) fn scan_let_exprs(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
     use typst_syntax::ast::AstNode as _;
     if let Some(expr) = node.cast::<ast::Expr>() {

@@ -1,67 +1,102 @@
 # trust
 
-把 Typst 包(首个目标:cetz 0.5.2)机器翻译成 Rust 的转译器。技术路线对标
-Nuitka:不脱离宿主运行时——产物是驱动 typst-library 值模型(`Value` /
-`Func` / `Content`)的 Rust crate,经**自定义 World/Library 注入**接入
-typst(原版 0.15.1,零 fork),与原版 .typ 包在导出面与行为上兼容。
+`trust` compiles Typst packages to Rust. The output is not a standalone
+program: it is a Rust crate that drives the same value model as the Typst
+interpreter — `typst-library`'s `Value`, `Func`, and `Content` — so a
+compiled package behaves like, and interoperates with, the original `.typ`
+package inside an unmodified typst. The relationship is the one Nuitka has
+to CPython: compile the program, keep the host runtime and its object model.
 
-研究路线与技术依据:[docs/research-route.md](docs/research-route.md)。
-Prior art:`../typst-video/typst` 的 `cetz-native` 分支(cetz 的手工
-Rust 翻译版,含约 70 行宿主接线 diff)。
+The translator consumes a package directory (`typst.toml`, entrypoint,
+import graph) and emits one Rust crate per package. The generated crate
+exposes `module()` (the export surface of the original entry file, bound
+name by name), `module_init` (per-build initialization of top-level engine
+values), and `install(world, library)` (injection into a host).
 
-## 工作区
+## Workspace layout
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `crates/trust` | 转译器本体(前端 typst-syntax AST → 后端 Rust 代码生成) |
-| `crates/trust-runtime` | 生成代码的运行时支撑层(参数解构、调用协议、闭包构造、content/markup 构造) |
-| `crates/trust-world` | 注入式 World:全局模块注入、包虚拟化、`module_init` 引擎值协议(差分测试 harness 地基) |
-| `crates/trust-diff` | 差分测试:fixtures 经 trust 翻译(build.rs),与 typst-eval 解释器逐用例对拍 |
-| `docs/` | 研究路线与设计文档 |
-| `_things/` | 本地资源与探索笔记(不入库) |
+| `crates/trust` | The translator: `typst-syntax` AST frontend → Rust code generation |
+| `crates/trust-runtime` | Runtime support for generated code: parameter destructuring, call protocol, closure construction, content/markup construction |
+| `crates/trust-world` | Injected World: global module injection, package virtualization, the `module_init` engine-value protocol |
+| `crates/trust-diff` | Differential testing: fixtures translated at build time, compared case by case against the `typst-eval` interpreter |
+| `docs/` | Architecture and host-integration documents |
 
-构建:`cargo build`;测试:`cargo test`(差分对拍,无网络无外部依赖);
-性能基准:`cargo test -p trust-diff --release --test bench -- --ignored --nocapture`。
-
-## 用法
+## Build
 
 ```sh
-# 单文件翻译
-trust translate input.typ --name mymod -o out.rs
-
-# 生成的源码形态(节选):
-#   pub fn module() -> Module          // 导出面照抄源文件
-#   pub fn module_init(engine, ...)    // 顶层引擎值补注册(若有)
+cargo build
 ```
 
-生成代码依赖 `typst` 与 `trust-runtime`;宿主接入见
-`crates/trust-world/src/lib.rs` 的文档注释与 `crates/trust-diff` 的用法。
+Tests run offline, with no external dependencies:
 
-## 当前能力(v0.x,差分测试为证)
+```sh
+cargo test
+```
 
-- **语言**:let 绑定(值/函数/默认参数/命名参数/sink)、字面量、数组/
-  字典(含 spread)、字段访问、方法调用(含可变方法 push/pop/insert/
-  remove)、函数调用(含 spread/named)、二元/一元运算(短路 and/or)、
-  if/while/for(join 语义)、局部重赋值与遮蔽、递归、闭包(捕获精确
-  分析,体由 typst-eval 解释——保真路径)、content 块子集(文本/空白/
-  换行/嵌入)、顶层引擎值(惰性槽 + module_init)、多文件包(四种
-  import 形态,环检测)
-- **实测(过程验证)**:10 个 fixture / 90+ 用例双路逐值一致;性能
-  (干净负载,避 comemo memoize 红利):总体 2.0×,纯计算 3.5–7.0×、
-  调用密集 7.5×、字符串分配 1.1×(值层瓶颈,属 L1 类型化目标)
-- **cetz 0.5.2 整包(探索,不入测试框架)**:严格模式整包翻译通过,
-  生成物(37 文件/1.7MB)零错误通过 Rust 编译,注入原版 typst 后与
-  解释器 26/26 调用逐值一致(vector/matrix/coordinate、
-  path-util、sorting、util 默认参数/闭包、版本常量)
-- **已知边界**:markup 样式元素(Strong 等)、`#include`/`#show`、
-  参数解构模式、生成物快照测试——见研究路线 §5/§7
+Performance comparison between the interpreter and compiled fixtures:
 
-## 工程约定
+```sh
+cargo test -p trust-diff --release --test bench -- --ignored --nocapture
+```
 
-- `target` 是指向 `/mnt/data-hdd/helium/trust-target` 的符号链接
-  (大盘可用约 316G,系统盘仅约 48G)。clone 后重建:
+## CLI
 
-  ```sh
-  mkdir -p /mnt/data-hdd/helium/trust-target
-  ln -s /mnt/data-hdd/helium/trust-target target
-  ```
+Translate a single file:
+
+```sh
+trust translate <input.typ> [--name <module>] [-o <output.rs>]
+```
+
+Translate a package (entrypoint discovered from `typst.toml`, module name
+taken from `package.name`):
+
+```sh
+trust translate-pkg <package-root> -o <output.rs | <output-dir>/ [flags]
+```
+
+- `--lenient` — downgrade unsupported constructs to runtime gaps instead of
+  aborting; every downgrade is reported with its source location.
+- `--with-deps` — resolve `@namespace/name:version` dependencies from the
+  local package cache (`TYPST_PACKAGE_CACHE_PATH`, default
+  `~/.cache/typst/packages`; missing `preview` packages are downloaded from
+  packages.typst.org unless `TRUST_NO_FETCH` is set) and translate them into
+  the same output; dependencies that cannot be resolved fall back to
+  interpretation at runtime, with a warning.
+- `-o <dir>/` (trailing slash) — emit a multi-file tree mirroring the source
+  package instead of one generated source file.
+
+Additional subcommands: `trust coverage <dir-or-file>` translates every
+`.typ` file and clusters the gaps by diagnostic kind; `trust -V` prints the
+version.
+
+Generated code depends on `typst` and `trust-runtime`. For the host-side
+contract see [docs/host-integration.md](docs/host-integration.md); for the
+design basis see [docs/architecture.md](docs/architecture.md).
+
+## Verification
+
+- **Differential testing** (`cargo test`): each fixture runs twice —
+  interpreted by `typst-eval` and compiled by `trust` — and the results are
+  compared value by value. Expectations are produced by typst itself, never
+  hand-written.
+- **Official suite comparison** (external harness): the official typst
+  `tests/suite` corpus compiles two ways through one binary — native
+  registration versus the original interpreted sources — and compares
+  rendered output page by page, byte for byte, plus diagnostics as message
+  sets with positions stripped.
+- **Real-package rendering comparison**: real packages injected into
+  unmodified typst render byte-identically to their interpreted originals
+  (SVG compared as strings, PNG compared after rasterization).
+
+## Status
+
+Translation covers the Typst 0.15.1 scripting language — bindings, functions
+with default/named/sink parameters, closures, destructuring, control flow,
+content construction, context expressions, multi-file packages with all
+import forms — and whole real packages compile and link without errors;
+constructs outside the supported subset surface as explicit translation
+errors, never as silent behavior changes. On the official typst
+`tests/suite` segments the comparison harness drives, 97.6% currently
+produce results identical to the interpreter.

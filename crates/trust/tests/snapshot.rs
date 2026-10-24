@@ -1,6 +1,7 @@
-//! 生成物快照:锁定代表性输入的生成源码形状(§5.1 过程验证的一项)。
+//! Generated-output snapshots: lock the shape of the generated source for
+//! representative inputs.
 //!
-//! 更新快照:`UPDATE_SNAPSHOTS=1 cargo test -p trust --test snapshot`。
+//! Update snapshots: `UPDATE_SNAPSHOTS=1 cargo test -p trust --test snapshot`.
 
 use std::path::PathBuf;
 
@@ -25,7 +26,7 @@ fn snapshots_match() {
     for (name, src) in INPUTS {
         let out = trust::translate(src, name).unwrap_or_else(|diags| {
             panic!(
-                "快照输入 {name} 翻译失败: {:?}",
+                "snapshot input {name} failed to translate: {:?}",
                 diags.iter().map(|d| &d.message).collect::<Vec<_>>()
             )
         });
@@ -37,7 +38,7 @@ fn snapshots_match() {
         let expect = std::fs::read_to_string(&path).expect("read snapshot");
         assert_eq!(
             expect, out,
-            "生成物与快照不一致(输入 {name});确认变更合理后用 UPDATE_SNAPSHOTS=1 更新"
+            "generated output does not match the snapshot (input {name}); after confirming the change is intended, update with UPDATE_SNAPSHOTS=1"
         );
     }
 }

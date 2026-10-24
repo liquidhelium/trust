@@ -1,4 +1,4 @@
-// 模块体(M2.2):顶层内容、include 并入 body。
+// Module body: top-level content, include merges into the body.
 #let greeting = "hello"
 Introduction.
 #include "part.typ"

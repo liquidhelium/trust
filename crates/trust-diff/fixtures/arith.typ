@@ -1,4 +1,4 @@
-// 算术与运算符:整型、浮点、字符串拼接、比较、逻辑、in。
+// Arithmetic and operators: integers, floats, string concatenation, comparison, logic, in.
 #let add(a, b) = a + b
 #let mul(a, b) = a * b
 #let fdiv(a, b) = a / b

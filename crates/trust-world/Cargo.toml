@@ -1,6 +1,6 @@
 [package]
 name = "trust-world"
-description = "TRUST 的注入式 Typst World:不经 fork,以自定义 World/Library 注入原生模块并虚拟化包(过程验证 harness 的地基)"
+description = "Injected Typst World for trust: injects native modules through a custom World/Library without forking typst, and virtualizes packages"
 version.workspace = true
 edition.workspace = true
 publish = false

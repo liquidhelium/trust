@@ -1,7 +1,8 @@
-//! 解构:数组/字典模式 → Rust 语句。
+//! Destructuring: array/dictionary patterns → Rust statements.
 //!
-//! 对照 typst-eval/src/binding.rs:数组/字典运行时分派,错误文案与
-//! 数量校验一致;`assign = true` 时为解构赋值(目标须为已存在局部)。
+//! Mirrors typst-eval/src/binding.rs: array/dictionary runtime dispatch,
+//! with identical error messages and arity checks; `assign = true` means a
+//! destructuring assignment (targets must be existing locals).
 
 use typst_syntax::ast::{self, AstNode};
 
@@ -18,24 +19,29 @@ impl Ctx {
     ) -> String {
         match pattern {
             ast::Pattern::Normal(ast::Expr::Ident(ident)) if !assign => {
-                // `let` 恒为**遮蔽**:typst 块内 let 不影响外层同名
-                // 绑定(块作用域退出即失效)。复用外层变量会让块内
-                // let 泄漏写穿外层——fletcher 分支内 `let result =
-                // ...` 曾把外层累积数组覆盖成字典,后续 push 报
-                // "type dictionary has no method `push`"。
+                // `let` is always **shadowing**: a let inside a typst block
+                // does not affect an outer binding of the same name (it
+                // expires when the block scope exits). Reusing the outer
+                // variable would let the block-scoped let write through to
+                // the outer binding — e.g. a `let result = ...` inside a
+                // branch once overwrote an outer accumulated array with a
+                // dictionary, and a later push then failed with
+                // "type dictionary has no method `push`".
                 let rust = bind_local(env, ident.as_str());
                 format!("let mut {rust} = {value};\n")
             }
             ast::Pattern::Normal(expr) if assign => {
-                // 解构赋值叶子(Ident 与 at 位置):目标经 `Access`
-                // 可变解析,at_mut 写回(无插入创建),见
-                // `place_write_leaf`。
+                // Destructuring-assignment leaf (Ident and at-position
+                // leaves): the target resolves mutably via `Access` and
+                // writes back through at_mut (no insert-on-create); see
+                // `place_write_leaf`.
                 self.place_write_leaf(expr, &value, env)
             }
             ast::Pattern::Normal(other) => {
-                // `let` 模式的非标识符叶子(对照 binding.rs `destructure`
-                // 的叶子 f:非 Ident 即 "cannot assign to this
-                // expression";value 已求,保持副作用)。
+                // Non-identifier leaf of a `let` pattern (mirrors the leaf
+                // f of binding.rs `destructure`: anything but an Ident is
+                // "cannot assign to this expression"; the value is already
+                // evaluated, keep the side effects).
                 let at = self.span_of(other.span());
                 format!(
                     "{{ let _ = {value}; bail!({at}, \"cannot assign to this expression\"); }}\n"
@@ -49,11 +55,15 @@ impl Ctx {
                 let tmp = format!("__d{id}");
                 let n_items = d.items().count();
                 let mut out = format!("let {tmp} = {value};\n");
-                // 预分配全部绑定名并提升声明到 match 外:数组/字典两分支
-                // 以赋值形式写入同一批变量。**仅 let 模式**(叶子写预绑
-                // 局部);赋值模式一概不预绑——叶子按 classify 写既有
-                // 目标(局部/模块槽),预绑局部会把模块槽目标劫持成
-                // 新局部,槽永不更新(destructuring-assign 根因)。
+                // Pre-allocate all binding names and hoist their
+                // declarations outside the match: both the array and the
+                // dictionary branch write the same variables by assignment.
+                // **Let mode only** (leaves write pre-bound locals);
+                // assignment mode never pre-binds — leaves write to
+                // existing targets via classify (local/module slot), and
+                // pre-binding a local would hijack a module-slot target
+                // into a fresh local so the slot never updates (the root
+                // cause of the destructuring-assign bug).
                 for ident in pattern.bindings() {
                     if assign {
                         continue;
@@ -62,8 +72,9 @@ impl Ctx {
                     out.push_str(&format!("let mut {rust} = Value::None;\n"));
                 }
 
-                // 数组分支(索引为运行期变量,sink 居中时随 sink 大小
-                // 前进——对照 binding.rs `i += sink_size`)。
+                // Array branch (the index is a runtime variable; with a
+                // sink in the middle it advances by the sink size —
+                // mirrors binding.rs `i += sink_size`).
                 let mut arr = String::new();
                 let arr_ref = format!("__a{id}");
                 let idx = format!("__i{id}");
@@ -76,8 +87,9 @@ impl Ctx {
                             arr.push_str(&format!("{idx} += 1usize;\n"));
                         }
                         ast::DestructuringItem::Spread(spread) => {
-                            // sink 大小 = 1 + len - 模式项总数(对照
-                            // binding.rs 的 `checked_sub` 与数量错误)。
+                            // sink size = 1 + len − total pattern items
+                            // (mirrors binding.rs's `checked_sub` and its
+                            // arity error).
                             let sink_size =
                                 format!("rt::d_sink_size(&{arr_ref}, {n_items}, {at})?");
                             let n_plain = n_items - 1;
@@ -104,11 +116,12 @@ impl Ctx {
                         }
                     }
                 }
-                // 收尾校验:无 sink 时剩元即数量错(对照 binding.rs 的
-                // `if i < len`;有 sink 时剩余已被 sink 吸收,恒等长)。
+                // Final check: without a sink, leftovers mean an arity
+                // error (mirrors binding.rs `if i < len`; with a sink the
+                // remainder is absorbed, always equal length).
                 arr.push_str(&format!("rt::d_array_finish(&{arr_ref}, &{idx}, {at})?;\n"));
 
-                // 字典分支。
+                // Dictionary branch.
                 let mut dict = String::new();
                 let dict_ref = format!("__k{id}");
                 let mut used: Vec<String> = Vec::new();
@@ -170,11 +183,14 @@ impl Ctx {
                 out
             }
             ast::Pattern::Normal(other) => {
-                // 解构赋值的 at 位置叶子:`(a.at(i), b.c.at(j)) = ...`
-                //(DestructAssignment 走 access() 即 at_mut,**不**插入
-                // 缺失键——与普通赋值的末段插入语义不同)。let 模式的
-                // 非标识符叶子按原版报 "cannot assign to this
-                // expression"(对照 binding.rs `destructure` 的叶子 f)。
+                // At-position leaf of a destructuring assignment:
+                // `(a.at(i), b.c.at(j)) = ...` (DestructAssignment goes
+                // through access() i.e. at_mut and does **not** insert
+                // missing keys — unlike plain assignment's insert-on-*
+                // missing-tail semantics). Non-identifier leaves of let
+                // patterns report "cannot assign to this expression" as
+                // the original does (mirrors the leaf f of binding.rs
+                // `destructure`).
                 if assign {
                     let at = self.span_of(other.span());
                     match self.classify_place(other, env) {
@@ -208,7 +224,7 @@ impl Ctx {
                             )
                         }
                         super::block::Place::Deferred => {
-                            self.diag(other.span(), "解构赋值目标为运行期模块引用".into());
+                            self.diag(other.span(), "destructuring-assignment target is a runtime module reference".into());
                             return String::new();
                         }
                     }

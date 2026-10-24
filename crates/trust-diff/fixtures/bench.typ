@@ -1,4 +1,4 @@
-// 基准负载:纯循环(无闭包缓存红利)、字符串累积、闭包工厂。
+// Bench workload: pure loops (no closure-cache dividend), string accumulation, closure factories.
 #let fib-mod(n) = {
   let a = 0
   let b = 1

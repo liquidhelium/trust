@@ -1,4 +1,5 @@
-// 入口:组合子模块。bare / 列表 / rename / 通配全部覆盖。
+// Entry point: composes the submodules. bare / list / rename / wildcard
+// imports are all covered.
 #import "utils.typ"
 #import "nested/format.typ": pad, dec, join as merge-str
 #import "nested/consts.typ": *

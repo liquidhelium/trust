@@ -1,4 +1,4 @@
-// 控制流与递归:if 链、while、for join、局部绑定与遮蔽。
+// Control flow and recursion: if chains, while, for joins, local bindings and shadowing.
 #let fact(n) = if n <= 1 { 1 } else { n * fact(n - 1) }
 #let fib(n) = {
   let a = 0
@@ -70,5 +70,5 @@
   }
   total
 }
-// 错误路径(M2.x):条件须为布尔(文案对照 rt::boolean 与 typst-eval)。
+// Error path: the condition must be a boolean (message mirrors rt::boolean and typst-eval).
 #let bool-fail() = if 1 { "t" }

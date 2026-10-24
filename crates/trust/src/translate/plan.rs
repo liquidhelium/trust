@@ -1,24 +1,31 @@
-//! 包结构分析(翻译第一遍):每个文件的顶层绑定与 import 边、
-//! import 图的环检测与拓扑序、导出查找表。
+//! Package structure analysis (translation pass one): each file's
+//! top-level bindings and import edges, cycle detection and topological
+//! order of the import graph, and the export lookup table.
 //!
-//! 纯计划数据与图算法,不生成代码;代码生成见 `package.rs`。
+//! Pure planning data and graph algorithms; no code generation — see
+//! `package.rs` for that.
 
 use typst_syntax::ast;
 
 use super::naming::{sanitize, sanitize_key};
 
-/// 一个源文件的翻译计划:mod 名、顶层绑定(名字 → 槽)与 import 边。
+/// One source file's translation plan: mod name, top-level bindings
+/// (name → slot), and import edges.
 pub(super) struct FilePlan<'a> {
     pub(super) path: String,
     pub(super) mod_name: String,
     pub(super) markup: ast::Markup<'a>,
-    /// 解析诊断(typst-syntax errors_and_warnings 的错误信息;对照
-    /// 官方 compile 的 parse 阶段——lenient 翻译曾静默吞掉错误节点,
-    /// 解析类错误测试假绿,eval 头部按首条 bail)。
+    /// Parse diagnostics (error messages from typst-syntax's
+    /// errors_and_warnings; mirrors the parse stage of the official
+    /// compile — lenient translation once silently swallowed error nodes,
+    /// making parse-error tests falsely green; eval heads bail on the
+    /// first error).
     pub(super) parse_diags: Vec<String>,
-    /// 被就地修改的顶层绑定根名(可变方法 push/pop/insert/remove 的
-    /// 目标根、复合赋值的目标根):这些绑定发射为可变槽
-    /// (std::sync::Mutex),读点/填点/修改点走 *_ms 助手。
+    /// Root names of top-level bindings mutated in place (targets of
+    /// mutating methods push/pop/insert/remove and of compound
+    /// assignments): these bindings are emitted as mutable slots
+    /// (std::sync::Mutex); reads/fills/mutations go through the *_ms
+    /// helpers.
     pub(super) mutated_roots: Vec<String>,
     pub(super) tops: Vec<(String, String)>,
     pub(super) imports: Vec<ImportEdge>,
@@ -26,38 +33,45 @@ pub(super) struct FilePlan<'a> {
 
 pub(super) struct ImportEdge {
     pub(super) span: typst_syntax::Span,
-    /// 目标文件路径。
+    /// Target file path.
     pub(super) target: String,
     pub(super) items: ImportItems,
-    /// 外部包("@ns/name:ver")。
+    /// External package ("@ns/name:ver").
     pub(super) external: bool,
-    /// 模块值表达式 import(`deps.oxifmt`):根绑定名 + 字段链。
+    /// Module-value expression import (`deps.oxifmt`): root binding name +
+    /// field chain.
     pub(super) module_access: Option<(String, Vec<String>)>,
-    /// 任意表达式源(`import plugin("…") as m`,touying/hy-dro-gen
-    /// 驱动):源节点,二遍经 Ctx 翻译求值为模块值,绑定走模块值
-    /// 同款机制(对照 typst-eval:import 源求值为模块即可)。
+    /// Arbitrary-expression source (`import plugin("…") as m`): the source
+    /// node, translated and evaluated into a module value in pass two,
+    /// with bindings following the same mechanism as module-value imports
+    /// (mirrors typst-eval: an import source just has to evaluate to a
+    /// module).
     pub(super) source_node: Option<typst_syntax::SyntaxNode>,
-    /// 语句原文(区 1 胶水用:经 rt::eval_import 重解析驱动原版
-    /// `Eval for ast::ModuleImport`,span 合成到原语句)。
+    /// Statement text (for zone-1 glue: re-parsed by rt::eval_import to
+    /// drive the original `Eval for ast::ModuleImport`, with the span
+    /// synthesized onto the original statement).
     pub(super) stmt_text: Option<String>,
-    /// Str 源的原始字面量(通配越界走 import_external 层用)。
+    /// Raw literal of a Str source (used when a wildcard goes out of range
+    /// through the import_external layer).
     pub(super) raw: String,
-    /// `#include` 边:参与依赖图,不产生名字绑定。
+    /// `#include` edge: participates in the dependency graph, binds no
+    /// names.
     pub(super) is_include: bool,
 }
 
 pub(super) enum ImportItems {
     Bare,
     Rename(String),
-    /// 模块改名 + 成员列表(`import x as m: a, b`,elembic 驱动):
-    /// 绑定 m = 模块本身,以及各成员。
+    /// Module rename + member list (`import x as m: a, b`): binds
+    /// m = the module itself, plus each member.
     RenameList(String, Vec<(String, Option<String>)>),
-    /// (名字, rename)。
+    /// (name, rename).
     List(Vec<(String, Option<String>)>),
     Wildcard,
 }
 
-/// 文件 tops 里第 nth 个同名绑定的槽(顶层重定义按出现序配对)。
+/// The slot of the nth same-named binding in a file's tops (top-level
+/// redefinitions pair up by order of appearance).
 pub(super) fn nth_slot(plan: &FilePlan, name: &str, nth: usize) -> Option<String> {
     plan.tops
         .iter()
@@ -66,7 +80,8 @@ pub(super) fn nth_slot(plan: &FilePlan, name: &str, nth: usize) -> Option<String
         .nth(nth)
 }
 
-/// import 环检测(typst 模块循环求值同样报错)。
+/// Import cycle detection (typst likewise errors on circular module
+/// evaluation).
 pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
     fn dfs(
         node: &str,
@@ -99,7 +114,8 @@ pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
     !dfs(entry, &edges, &mut stack)
 }
 
-/// 文件依赖的拓扑序(被依赖者在前)。
+/// Topological order of file dependencies (dependents of nothing first,
+/// i.e. dependencies first).
 pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
     fn visit(idx: usize, plans: &[FilePlan], order: &mut Vec<usize>, state: &mut Vec<u8>) {
         if state[idx] != 0 {
@@ -122,18 +138,23 @@ pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
     order
 }
 
-/// 顶层绑定查找表:路径 → (名字 → 槽名)。对照 typst 模块导出面:
-/// 全部顶层绑定,**含 import 引入的名字(转出名)**——下游的具名与
-/// 通配 import 从这里展开(如 `shapes.typ` 经 `import "grouping.typ": *`
-/// 拿到 grouping 转出的 `intersection`)。
+/// Top-level binding lookup table: path → (name → slot name). Mirrors the
+/// typst module export surface: all top-level bindings, **including names
+/// introduced by imports (re-exports)** — downstream named and wildcard
+/// imports expand from here (e.g. `shapes.typ` gets the re-exported
+/// `intersection` from `grouping.typ` via `import "grouping.typ": *`).
 ///
-/// 按拓扑序增量并入:被依赖者的导出面先定型,list/wildcard 引用的
-/// 目标槽随之递归可达。bare/rename 与**外部包** import 的 IMPORT 槽名
-/// 与 `package.rs` 的生成规则逐字一致(外部包每边独立槽、无 dedup;
-/// 内部同 target 复用首个槽;`deps.typ` 一行裸外部 import 转出 `cetz`
-/// 即此形态,fletcher 的跨文件传递依赖靠它)。已有名字(本地绑定或
-/// 先前的 import)优先,后到不覆盖。模块值 import(`import
-/// deps.oxifmt: strfmt`)引入的名字无槽形态,暂不转出。
+/// Merged in incrementally along the topological order: a dependency's
+/// export surface settles first, so the target slots referenced by
+/// list/wildcard become recursively reachable. IMPORT slot names for
+/// bare/rename and **external package** imports match the generation rules
+/// in `package.rs` verbatim (external packages get an independent slot per
+/// edge, no dedup; internal same-target imports reuse the first slot; a
+/// one-line bare external import in `deps.typ` re-exporting `cetz` is this
+/// shape, and cross-file transitive dependencies rely on it). Existing
+/// names (local bindings or earlier imports) win; later ones do not
+/// override. Names introduced by module-value imports (`import
+/// deps.oxifmt: strfmt`) have no slot form and are not re-exported yet.
 pub(super) fn build_export_table(
     plans: &[FilePlan],
     order: &[usize],
@@ -155,15 +176,17 @@ pub(super) fn build_export_table(
     for &idx in order {
         let plan = &plans[idx];
         let mut exports = table[&plan.path].clone();
-        // 与 package.rs 同款:同 target 的重复 import 复用首个槽名。
+        // Same as package.rs: repeated imports of the same target reuse the
+        // first slot name.
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &plan.imports {
             if edge.is_include {
                 continue;
             }
-            // 模块值 import(`import cetz: vector`)的绑定同样转出:
-            // 槽名与 package.rs 的生成规则逐字一致(eval 期填充)。
+            // Bindings of module-value imports (`import cetz: vector`) are
+            // re-exported too: slot names match the generation rules in
+            // package.rs verbatim (filled at eval time).
             if let Some((root, fields)) = &edge.module_access {
                 match &edge.items {
                     ImportItems::Bare | ImportItems::Rename(_) => {
@@ -209,12 +232,15 @@ pub(super) fn build_export_table(
                         }
                     }
                     ImportItems::Wildcard => {
-                        // 模块值链通配(`import t4t: *`,finite 驱动):
-                        // 根名槽 → 文件身份(通用解析器),逐字段经导出
-                        // 表到目标文件,按其导出面**转出**(下游具名/通配
-                        // import 可达;此前此臂为空,`src/util.typ 不包含
-                        // 导出 get` 即此缺口)。与 package.rs
-                        // process_import_edge 的同型链一致。
+                        // Module-value-chain wildcard (`import t4t: *`):
+                        // root-name slot → file identity (the generic
+                        // resolver), then field by field through the
+                        // export table to the target file, and re-exported
+                        // by **its** export surface (reachable by downstream
+                        // named/wildcard imports; this arm used to be empty,
+                        // which was the "src/util.typ does not export get"
+                        // gap). Same-shaped chain as package.rs's
+                        // process_import_edge.
                         let root_slot = exports.get(root).cloned();
                         let mut cur = root_slot.as_deref().and_then(|slot| {
                             resolve_import_slot_file(slot, plans, &table, dep_entries, plans.len())
@@ -252,9 +278,11 @@ pub(super) fn build_export_table(
                 }
                 continue;
             }
-            // 外部包 bare/rename:转出绑定到外部模块槽(package.rs 的
-            // 外部 import 每边独立生成 IMPORT_{mod}_{name} 槽并运行时
-            // 装配,此处按同规则登记,下游 import 即可达)。
+            // External package bare/rename: re-export the binding to the
+            // external module slot (package.rs generates an independent
+            // IMPORT_{mod}_{name} slot per external import edge and
+            // assembles it at runtime; registered here by the same rule so
+            // downstream imports can reach it).
             if edge.external {
                 if let ImportItems::Bare | ImportItems::Rename(_) = &edge.items {
                     let bound = match &edge.items {
@@ -268,9 +296,10 @@ pub(super) fn build_export_table(
                     );
                     exports.entry(bound).or_insert(slot);
                 }
-                // 外部包 LIST:绑定名同样转出(hydra 驱动:`_pkgs.typ`
-                // 从 oxifmt 取 strfmt 再被下游 import——槽公式与
-                // package.rs 的字段访问生成侧逐字一致)。
+                // External package LIST: binding names re-exported too
+                // (e.g. `_pkgs.typ` taking strfmt from oxifmt and being
+                // imported downstream — the slot formula matches the
+                // field-access generation side of package.rs verbatim).
                 if let ImportItems::List(list) = &edge.items {
                     for (item, rename) in list {
                         let as_name = rename.clone().unwrap_or_else(|| item.clone());
@@ -321,16 +350,19 @@ pub(super) fn build_export_table(
                     exports.entry(bound).or_insert(slot);
                 }
                 ImportItems::List(items) => {
-                    // 目标不在计划集(模板占位 spec 等未解析边,eggs
-                    // 驱动曾在此裸索引 panic):安全查找,miss 时该项
-                    // 无从展开,留空——真正的缺口由后续具名使用点报。
+                    // Target not in the plan set (unresolved edges like
+                    // template placeholder specs; a bare index here once
+                    // panicked): look up safely; on a miss the item cannot
+                    // be expanded and is left empty — the real gap is
+                    // reported at the later named use site.
                     let Some(target_exports) = table.get(&edge.target) else {
                         continue;
                     };
                     let target_exports = &target_exports.clone();
                     for (original, rename) in items {
-                        // 点分项:首段解析,余段物化进独立槽(package.rs
-                        // 同公式;hydra 驱动)。
+                        // Dotted item: first segment resolved, remaining
+                        // segments materialized into an independent slot
+                        // (same formula as package.rs).
                         let (first, rest): (&str, Vec<&str>) = match original.split_once('.') {
                             Some((f, r)) => (f, r.split('.').collect()),
                             None => (original.as_str(), Vec::new()),
@@ -352,7 +384,8 @@ pub(super) fn build_export_table(
                     }
                 }
                 ImportItems::Wildcard => {
-                    // 同 List:目标不在计划集时安全跳过(eggs 模板边)。
+                    // Same as List: skip safely when the target is not in
+                    // the plan set (template edges).
                     if let Some(target_exports) = table.get(&edge.target) {
                         for (name, slot) in target_exports {
                             exports.entry(name.clone()).or_insert_with(|| slot.clone());
@@ -366,7 +399,7 @@ pub(super) fn build_export_table(
     table
 }
 
-/// 文件路径的模块名(bare import 的名字 = 文件 stem)。
+/// Module name for a file path (a bare import's name = the file stem).
 pub(super) fn module_stem(path: &str) -> String {
     path.rsplit('/')
         .next()
@@ -385,8 +418,9 @@ pub(super) fn spec_prefix(target: &str) -> String {
         target[colon..].find('/').map(|rel| colon + rel)
     }) {
         Some(end) => target[..end].to_string(),
-        // 无后续路径:整个串就是 spec(未翻译外部边,target 即原始
-        // spec,如 "@preview/oxifmt:1.0.0")。
+        // No trailing path: the whole string is the spec (an untranslated
+        // external edge; the target is the raw spec, e.g.
+        // "@preview/oxifmt:1.0.0").
         None => target.to_string(),
     }
 }
@@ -401,11 +435,13 @@ pub(super) fn spec_name(spec: &str) -> String {
         .to_string()
 }
 
-/// IMPORT 槽 → 该绑定模块的**文件身份**(通用递归解析,深度以计划
-/// 数为界):内部 bare/rename → 边目标文件;内部 list 项 → 目标文件
-/// 导出表该项的槽再解一跳;外部边 → 已并入依赖的入口合并键。供
-/// slot_files 索引与体内/顶层模块值链通配使用(finite 的
-/// `import t4t: *`,t4t 经内部 list 引入)。
+/// IMPORT slot → the **file identity** of that binding's module (generic
+/// recursive resolution, depth bounded by the plan count): internal
+/// bare/rename → the edge's target file; internal list item → the target
+/// file's export-table slot for that item, resolved one more hop;
+/// external edge → the entry merge key of the merged dependency. Feeds the
+/// slot_files index and in-body/top-level module-value-chain wildcards
+/// (e.g. `import t4t: *` where t4t came in via an internal list).
 pub(super) fn resolve_import_slot_file(
     slot: &str,
     plans: &[super::plan::FilePlan],
@@ -416,8 +452,9 @@ pub(super) fn resolve_import_slot_file(
     if depth == 0 {
         return None;
     }
-    // IMPORT_{mod}_{bound}:mod 名可含下划线(sanitize_key 不去下划
-    // 线),按计划前缀匹配定界(与前缀匹配 plan 的既有做法一致)。
+    // IMPORT_{mod}_{bound}: the mod name may contain underscores
+    // (sanitize_key keeps underscores), so delimit by matching plan
+    // prefixes (consistent with the existing plan-prefix matching).
     let (plan, bound): (&super::plan::FilePlan, String) = plans
         .iter()
         .find_map(|p| {
@@ -426,8 +463,9 @@ pub(super) fn resolve_import_slot_file(
                 .map(|b| (p, b.to_string()))
         })
         .or_else(|| {
-            // 模块名不含下划线的常规形态也要兜底(前缀匹配按计划序
-            // 首个命中;无可行分隔时返回 None)。
+            // The regular shape (module name without underscores) also
+            // needs a fallback (prefix matching takes the first plan in
+            // order; None when no split is possible).
             None
         })?;
     let bound = &bound[..];
@@ -435,7 +473,8 @@ pub(super) fn resolve_import_slot_file(
         if edge.is_include {
             continue;
         }
-        // 本边可能产出该槽的绑定名集合(bare/rename/list/rename-list)。
+        // The binding-name set this edge may produce for that slot
+        // (bare/rename/list/rename-list).
         let names: Vec<String> = if edge.external {
             match &edge.items {
                 ImportItems::Rename(n) | ImportItems::RenameList(n, _) => vec![n.clone()],
@@ -462,7 +501,8 @@ pub(super) fn resolve_import_slot_file(
                     .iter()
                     .map(|(item, rename)| {
                         let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                        // 点分项只取首段为绑定名。
+                        // Dotted items use only the first segment as the
+                        // binding name.
                         as_name.split('.').next().unwrap_or(&as_name).to_string()
                     })
                     .collect(),
@@ -473,8 +513,8 @@ pub(super) fn resolve_import_slot_file(
             continue;
         }
         if !edge.external {
-            // 模块名绑定(bare 的 stem / rename / rename-list 的模块名)
-            // → 边目标文件即模块身份。
+            // Module-name binding (bare stem / rename / rename-list module
+            // name) → the edge's target file is the module identity.
             let module_binding = match &edge.items {
                 ImportItems::Bare => module_stem(&edge.target),
                 ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
@@ -483,7 +523,8 @@ pub(super) fn resolve_import_slot_file(
             if !module_binding.is_empty() && sanitize_key(&module_binding) == bound {
                 return Some(edge.target.clone());
             }
-            // list/rename-list 项:目标文件导出表该项 → 槽,再解一跳。
+            // list/rename-list item: the target file's export table entry
+            // for that item → slot, resolved one more hop.
             let table_key = if bound.contains('.') {
                 bound.split('.').next().unwrap_or(bound)
             } else {
@@ -492,10 +533,9 @@ pub(super) fn resolve_import_slot_file(
             let next = export_table.get(&edge.target)?.get(table_key)?.clone();
             return resolve_import_slot_file(&next, plans, export_table, dep_entries, depth - 1);
         }
-        // 外部边:已并入依赖 → 入口合并键。
+        // External edge: merged dependency → entry merge key.
         let spec = spec_prefix(&edge.target);
         return dep_entries.get(&spec).cloned();
     }
     None
 }
-

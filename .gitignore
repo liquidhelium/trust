@@ -1,5 +1,6 @@
-# 构建产物(target 是指向 /mnt/data-hdd/helium/trust-target 的软链)
+# Build artifacts
 /target
+crates/*/target
 
-# 本地资源与探索笔记
-/_things/
+# Local resources and exploration notes
+/_things

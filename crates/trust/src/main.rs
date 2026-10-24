@@ -1,11 +1,13 @@
-//! `trust` CLI:typst → rust 转译器命令行。
+//! The `trust` CLI: command line for the typst → rust transpiler.
 
 use std::io::Write;
 
-/// 从 registry 下载并解包一个包到本地缓存(对照 typst CLI 的缺包
-/// 自动下载,KNOWN #49)。成功返回 true(缓存目录就位)。
-/// 诊断摘录:span → file:行:列 + 源码行(对照 typst CLI 的诊断
-/// 呈现;KNOWN #69)。span 的 FileId 按路径再 intern 即同源。
+/// Download a package from the registry and unpack it into the local cache
+/// (mirrors the typst CLI's automatic download of missing packages,
+/// KNOWN #49). Returns true on success (cache directory in place).
+/// Diagnostic excerpt: span → file:line:col + source line (mirrors the
+/// typst CLI's diagnostic presentation; KNOWN #69). The span's FileId,
+/// re-interned by path, is the same origin.
 fn diag_snippet(
     diag: &trust::Diag,
     files: &std::collections::BTreeMap<String, String>,
@@ -16,7 +18,8 @@ fn diag_snippet(
     };
     let vpath = id.vpath().get_with_slash().to_string();
     let Some(src) = files.get(&vpath).or_else(|| {
-        // 依赖合并键形态(@spec/rel):剥 spec 前缀再试。
+        // Dependency merge-key form (@spec/rel): strip the spec prefix and
+        // retry.
         vpath
             .find('/')
             .and_then(|i| files.get(&vpath[i + 1..]))
@@ -33,7 +36,7 @@ fn diag_snippet(
         .lines()
         .byte_to_line_column(range.start)
         .unwrap_or((0, 0));
-    // byte_to_line 为 0 基:第 L 行 = lines()[L]。
+    // byte_to_line is 0-based: line L = lines()[L].
     let line_text = src.lines().nth(line).unwrap_or("");
     let mut out = String::new();
     let _ = write!(out, " @ {vpath}:{}:{}", line + 1, col + 1);
@@ -62,7 +65,7 @@ fn package_cache_root() -> std::path::PathBuf {
 
 fn fetch_package(ns: &str, name: &str, version: &str) -> bool {
     if ns != "preview" {
-        return false; // 只认官方 preview 命名空间
+        return false; // Only the official preview namespace is recognized
     }
     let url = format!("https://packages.typst.org/preview/{name}-{version}.tar.gz");
     let Ok(resp) = ureq::get(&url).call() else {
@@ -108,13 +111,13 @@ fn main() {
                 }
             }
             let Some(input) = input else {
-                eprintln!("用法: trust translate <input.typ> [--name 模块名] [-o 输出.rs]");
+                eprintln!("usage: trust translate <input.typ> [--name MODULE] [-o OUTPUT.rs]");
                 std::process::exit(2);
             };
             let src = match std::fs::read_to_string(input) {
                 Ok(src) => src,
                 Err(err) => {
-                    eprintln!("读取 {input} 失败: {err}");
+                    eprintln!("failed to read {input}: {err}");
                     std::process::exit(1);
                 }
             };
@@ -128,7 +131,7 @@ fn main() {
                 Ok(code) => match output {
                     Some(path) => {
                         if let Err(err) = std::fs::write(path, code) {
-                            eprintln!("写入 {path} 失败: {err}");
+                            eprintln!("failed to write {path}: {err}");
                             std::process::exit(1);
                         }
                     }
@@ -140,8 +143,9 @@ fn main() {
                 Err(diags) => {
                     for diag in diags {
                         let mut one = std::collections::BTreeMap::new();
-                        // 单文件形态 span 的 vpath 是 /main.typ——
-                        // 双键插入保证命中。
+                        // In single-file form the span's vpath is
+                        // /main.typ — the double-key insert guarantees a
+                        // hit.
                         one.insert("main.typ".to_string(), src.clone());
                         one.insert(input.to_string(), src.clone());
                         eprintln!(
@@ -156,8 +160,9 @@ fn main() {
             }
         }
         Some("translate-pkg") => {
-            // 探索入口:翻译一个本地包目录(entry 自动探测),把生成源码
-            // 写到 <out>/gen.rs,附 trust-runtime 依赖说明。
+            // Exploration entry: translate a local package directory (entry
+            // auto-detected), writing the generated source to
+            // <out>/gen.rs with a trust-runtime dependency note.
             let mut input: Option<&str> = None;
             let mut output: Option<&str> = None;
             let mut i = 2;
@@ -176,7 +181,7 @@ fn main() {
                 }
             }
             let (Some(input), Some(output)) = (input, output) else {
-                eprintln!("用法: trust translate-pkg <包根目录> -o <输出.rs|目录/> [--lenient]");
+                eprintln!("usage: trust translate-pkg <PKG_ROOT> -o <OUTPUT.rs|DIR/> [--lenient]");
                 std::process::exit(2);
             };
             let lenient = args.iter().any(|a| a == "--lenient");
@@ -200,10 +205,11 @@ fn main() {
                     }
                 }
             }
-            // 入口:按包规范读 typst.toml 的 entrypoint(相对包根,
-            // 发布包必备;不假设任何特定入口名)。
+            // Entry: read typst.toml's entrypoint per the package spec
+            // (relative to the package root, mandatory for published
+            // packages; no particular entry name is assumed).
             let entry = std::fs::read_to_string(root.join("typst.toml"))
-                .map_err(|e| format!("读 typst.toml 失败: {e}"))
+                .map_err(|e| format!("failed to read typst.toml: {e}"))
                 .and_then(|text| {
                     let manifest: toml::Table =
                         toml::from_str(&text).map_err(|e| e.to_string())?;
@@ -211,23 +217,24 @@ fn main() {
                         .get("package")
                         .and_then(|p| p.get("entrypoint"))
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| "typst.toml 缺 package.entrypoint".to_string())?
+                        .ok_or_else(|| "typst.toml is missing package.entrypoint".to_string())?
                         .trim_start_matches('/')
                         .to_string();
                     if files.contains_key(&entry) {
                         Ok(entry)
                     } else {
-                        Err(format!("entrypoint `{entry}` 不在文件集"))
+                        Err(format!("entrypoint `{entry}` is not in the file set"))
                     }
                 });
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(msg) => {
-                    eprintln!("入口解析失败: {msg}");
+                    eprintln!("failed to resolve entrypoint: {msg}");
                     std::process::exit(2);
                 }
             };
-            // 只收 entry 所在的包源树(docs/tests 等不入包)。
+            // Only collect the package source tree containing the entry
+            // (docs/tests etc. are not part of the package).
             let src_root = entry
                 .rsplit_once('/')
                 .map(|(dir, _)| format!("{dir}/"))
@@ -235,9 +242,11 @@ fn main() {
             if !src_root.is_empty() {
                 files.retain(|k, _| k.starts_with(&src_root));
             }
-            // 递归依赖(--with-deps):从本地包缓存解析 @spec,把可
-            // 翻译的依赖包并入文件集({spec}/{rel} 键),import 边
-            // 静态化;未命中缓存的保持运行时解释回退(警告)。
+            // Recursive dependencies (--with-deps): resolve @spec from the
+            // local package cache, merging translatable dependency packages
+            // into the file set ({spec}/{rel} keys) with import edges
+            // staticized; cache misses keep the runtime interpretation
+            // fallback (with a warning).
             let dep_entries = if with_deps {
                 collect_translatable_deps(&mut files)
             } else {
@@ -248,8 +257,9 @@ fn main() {
                 entry,
                 dep_entries,
             };
-            // 模块名取 manifest 的 package.name(而非目录名——包缓存
-            // 目录名是版本号)。
+            // The module name comes from the manifest's package.name (not
+            // the directory name — package cache directory names are
+            // version numbers).
             let name = std::fs::read_to_string(root.join("typst.toml"))
                 .ok()
                 .and_then(|text| {
@@ -258,7 +268,8 @@ fn main() {
                 })
                 .or_else(|| root.file_name().and_then(|s| s.to_str()).map(str::to_string))
                 .unwrap_or_else(|| "pkg".into());
-            // `-o 目录/`(尾斜杠):目录形态,镜像源码树的多文件产物。
+            // `-o DIR/` (trailing slash): directory form, a multi-file
+            // output mirroring the source tree.
             if let Some(dir) = output.strip_suffix('/') {
                 let tree_result = if lenient {
                     let (tree, diags) = trust::translate_package_tree_lenient(&pkg, &name);
@@ -282,7 +293,7 @@ fn main() {
                             std::fs::write(&path, content).expect("write");
                             bytes += content.len();
                         }
-                        println!("已生成树 {} 个文件({} 字节)于 {output}", tree.len(), bytes);
+                        println!("generated tree of {} files ({} bytes) at {output}", tree.len(), bytes);
                     }
                     Err(diags) => {
                         for d in diags {
@@ -296,11 +307,11 @@ fn main() {
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
-                    eprintln!("降级 {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
+                    eprintln!("degraded {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
                 }
                 std::fs::write(output, &code).expect("write");
                 println!(
-                    "已生成 {output}({} 字节,降级 {} 处,清单见上方与文件头注释)",
+                    "generated {output} ({} bytes, {} degradations; list above and in the file header)",
                     code.len(),
                     diags.len()
                 );
@@ -308,7 +319,7 @@ fn main() {
                 match trust::translate_package(&pkg, &name) {
                     Ok(code) => {
                         std::fs::write(output, &code).expect("write");
-                        println!("已生成 {output}({} 字节)", code.len());
+                        println!("generated {output} ({} bytes)", code.len());
                     }
                     Err(diags) => {
                         for d in diags {
@@ -321,22 +332,23 @@ fn main() {
         }
         Some("coverage") => {
             let Some(root) = args.get(2).map(String::as_str) else {
-                eprintln!("用法: trust coverage <目录或文件.typ>");
+                eprintln!("usage: trust coverage <DIR|FILE.typ>");
                 std::process::exit(2);
             };
             std::process::exit(coverage(root));
         }
         _ => {
             eprintln!(
-                "trust {} — typst → rust 转译器\n\n用法:\n  trust translate <input.typ> [--name 模块名] [-o 输出.rs]\n  trust coverage <目录>(覆盖度度量)",
+                "trust {} — typst → rust transpiler\n\nusage:\n  trust translate <input.typ> [--name MODULE] [-o OUTPUT.rs]\n  trust coverage <DIR> (coverage measurement)",
                 env!("CARGO_PKG_VERSION")
             );
         }
     }
 }
 
-/// 覆盖度度量:对一个目录(或文件)的全部 .typ 逐个翻译,
-/// 按诊断消息聚类统计缺口(数据驱动开发优先级)。
+/// Coverage measurement: translate every .typ in a directory (or a single
+/// file) one by one, clustering gaps by diagnostic message (to prioritize
+/// work by data).
 fn coverage(root: &str) -> i32 {
     fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -360,12 +372,14 @@ fn coverage(root: &str) -> i32 {
     }
     files.sort();
 
-    // 包模式:目录含 lib.typ 时按多文件包整体翻译(顶层 import 可解析)。
+    // Package mode: when the directory contains lib.typ, translate the
+    // multi-file package as a whole (top-level imports resolvable).
     if path.is_dir() {
         let has_lib = files
             .iter()
             .any(|f| f.file_name().and_then(|n| n.to_str()) == Some("lib.typ"));
-        // entry:最浅的 lib.typ(标准包布局 src/lib.typ)。
+        // Entry: the shallowest lib.typ (standard package layout
+        // src/lib.typ).
         let entry = files
             .iter()
             .filter(|f| f.file_name().and_then(|n| n.to_str()) == Some("lib.typ"))
@@ -388,7 +402,8 @@ fn coverage(root: &str) -> i32 {
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
-                // 只收 entry 所在的包源树(docs/tests/gallery 不入包)。
+                // Only collect the package source tree containing the entry
+                // (docs/tests/gallery are not part of the package).
                 if !src_root.is_empty() && !rel.starts_with(&src_root) {
                     continue;
                 }
@@ -402,19 +417,19 @@ fn coverage(root: &str) -> i32 {
                 dep_entries: Default::default(),
             };
             match trust::translate_package(&input, "cetz") {
-                Ok(_) => println!("包模式:整包翻译通过"),
+                Ok(_) => println!("package mode: whole-package translation passed"),
                 Err(diags) => {
                     let mut kinds: std::collections::BTreeMap<String, usize> =
                         std::collections::BTreeMap::new();
                     for d in diags {
-                        let key = if d.message.contains("遇到 ") {
-                            format!("顶层: {}", d.message.split("遇到 ").nth(1).unwrap_or("?"))
+                        let key = if d.message.contains("encountered ") {
+                            format!("top-level: {}", d.message.split("encountered ").nth(1).unwrap_or("?"))
                         } else {
                             d.message.clone()
                         };
                         *kinds.entry(key).or_default() += 1;
                     }
-                    println!("包模式:整包翻译缺口(按频次):");
+                    println!("package mode: whole-package gaps (by frequency):");
                     let mut es: Vec<_> = kinds.into_iter().collect();
                     es.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
                     for (k, n) in es.iter().take(20) {
@@ -444,20 +459,21 @@ fn coverage(root: &str) -> i32 {
         }
         per_file.push((file.display().to_string(), diags.len()));
         for diag in diags {
-            // 归一化:去掉具体名字/类型,按缺口类别聚类。
+            // Normalization: strip concrete names/types and cluster by gap
+            // category.
             let key = normalize_diag(&diag.message);
             *kind_counts.entry(key).or_default() += 1;
         }
     }
 
-    println!("文件: {ok_files}/{total} 可整体翻译");
-    println!("\n缺口聚类(按频次):");
+    println!("files: {ok_files}/{total} fully translatable");
+    println!("\ngap clusters (by frequency):");
     let mut entries: Vec<_> = kind_counts.into_iter().collect();
     entries.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (kind, n) in entries.iter().take(24) {
         println!("  {n:4}  {kind}");
     }
-    println!("\n最难文件(诊断数):");
+    println!("\nhardest files (by diagnostic count):");
     per_file.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (file, n) in per_file.iter().take(10) {
         println!("  {n:4}  {file}");
@@ -465,31 +481,34 @@ fn coverage(root: &str) -> i32 {
     0
 }
 
-/// 把诊断消息归一化为缺口类别。
+/// Normalize a diagnostic message into a gap category.
 fn normalize_diag(message: &str) -> String {
     let m = message;
     let pick = |prefix: &str| -> Option<String> {
         m.find(prefix)
             .map(|i| m[i..].split(')').next().unwrap_or(&m[i..]).to_string())
     };
-    if m.contains("遇到 ") {
-        return format!("顶层: {}", m.split("遇到 ").nth(1).unwrap_or("?"));
+    if m.contains("encountered ") {
+        return format!("top-level: {}", m.split("encountered ").nth(1).unwrap_or("?"));
     }
-    if let Some(e) = pick("表达式 ") {
-        return format!("表达式: {e}");
+    if let Some(e) = pick("expression ") {
+        return format!("expression: {e}");
     }
-    if m.contains("暂不支持") || m.contains("暂只支持") {
+    if m.contains("not supported") {
         return m.to_string();
     }
     m.to_string()
 }
 
 
-/// 递归依赖闭包:扫描文本中的 `"@spec"` 引用,从本地包缓存
-/// (`TYPST_PACKAGE_CACHE_PATH` 或 `~/.cache/typst/packages`)解析,
-/// 把依赖包源码以 `{spec}/{包内相对路径}` 并入 `files`,返回
-/// spec → 入口合并键。迭代到不动点(依赖自身的依赖同样并入)。
-/// 缓存未命中的 spec 不并入(生成物运行时回退解释),打警告。
+/// Recursive dependency closure: scan the text for `"@spec"` references,
+/// resolve them from the local package cache (`TYPST_PACKAGE_CACHE_PATH`
+/// or `~/.cache/typst/packages`), merge the dependency package's sources
+/// into `files` under `{spec}/{path-inside-package}` keys, and return the
+/// spec → entry merge keys. Iterated to a fixed point (the dependencies'
+/// own dependencies are merged the same way). Specs missing from the cache
+/// are not merged (the output falls back to runtime interpretation), with
+/// a warning.
 fn collect_translatable_deps(
     files: &mut std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
@@ -503,12 +522,13 @@ fn collect_translatable_deps(
         .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
     let mut dep_entries = std::collections::BTreeMap::new();
     loop {
-        // 扫描全部文本中的 "@..." 字符串字面量(spec 不含转义)。
+        // Scan all text for "@..." string literals (specs contain no
+        // escapes).
         let mut specs: Vec<String> = Vec::new();
         for text in files.values() {
             let bytes = text.as_bytes();
-            // 跳过文档注释行(///)——README 示例的 @spec 会当依赖误报
-            // (pinit 的 fletcher 依赖扫描噪声驱动)。
+            // Skip doc-comment lines (///) — a README example's @spec would
+            // be a false dependency hit (scan noise).
             let text = text
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("///"))
@@ -539,10 +559,10 @@ fn collect_translatable_deps(
             if dep_entries.contains_key(&spec) {
                 continue;
             }
-            // spec 形如 @ns/name:ver。
+            // A spec looks like @ns/name:ver.
             let Some(rest) = spec.strip_prefix('@') else { continue };
             let Some((ns_name, _ver)) = rest.split_once(':') else {
-                eprintln!("依赖 spec 格式不支持: {spec}");
+                eprintln!("unsupported dependency spec format: {spec}");
                 continue;
             };
             let Some((ns, name)) = ns_name.split_once('/') else {
@@ -551,27 +571,28 @@ fn collect_translatable_deps(
             let dir = cache_root.join(ns).join(name).join(
                 rest.split_once(':').map(|(_, v)| v).unwrap_or(""),
             );
-            // 缺包自动拉取(对照 typst CLI 的 registry 下载,
-            // KNOWN #49):registry 形态 {name}-{version}.tar.gz;
-            // TRUST_NO_FETCH=1 禁用。失败才回退运行时解释。
+            // Automatic fetch of missing packages (mirrors the typst CLI's
+            // registry download, KNOWN #49): registry form
+            // {name}-{version}.tar.gz; TRUST_NO_FETCH=1 disables it. Only
+            // on failure does it fall back to runtime interpretation.
             if !dir.join("typst.toml").exists() {
                 let ok = std::env::var_os("TRUST_NO_FETCH").is_none()
                     && fetch_package(ns, name, rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
                 if !ok {
-                    eprintln!("依赖未在本地包缓存命中(运行时解释回退): {spec}");
+                    eprintln!("dependency not found in local package cache (falling back to runtime interpretation): {spec}");
                     continue;
                 }
-                eprintln!("依赖缺包已自动拉取: {spec}");
+                eprintln!("missing dependency fetched automatically: {spec}");
             }
             let manifest = match std::fs::read_to_string(dir.join("typst.toml")) {
                 Ok(m) => m,
                 Err(_) => {
-                    eprintln!("依赖 manifest 读取失败: {spec}");
+                    eprintln!("failed to read dependency manifest: {spec}");
                     continue;
                 }
             };
             let Ok(table) = manifest.parse::<toml::Table>() else {
-                eprintln!("依赖 manifest 解析失败: {spec}");
+                eprintln!("failed to parse dependency manifest: {spec}");
                 continue;
             };
             let Some(entry) = table
@@ -604,7 +625,7 @@ fn collect_translatable_deps(
             }
             dep_entries.insert(spec.clone(), format!("{spec}/{entry}"));
             added = true;
-            eprintln!("依赖已并入翻译: {spec}(入口 {entry})");
+            eprintln!("dependency merged into translation: {spec} (entry {entry})");
         }
         if !added {
             break;

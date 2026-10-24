@@ -1,4 +1,4 @@
-// 集合:数组/字典构造、spread、方法调用、成员判断。
+// Collections: array/dictionary construction, spread, method calls, membership.
 #let make-range(n) = range(n)
 #let total(nums) = nums.sum()
 #let doubled(nums) = nums.map(x => x * 2)
@@ -24,5 +24,5 @@
   }
   out
 }
-// 错误路径(M2.x):循环源须可迭代。
+// Error path: the loop source must be iterable.
 #let iter-fail() = { for x in 1 { x } }

@@ -1,84 +1,109 @@
-//! 翻译上下文与名字解析环境。
+//! Translation context and name-resolution environment.
 //!
-//! `Ctx` 贯穿翻译全程:诊断累积、宽松模式开关、临时 id 计数,以及包
-//! 模式的文件上下文。`Env` 是静态作用域的名字解析表(局部栈 + 可见
-//! 模块槽);`Ref` 是模块槽的引用形态。
+//! `Ctx` runs through the whole translation: diagnostic accumulation, the
+//! lenient-mode switch, temporary id counters, and the package-mode file
+//! context. `Env` is the static-scope name-resolution table (local stack +
+//! visible module slots); `Ref` is the reference form of a module slot.
 //!
-//! 生成物里模块级绑定编译为 per-build 槽板字段(见
-//! `_things/DESIGN-per-build.md`),所有引用都形如
-//! `rt::read(&__st.槽名)?`;`used_state` 追踪当前函数是否发出过此类
-//! 引用,决定函数体是否需要 `__st` 序言。
+//! In the generated output, module-level bindings compile to per-build
+//! slot-board fields (see `_things/DESIGN-per-build.md`) and every
+//! reference takes the form `rt::read(&__st.slot_name)?`; `used_state`
+//! tracks whether the current function has emitted any such reference,
+//! which decides whether its body needs the `__st` prologue.
 
 use super::Diag;
 use super::naming::{escape, fresh_rust_ident};
 
 pub(super) struct Ctx {
     pub(super) diags: Vec<Diag>,
-    /// 宽松模式(探索):缺口降级为占位,不作为整体失败。
+    /// Lenient mode (exploration): gaps degrade to placeholders instead of
+    /// failing the whole translation.
     pub(super) lenient: bool,
     pub(super) next_id: usize,
-    /// 包模式下当前处理的文件路径(体内字符串 import 解析用)。
+    /// Path of the file currently being translated in package mode (for
+    /// resolving in-body string imports).
     pub(super) current_file: Option<String>,
-    /// 包模式的文件集(字符串 import 解析)。
+    /// The package-mode file set (string-import resolution).
     pub(super) package_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
-    /// 包模式:文件路径 �� 生成 mod 名(体内字符串 import 取模块值)。
+    /// Package mode: file path → generated mod name (in-body string imports
+    /// take their module value from here).
     pub(super) package_mods: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
-    /// 槽名→所属文件(模块值链通配解析:体内 import cetz.draw: *)。
+    /// Slot name → owning file (for resolving module-value-chain wildcards:
+    /// in-body `import cetz.draw: *`).
     pub(super) slot_files: Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
-    /// 包模式:导出表(路径 → 名字 → 槽;体内**通配** import 的静态
-    /// 展开用——目标为已翻译文件时其导出面在翻译期已知)。
+    /// Package mode: export table (path → name → slot); used to statically
+    /// expand in-body **wildcard** imports — when the target is a translated
+    /// file, its export surface is known at translation time.
     pub(super) export_table: Option<
         std::rc::Rc<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
     >,
-    /// 当前函数体是否引用了模块槽(决定是否生成 `__st` 序言)。
+    /// Whether the current function body references a module slot (decides
+    /// whether the `__st` prologue is generated).
     pub(super) used_state: bool,
-    /// 值位置闭包(C2:闭包表达式也编译为原生体 + 签名保真 stub)的
-    /// 去重表:键 = (闭包原文, 规范化捕获名集) → (id, 是否携带 __st)。
-    /// 体代码是 (AST, 捕获名集) 的纯函数,同键必然同码;去重防同定义
-    /// 闭包在多调用点膨胀。
+    /// Dedup table for value-position closures (C2: closure expressions
+    /// also compile to a native body + signature-faithful stub):
+    /// key = (closure source text, normalized captured-name set) →
+    /// (id, whether it carries __st). Body code is a pure function of
+    /// (AST, captured-name set), so equal keys yield equal code; dedup
+    /// keeps one definition shared across call sites from ballooning.
     pub(super) closure_dedup:
         std::collections::HashMap<String, (String, bool)>,
-    /// 每调用点节点静态的发射区(`NODE_cN`,与闭包项同区发射到根)。
+    /// Emission area for per-call-site node statics (`NODE_cN`, emitted to
+    /// the root alongside closure items).
     pub(super) closure_nodes: String,
     pub(super) next_node_id: usize,
     pub(super) next_closure_id: usize,
-    /// C2 闭包 f_/D_ 汇集(发射到产物根部——跨文件去重后同一定义只
-    /// 此一份,根级可见 __State 与全部导入)。
+    /// Collection of C2 closure f_/D_ items (emitted at the root of the
+    /// output — after cross-file dedup there is exactly one copy per
+    /// definition, with root-level visibility of __State and all imports).
     pub(super) closure_items: String,
-    /// 函数体嵌套深度(>0 表示当前在生成的 f_ 函数体内;`return`
-    /// 仅在该上下文合法——外层 Rust 函数返回类型不同)。
+    /// Function-body nesting depth (>0 means we are inside a generated f_
+    /// function body; `return` is only legal there — the enclosing Rust
+    /// functions have different return types).
     pub(super) in_fn: usize,
-    /// 循环嵌套深度(break/continue 循环外形态的翻译期判定,
-    /// scripting-loop 错误测试驱动)。
+    /// Loop nesting depth (translate-time check for break/continue outside
+    /// a loop, driven by the scripting-loop error tests).
     pub(super) in_loop: usize,
-    /// 可变槽集合(被就地修改的顶层绑定槽名):读点走 read_ms、
-    /// 填点走 fill_ms、修改点读改写回(write_ms)。
+    /// Mutable-slot set (slot names of top-level bindings mutated in
+    /// place): reads go through read_ms, fills through fill_ms, mutations
+    /// do read-modify-write (write_ms).
     pub(super) mutable_slots: std::collections::HashSet<String>,
-    /// 闭包体翻译中(闭包按需携带 __st,模块槽直接引用不可用;
-    /// 对照 typst:闭包改捕获名本就报错,留给诊断承载)。
+    /// Currently translating a closure body (closures carry __st on
+    /// demand; direct module-slot references are unavailable — mirroring
+    /// typst: writing a captured name is already an error there, left to
+    /// diagnostics).
     pub(super) in_closure: usize,
-    /// 捕获名栈(每层闭包一帧,元素为绑定进闭包环境的**捕获名
-    /// rust 局部名**;对照 typst 闭包 captured 作用域的
-    /// `Binding::capture` 只读标):赋值/可变方法落在捕获局部上时,
-    /// 运行期报 "variables from outside the function are read-only"
-    /// (对照 `Binding::write` 的 Captured 拒绝)。
+    /// Captured-name stack (one frame per closure level; elements are the
+    /// **captured-name Rust locals** bound into the closure environment;
+    /// mirrors typst's read-only `Binding::capture` marker in the closure's
+    /// captured scope): assignments / mutating methods landing on a
+    /// captured local report "variables from outside the function are
+    /// read-only" at runtime (mirroring `Binding::write`'s rejection of
+    /// Captured).
     pub(super) captured_locals: Vec<std::collections::HashSet<String>>,
-    /// 表达式位置 `let` 的提升槽栈(每层可扫描作用域一帧:块/裸表达式
-    /// 函数体/内容项;键 = 绑定名,值 = 块顶 `let mut` 的提升 rust 名)。
-    /// 对照 typst:`let` 是表达式,求值为 none 并在**当前词法作用域**
-    /// 绑定/遮蔽名字,对同作用域后续求值立即可见——两阶段翻译里,
-    /// 绑定名在位点压入 env(位点前的引用仍解析外层),值写进提升槽
-    /// (块退出即弃,作用域精确)。
+    /// Stack of hoisting-slot frames for expression-position `let` (one
+    /// frame per scannable scope: block / bare-expression function body /
+    /// content item; key = binding name, value = the hoisted Rust name of
+    /// the block-top `let mut`). Mirrors typst: `let` is an expression that
+    /// evaluates to none and binds/shadows the name in the **current
+    /// lexical scope**, immediately visible to later evaluations of the
+    /// same scope — in the two-pass translation, the binding name is pushed
+    /// into env at its position (references before the position still
+    /// resolve to the outer scope) while the value is written to a hoisted
+    /// slot (discarded when the block exits, so scoping stays exact).
     pub(super) let_hoists: Vec<std::collections::HashMap<String, String>>,
-    /// 错误站点 span 表:(源文件路径, AST span 原始 u64)→ 站点索引
-    /// (生成物以 `*S{idx}` 引用;运行期经 `rt::source_span` 以当前
-    /// 进程的 FileId 编号物化——span 自包含,宿主无预 intern 约定)。
+    /// Error-site span table: (source file path, raw AST span u64) → site
+    /// index (the generated code references `*S{idx}`; at runtime it is
+    /// materialized via `rt::source_span` with the current process's
+    /// FileId numbering — spans are self-contained, no host pre-intern
+    /// convention).
     pub(super) span_table: Vec<(String, u64)>,
     span_index: std::collections::HashMap<u64, usize>,
 }
 
-/// 点分名字的字段链(`process.aabb` → 两层 rt::field;单名直访)。
-/// 对照 typst 字段访问语义:名字里的点号逐段取字段。
+/// Field chain for a dotted name (`process.aabb` → two rt::field calls; a
+/// single name is accessed directly). Mirrors typst's field-access
+/// semantics: dots in a name walk the fields segment by segment.
 pub(super) fn field_access_chain(expr: &str, dotted: &str) -> String {
     let mut segs = dotted.split('.');
     let first = segs.next().unwrap_or(dotted);
@@ -93,37 +118,46 @@ pub(super) fn field_access_chain(expr: &str, dotted: &str) -> String {
     out
 }
 
-/// 模块绑定的引用形态(统一指向 per-build 槽板字段)。
+/// Reference form of a module binding (uniformly points at a per-build
+/// slot-board field).
 #[derive(Clone)]
 
 pub(super) enum Ref {
-    /// 顶层绑定槽(每构建写一次)。
+    /// Top-level binding slot (written once per build).
     Slot(String),
-    /// 来自模块值字段的绑定(`import deps.oxifmt: strfmt`):
-    /// `file` 为该项的**目标文件身份**(入口导出表→槽→文件链式解析
-    /// 得出,仅静态可达时携带)——体内 `import 项名: *` 据此静态展开
-    /// (alchemist 的 `import draw: *`);None 则通配落运行期层。
+    /// Binding taken from a module-value field (`import deps.oxifmt:
+    /// strfmt`): `file` is the **target-file identity** of the item
+    /// (derived by chaining entry export table → slot → file; present only
+    /// when statically reachable) — in-body `import item: *` expands
+    /// statically from it (as in `import draw: *`); None leaves the
+    /// wildcard to the runtime layer.
     ModuleField {
         expr: String,
         name: String,
         file: Option<String>,
     },
-    /// 直接以表达式求值的绑定(模块值本身或其字段)。
+    /// Binding evaluated directly as an expression (the module value itself
+    /// or one of its fields).
     Value(String),
-    /// 创建期物化的全局名:槽有值读槽(typst 创建期捕获),无值
-    /// 回退调用期全局查找(typst 创建期不可见名字的语义)。
+    /// Global name materialized at creation time: read the slot when it
+    /// holds a value (typst's creation-time capture), otherwise fall back
+    /// to a call-time global lookup (the semantics of names invisible at
+    /// creation time).
     GlobalFallback { slot: String, name: String },
 }
 
-/// 名字解析环境:局部栈 + 可见模块槽(静态作用域,按声明序累积)。
+/// Name-resolution environment: local stack + visible module slots
+/// (static scoping, accumulated in declaration order).
 #[derive(Clone)]
 pub(super) struct Env {
     pub(super) locals: Vec<(String, String)>,
     pub(super) module: Vec<(String, Ref)>,
-    /// 运行期通配层(`import <运行期模块值>: *` 在体内引入,仅该
-    /// 作用域生效;元素为层的 Rust 局部名,内层在尾)。名字查找:
-    /// 局部 → 层(运行期,遮蔽外层模块名/全局,对照 typst-eval
-    /// 通配 import 的 scopes.top.bind)→ 模块 → 全局。
+    /// Runtime wildcard layer (introduced in-scope by `import <runtime
+    /// module value>: *` in a body; effective only in that scope; elements
+    /// are the layer's Rust local names, innermost last). Name lookup:
+    /// locals → layers (runtime; shadows outer module names and globals,
+    /// mirroring typst-eval's wildcard-import scopes.top.bind) → module →
+    /// global.
     pub(super) wildcards: Vec<String>,
 }
 
@@ -161,9 +195,11 @@ impl Ctx {
         id
     }
 
-    /// 为一个**编译期常量片段源**发射每调用点静态
-    /// `pub(crate) static NODE_cN: LazyLock<(SyntaxNode, usize)>`,
-    /// 返回静态名——热路径创建零锁零查找(静态即缓存)。
+    /// Emit a per-call-site static
+    /// `pub(crate) static NODE_cN: LazyLock<(SyntaxNode, usize)>` for a
+    /// compile-time-constant snippet source and return the static's name —
+    /// zero locks and zero lookups on the hot creation path (the static is
+    /// the cache).
     pub(super) fn closure_node_static(&mut self, src: &str) -> String {
         let name = format!("NODE_c{}", self.next_node_id);
         self.next_node_id += 1;
@@ -173,9 +209,11 @@ impl Ctx {
         name
     }
 
-    /// 登记一个源 span,返回生成物里的引用 `*S{idx}`(错误站点用,
-    /// 对照原版:错误的定位指向源表达式;生成物里是首次使用时按
-    /// 当前进程 FileId 物化的 LazyLock——见 `rt::source_span`)。
+    /// Register a source span and return its generated reference `*S{idx}`
+    /// (for error sites; mirrors the original: an error's position points
+    /// at the source expression; in the output it is a LazyLock
+    /// materialized on first use with the current process's FileId — see
+    /// `rt::source_span`).
     pub(super) fn span_of(&mut self, span: typst_syntax::Span) -> String {
         let raw = span.into_raw().get();
         let next = self.span_table.len();
@@ -190,14 +228,16 @@ impl Ctx {
         format!("*S{idx}")
     }
 
-    /// 登记源 span 并以其常量名填充格式串中的 `{at}` 占位。
+    /// Register a source span and use its constant name to fill the `{at}`
+    /// placeholder in a format string.
     pub(super) fn span_fmt(&mut self, span: typst_syntax::Span, fmt: String) -> String {
         let at = self.span_of(span);
         fmt.replace("{at}", &at)
     }
 
-    /// 生成错误站点 span 块(首次使用时以当前进程 FileId 物化——
-    /// 自包含,无宿主预 intern 约定;无站点则空)。
+    /// Emit the error-site span block (materialized on first use with the
+    /// current process's FileId — self-contained, no host pre-intern
+    /// convention; empty when there are no sites).
     pub(super) fn span_consts(&self) -> String {
         if self.span_table.is_empty() {
             return String::new();
@@ -220,7 +260,8 @@ impl Ctx {
         });
     }
 
-    /// 把模块槽引用编译为表达式(标记当前函数用到 `__st`)。
+    /// Compile a module-slot reference into an expression (marking that the
+    /// current function uses `__st`).
     pub(super) fn ref_value(&mut self, module_ref: &Ref) -> String {
         self.used_state = true;
         match module_ref {
@@ -240,7 +281,8 @@ impl Ctx {
     }
 }
 
-/// 在局部栈压入新绑定,返回未冲突的 rust 名。
+/// Push a new binding onto the local stack, returning a clash-free Rust
+/// name.
 pub(super) fn bind_local(env: &mut Env, name: &str) -> String {
     let rust = fresh_rust_ident(name, &env.locals);
     env.locals.push((name.to_string(), rust.clone()));

@@ -1,5 +1,5 @@
-//! 生成代码的标识符与文本工具:typst 名字 → 合法 rust 标识符、
-//! 字符串转义、大小写变形。
+//! Identifier and text helpers for generated code: typst names → valid
+//! Rust identifiers, string escaping, case conversion.
 
 pub(super) fn sanitize(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -7,24 +7,28 @@ pub(super) fn sanitize(name: &str) -> String {
         if c.is_ascii_alphanumeric() || c == '_' {
             out.push(c);
         } else {
-            // 非 ASCII(如希腊字母参数名 `θ`)与符号:按码点编码,
-            // 保名单射(`θ`→`u03b8`,不与 ASCII 名冲突、不同
-            // unicode 名互异),而非折叠成 `_`(会撞名且 `mut _`
-            // 非法)。
+            // Non-ASCII (e.g. Greek parameter names like `θ`) and symbols:
+            // encode by code point to keep the mapping injective (`θ` →
+            // `u03b8`, no clash with ASCII names, distinct unicode names
+            // stay distinct) rather than folding to `_` (which would
+            // collide, and `mut _` is illegal anyway).
             out.push_str(&format!("u{:04x}", c as u32));
         }
     }
-    // Rust 关键字加原始标识符前缀(typst 允许 `fn` 等作参数名)。
+    // Rust keywords get a raw-identifier prefix (typst allows `fn` etc. as
+    // parameter names).
     const KEYWORDS: &[&str] = &[
         "fn", "let", "if", "else", "while", "for", "in", "loop", "match", "return", "break",
         "continue", "struct", "enum", "impl", "trait", "type", "mod", "pub", "use", "as", "const",
         "static", "mut", "ref", "move", "true", "false", "self", "super", "crate", "dyn", "where",
         "unsafe", "async", "await", "box", "union", "extern", "try", "gen",
     ];
-    // r# 不适用的保留字(self/Self/super/crate 禁作 raw ident):
-    // 加下划线后缀(cmarker 驱动:`super` 生成 `r#super` 被 rustc 拒)。
-    // 另有一类**保留未用**关键字(rustc 词法保留,r# 也拒或列入即拒):
-    // override/priv/typeof 等——同样后缀(codly 驱动:`override` 裸出)。
+    // Reserved words where `r#` does not apply (self/Self/super/crate are
+    // forbidden as raw idents): underscore suffix instead (emitting
+    // `r#super` gets rejected by rustc). There is also a class of
+    // **reserved-but-unused** keywords (lexically reserved by rustc; `r#`
+    // is rejected or they are rejected on sight): override/priv/typeof
+    // etc. — same suffix.
     const RAW_ILLEGAL: &[&str] = &[
         "self", "Self", "super", "crate", "override", "priv", "typeof", "unsized", "virtual",
         "yield", "abstract", "become", "do", "final", "macro",
@@ -43,16 +47,18 @@ pub(super) fn sanitize(name: &str) -> String {
     out
 }
 
-/// 生成代码作用域内自用的裸标识符(函数参数 engine/context/span、
-/// 模块别名 rt/ops/std、类型名等)。用户局部变量同名会遮蔽它们
-/// (finite 依赖 diagraph-layout 的 `let engine = ...` 曾使生成码把
-/// Value 当 &Engine 用)——命中即加 `__trust_` 前缀。
+/// Bare identifiers reserved for the generated code's own scopes (function
+/// parameters engine/context/span, module aliases rt/ops/std, type names,
+/// etc.). A same-named user local would shadow them (a user `let engine =
+/// ...` once made generated code use a Value as an &Engine) — hits get a
+/// `__trust_` prefix.
 pub(super) const RESERVED_RUST_IDENTS: &[&str] = &[
     "engine", "context", "span", "rt", "ops", "std", "SPAN", "Value", "Args", "Dict",
     "Unit", "SourceResult", "Tracked", "Engine", "Context",
 ];
 
-/// 同名局部按出现序加序号,保证生成 rust 名互异。
+/// Number same-named locals by order of appearance so generated Rust names
+/// stay distinct.
 pub(super) fn fresh_rust_ident(name: &str, locals: &[(String, String)]) -> String {
     let mut base = sanitize(name);
     if RESERVED_RUST_IDENTS.contains(&base.as_str()) {
@@ -67,7 +73,8 @@ pub(super) fn fresh_rust_ident(name: &str, locals: &[(String, String)]) -> Strin
     candidate
 }
 
-/// 字符串嵌入生成代码的字面量转义(反斜杠与双引号)。
+/// Literal escaping for strings embedded into generated code (backslash and
+/// double quote).
 pub(super) fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -88,8 +95,9 @@ pub(super) fn uppercase(s: &str) -> String {
     }
 }
 
-/// 结构体槽名(DEF/G/IMPORT 等标识符拼接)用的清洗:不产出 `r#`
-/// 前缀(拼接后非法),关键字转为 `_kw` 后缀。
+/// Sanitizing for struct slot names (concatenated identifiers like
+/// DEF/G/IMPORT): must not produce an `r#` prefix (illegal inside a
+/// concatenation); keywords get a `_kw` suffix instead.
 pub(super) fn sanitize_key(name: &str) -> String {
     let mut out = sanitize(name);
     if let Some(stripped) = out.strip_prefix("r#") {

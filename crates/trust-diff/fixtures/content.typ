@@ -1,4 +1,4 @@
-// content 块:文本/空白/换行/段落/嵌入表达式。
+// Content blocks: text/whitespace/linebreaks/paragraphs/embedded expressions.
 #let label(x) = [label: #x]
 #let badge(name, n) = [(#name × #n)]
 #let plain() = [hello world]

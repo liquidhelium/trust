@@ -1,8 +1,11 @@
-//! 性能对照:解释器(golden)与生成物执行同一段纯计算,
-//! 证明 L0 直译层已消除解释器每调用常数(nuitka 路线的核心收益)。
+//! Performance comparison: the interpreter (golden) and the generated code
+//! run the same pure computation, measuring whether the direct-translation
+//! layer removes the interpreter's per-call constant overhead (the core
+//! benefit sought from a Nuitka-style approach).
 //!
-//! comemo 会按参数 memoize,因此每轮计时使用递增参数避开缓存;
-//! 模块装配(module_init / eval_main)在计时区外各做一次:
+//! comemo memoizes by arguments, so each timed round uses increasing
+//! arguments to stay off the cache; module assembly (module_init /
+//! eval_main) runs once per side outside the timed region:
 //!
 //! `cargo test -p trust-diff --release --test bench -- --nocapture --ignored`
 
@@ -13,7 +16,8 @@ use typst::foundations::{Module, Scope};
 
 const BODY: &str = include_str!("../fixtures/bench.typ");
 
-/// 一轮负载(带偏移避免缓存命中):返回调用表达式。
+/// One round of workload (offset avoids cache hits): returns the call
+/// expressions.
 fn round(calls: &[&str], offset: i64) -> Vec<String> {
     calls
         .iter()
@@ -21,7 +25,7 @@ fn round(calls: &[&str], offset: i64) -> Vec<String> {
         .collect()
 }
 
-/// 装配好的执行侧:World + `m` 模块作用域。
+/// An assembled execution side: World + the `m` module scope.
 struct Side {
     world: InjectWorld,
     scope: Scope,
@@ -56,7 +60,7 @@ fn run(side: &Side, calls: &[String]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "性能对照,显式运行"]
+#[ignore = "performance comparison; run explicitly"]
 fn interpreter_vs_compiled() {
     let templates = [
         "m.fib-mod(12000 + N)",
@@ -70,7 +74,7 @@ fn interpreter_vs_compiled() {
     let compiled = setup_compiled();
     let first = round(&templates, 0);
     let (g, r) = (run(&golden, &first), run(&compiled, &first));
-    assert_eq!(g, r, "基准负载差分失败:\n{g:?}\n{r:?}");
+    assert_eq!(g, r, "bench workload mismatch:\n{g:?}\n{r:?}");
 
     let mut interp_total = 0u128;
     let mut comp_total = 0u128;
@@ -96,8 +100,8 @@ fn interpreter_vs_compiled() {
             interp_one as f64 / comp_one as f64
         );
     }
-    println!("interpreter: {interp_total} ms (5 轮合计)");
-    println!("compiled:    {comp_total} ms (5 轮合计)");
+    println!("interpreter: {interp_total} ms (5 rounds total)");
+    println!("compiled:    {comp_total} ms (5 rounds total)");
     println!(
         "speedup:     {:.1}x",
         interp_total as f64 / comp_total as f64

@@ -1,21 +1,27 @@
-//! 注入式 Typst World——TRUST 的宿主接入层,**原版 typst,零 fork**。
+//! Injectable Typst World — TRUST's host integration layer, on **stock
+//! typst, zero fork**.
 //!
-//! 两条注入路径,全部使用公开 API(已在本 crate 的测试中验证):
+//! Two injection paths, both through public APIs (verified by this crate's
+//! tests):
 //!
-//! - **全局模块注入**:`Library::builder().build()` 之后对
-//!   `library.global` 做 `scope_mut().define(name, module)`,并刷新
-//!   `std` 绑定(build() 给 std 的是 global 旧 Arc 的副本)。此后
-//!   `#import cetz: ...` / `cetz.util.add(...)` 全局可见。
-//! - **包虚拟化**:typst-eval 解析 `@ns/name:ver` 时只向 World 索取
-//!   `VirtualRoot::Package(spec)` 下的 `typst.toml` 与入口文件
-//!   (见 `typst-eval/src/import.rs::resolve_package`)。本 World 对
-//!   指定 spec 返回虚拟 manifest 与 shim 入口(如 `#import cetz: *`),
-//!   原生模块即被当作该版本的包提供;未虚拟化的 spec 照常走
-//!   `file()`/`source()` 的其他来源。
+//! - **Global module injection**: after `Library::builder().build()`, do
+//!   `scope_mut().define(name, module)` on `library.global` and refresh the
+//!   `std` binding (build() gives std a copy of global's old Arc).
+//!   Afterwards `#import cetz: ...` / `cetz.util.add(...)` are visible
+//!   globally.
+//! - **Package virtualization**: when typst-eval resolves `@ns/name:ver`,
+//!   it only asks the World for the `typst.toml` and entry file under
+//!   `VirtualRoot::Package(spec)` (see
+//!   `typst-eval/src/import.rs::resolve_package`). This World returns a
+//!   virtual manifest and a shim entry (e.g. `#import cetz: *`) for the
+//!   given spec, so the native module is served as that version of the
+//!   package; non-virtualized specs keep going through the other sources
+//!   of `file()`/`source()` as usual.
 //!
-//! 闭包的纯 Rust 构造见本 crate 测试:`Closure` 字段全公开
-//! (语法节点 + defaults + captured scope),`Func::from(Closure)` 即
-//! typst 一等函数;`Func::with` 可组合出携带预置参数的函数。
+//! Pure-Rust closure construction is shown in this crate's tests: the
+//! `Closure` fields are all public (syntax node + defaults + captured
+//! scope), `Func::from(Closure)` is a first-class typst function, and
+//! `Func::with` composes functions carrying preset arguments.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,17 +40,18 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
-/// 以内存文件 + 注入库运行的 [`World`]。
+/// Signature of the module evaluation entry: the host calls it once per
+/// build and gets that build's module.
 ///
-/// 评估专用(`font()` 恒空),足够支撑不落排版的求值测试;后续需要
-/// 排版对拍时再挂 FontBook。
-/// 模块求值入口的签名:宿主每次构建调用一次,返回该构建的模块。
-///
-/// 这是 typst 模块求值的镜像(`_things/DESIGN-per-build.md`):
-/// 生成物内部用 per-build 槽板存顶层绑定,构建标识取 World 身份,
-/// 因此一个 World 实例 = 一次构建。
+/// This mirrors typst's module evaluation: the generated code stores
+/// top-level bindings in per-build slots, and the build identity is the
+/// World's identity, so one World instance = one build.
 pub type ModuleInit = trust_runtime::ModuleInit;
 
+/// A [`World`] running on in-memory files with an injected library.
+///
+/// Evaluation-only (`font()` is always empty) — enough for tests that never
+/// reach layout; mount a FontBook later if render comparisons are needed.
 pub struct InjectWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
@@ -52,23 +59,28 @@ pub struct InjectWorld {
     main: FileId,
     sources: HashMap<FileId, Source>,
     files: HashMap<FileId, Bytes>,
-    /// 外部包磁盘根(如 ~/.cache/typst/packages):未命中的包路径回退到这里。
+    /// Disk root for external packages (e.g. ~/.cache/typst/packages):
+    /// unresolved package paths fall back here.
     packages_root: Option<PathBuf>,
-    /// 项目根磁盘目录:未命中的 Project 相对路径回退到这里读文件
-    /// (如 wasm 插件等非源文件)。
+    /// Project-root disk directory: unresolved Project-relative paths fall
+    /// back here to read files (e.g. wasm plugins and other non-source
+    /// files).
     fs_root: Option<PathBuf>,
-    /// 套件模式固定日期(typst 官方 tests 世界:1970-01-01 12:00,
-    /// today 任意 offset 均返回同一时刻)。None = 系统当前时间。
+    /// Fixed date in suite mode (typst's official tests world: 1970-01-01
+    /// 12:00; today returns the same instant for any offset). None = the
+    /// system's current time.
     suite_today: Option<Datetime>,
-    /// 包回退源的**解析缓存**(FileId → Source):没有它,每次
-    /// `source()` 回退都 `Source::new` 完整重解析——comemo 命中校验
-    /// 重放读取时也不例外,稳态编译会每轮重解析全部外部包文件
-    /// (基准"热稳态不对称"的主要制品,2026-10-22 基准剖析发现)。
+    /// **Parse cache** for package fallback sources (FileId → Source):
+    /// without it, every `source()` fallback re-parses from scratch via
+    /// `Source::new` — even when comemo replays reads to validate cache
+    /// hits — so steady-state compilation would re-parse every external
+    /// package file on each round.
     package_sources: std::sync::RwLock<HashMap<FileId, Source>>,
 }
 
-/// 世界的廉价克隆(字段皆 Arc/值语义;批驱动共享基座:字体、
-/// 源表、文件表克隆后各测试只改 main 与注入模块)。
+/// Cheap clone of the world (all fields are Arc/value semantics; a shared
+/// base for test batches: fonts, the source table, and the file table are
+/// cloned once and each test only changes main and the injected modules).
 impl Clone for InjectWorld {
     fn clone(&self) -> Self {
         Self {
@@ -87,14 +99,14 @@ impl Clone for InjectWorld {
 }
 
 impl InjectWorld {
-    /// 新建:主文件文本 + 要注入全局作用域的模块列表 `(名字, 模块)`,
-    /// `sys.inputs` 为空。
+    /// Creates a new world: main-file text + the list of modules to inject
+    /// into the global scope `(name, module)`; `sys.inputs` is empty.
     pub fn new(main_text: &str, modules: impl IntoIterator<Item = (&'static str, Module)>) -> Self {
         Self::with_inputs(main_text, modules, Dict::new())
     }
 
-    /// 新建并设定 `sys.inputs`(构造期烙进 Library,见
-    /// `_things/DESIGN-per-build.md`:inputs 即 Library 内容)。
+    /// Creates a new world with `sys.inputs` set (baked into the Library at
+    /// construction; inputs are Library contents).
     pub fn with_inputs(
         main_text: &str,
         modules: impl IntoIterator<Item = (&'static str, Module)>,
@@ -110,8 +122,9 @@ impl InjectWorld {
         for (name, module) in modules {
             library.global.scope_mut().define(name, module);
         }
-        // build() 中 std 绑定持有 global 的另一个 Arc 副本;上面
-        // scope_mut 的写时复制会让两者分叉,这里刷新保持一致。
+        // In build(), the std binding holds another Arc copy of global; the
+        // scope_mut writes above are copy-on-write and would fork the two —
+        // refresh here to keep them consistent.
         library.std = Binding::detached(library.global.clone().into_value());
 
         let packages_root = std::env::var_os("USER_HOME")
@@ -138,12 +151,13 @@ impl InjectWorld {
         }
     }
 
-    /// 套件模式:镜像 typst 官方测试世界(tests/src/world.rs)——
-    /// Features::all、测试全局(`test`/`test-repr`/`print`/`lines`/
-    /// `bounds`、色 `conifer`/`forest`)、默认样式(页宽 120pt、
-    /// 边距 10pt、页高 auto、字号 10pt——内页恰好 100pt 宽)与固定
-    /// 日期。驱动官方 tests/suite 对拍时,golden 与 gen 两侧都要在
-    /// 注入模块**之前**调用。
+    /// Suite mode: mirrors typst's official tests world (tests/src/world.rs)
+    /// — Features::all, the test globals (`test`/`test-repr`/`print`/
+    /// `lines`/`bounds`, colors `conifer`/`forest`), default styles (page
+    /// width 120pt, margins 10pt, page height auto, font size 10pt — the
+    /// inner page is exactly 100pt wide) and the fixed date. When driving
+    /// the official tests/suite, call this on both the golden and gen sides
+    /// **before** injecting modules.
     pub fn enable_suite(&mut self) {
         let mut lib = typst::Library::builder()
             .with_features(typst::Features::all())
@@ -172,20 +186,24 @@ impl InjectWorld {
         self.suite_today = Some(Datetime::from_ymd(1970, 1, 1).expect("valid fixed date"));
     }
 
-    /// 注入原生模块:驱动 `module_init`(模块求值的镜像,per-build 槽板
-    /// 按 library 内容注册),把返回的模块注入全局作用域并重建 Library
-    /// (重包 LazyHash 保持 comemo 哈希正确)。模块求值经 comemo memoize
-    /// 缓存(与 `typst_eval::eval` 同一机制):同 (world 读取约束,
-    /// library 内容, init 函数) 不二次求值,依赖变化自动失效。
+    /// Injects a native module: drives `module_init` (the mirror of module
+    /// evaluation; per-build slots register by library contents), injects
+    /// the returned module into the global scope, and rebuilds the Library
+    /// (rewrapping the LazyHash keeps comemo's hashing correct). Module
+    /// evaluation is cached via comemo memoize (the same mechanism as
+    /// `typst_eval::eval`): the same (world read constraints, library
+    /// contents, init fn) is not evaluated twice, and dependency changes
+    /// invalidate automatically.
     pub fn init_native_module(&mut self, name: &'static str, init: ModuleInit) -> Module {
-        // 薄包装:协议本体在 trust_runtime(宿主接入协议,见
-        // rt::init_module / rt::bind_module);InjectWorld 只是测试世界。
+        // Thin wrapper: the protocol itself lives in trust_runtime (the
+        // host integration protocol, see rt::init_module / rt::bind_module);
+        // InjectWorld is only a test world.
         let world: &dyn World = self;
         let module =
             trust_runtime::init_module(world.track(), &self.library, init).unwrap_or_else(
                 |diags| {
                     panic!(
-                        "module_init 模块求值失败: {:?}",
+                        "module_init evaluation failed: {:?}",
                         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
                     )
                 },
@@ -194,14 +212,16 @@ impl InjectWorld {
         module
     }
 
-    /// 以模块替换全局作用域中的同名定义并重建 Library。
-    /// 包路径 → 本地包仓库布局的磁盘路径(外部包回退)。
+    /// Replaces the same-named definition in the global scope with the
+    /// module and rebuilds the Library.
+    /// Package path → disk path in the local package repository layout
+    /// (external package fallback).
     fn package_path(&self, id: FileId) -> Option<PathBuf> {
         let root = self.packages_root.as_ref()?;
         let VirtualRoot::Package(spec) = id.root() else {
             return None;
         };
-        // 布局:{root}/{namespace}/{name}/{version}/{vpath}。
+        // Layout: {root}/{namespace}/{name}/{version}/{vpath}.
         let mut path = root
             .join(spec.namespace.as_str())
             .join(spec.name.as_str())
@@ -214,9 +234,10 @@ impl InjectWorld {
         path.exists().then_some(path)
     }
 
-    /// 换主文件(批驱动:基座克隆后逐测试设 main;path 为项目根
-    /// 相对路径,如 `tests/suite/model/x.typ`——相对 import 按真实
-    /// 目录解析,与官方 tests 世界的 vpath 一致)。
+    /// Swaps the main file (for test batches: clone the base, then set main
+    /// per test; `path` is a project-root-relative path such as
+    /// `tests/suite/model/x.typ` — relative imports resolve against the
+    /// real directory, matching the official tests world's vpaths).
     pub fn set_main(&mut self, path: &str, text: &str) {
         let id = RootedPath::new(
             VirtualRoot::Project,
@@ -227,14 +248,16 @@ impl InjectWorld {
         self.sources.insert(id, Source::new(id, text.to_string()));
     }
 
-    /// 直连注入模块(不经 comemo memo):批驱动每测试单文件装配,
-    /// memo 键对纯原生求值不稳定(世界读取为空约束会串味),直接
-    /// 求值后绑定。
+    /// Injects a module directly (bypassing comemo memo): test batches
+    /// assemble a single file per test, and the memo key is unstable for
+    /// purely native evaluation (an empty world-read constraint would conflate
+    /// distinct builds), so the module is evaluated directly and then bound.
     pub fn inject_module(&mut self, name: &'static str, module: Module) {
         self.library = trust_runtime::bind_module(&self.library, name, module);
     }
 
-    /// 追加一个相对主文件的源文件(多文件包形态)。
+    /// Appends a source file relative to the main file (multi-file package
+    /// shapes).
     pub fn add_source(&mut self, path: &str, text: &str) {
         let id = RootedPath::new(
             VirtualRoot::Project,
@@ -244,11 +267,13 @@ impl InjectWorld {
         self.sources.insert(id, Source::new(id, text.to_string()));
     }
 
-    /// 虚拟化一个包:`spec` 的包解析到 `entry` 入口文件,内容为
-    /// `entry_text`(shim,通常一行 `#import <全局模块>: *`)。
+    /// Virtualizes a package: the package `spec` resolves to the `entry`
+    /// entry file with contents `entry_text` (a shim, usually one line
+    /// `#import <global module>: *`).
     ///
-    /// 由此,`#import "<spec>": ...` 不经磁盘与网络,直接落到注入的
-    /// 原生模块;其他包不受影响。
+    /// With this, `#import "<spec>": ...` lands on the injected native
+    /// module without touching disk or network; other packages are
+    /// unaffected.
     pub fn add_virtual_package(
         &mut self,
         spec: &str,
@@ -279,9 +304,11 @@ impl InjectWorld {
         Ok(())
     }
 
-    /// 给(已存在的)虚拟包追加数据文件(wasm 插件、图片等)——包内
-    /// 相对读取(`plugin("plugin.wasm")` / `read("data.csv")`)按 spec
-    /// 根解析;golden 侧经包缓存回退读到真实文件,gen 侧据此补齐。
+    /// Appends a data file to an (existing) virtual package (wasm plugins,
+    /// images, ...) — in-package relative reads (`plugin("plugin.wasm")` /
+    /// `read("data.csv")`) resolve against the spec root; the golden side
+    /// reads the real file via the package-cache fallback, and the gen side
+    /// supplies it here.
     pub fn add_virtual_package_file(
         &mut self,
         spec: &str,
@@ -300,8 +327,9 @@ impl InjectWorld {
         Ok(())
     }
 
-    /// 挂一个项目根数据文件(生成物顶层包的 span 走 Project 根,
-    /// 包内相对读取解析到项目根——探针据此双挂)。
+    /// Mounts a project-root data file (the generated top-level package's
+    /// spans use the Project root, and in-package relative reads resolve to
+    /// the project root — probes mount data on both sides this way).
     pub fn add_file(&mut self, path: &str, data: Vec<u8>) {
         let id = RootedPath::new(
             VirtualRoot::Project,
@@ -311,8 +339,9 @@ impl InjectWorld {
         self.files.insert(id, Bytes::new(data));
     }
 
-    /// 挂载字体(排版/渲染用):`font()` 与 `book()` 从此供给。
-    /// 评估专用场景无需调用;渲染对拍时挂 `typst-assets` 或系统字体。
+    /// Mounts fonts (for layout/rendering): `font()` and `book()` serve
+    /// them from here on. Evaluation-only scenarios need not call this;
+    /// mount `typst-assets` or system fonts for render comparisons.
     pub fn set_fonts(&mut self, fonts: Vec<Font>) {
         let mut book = FontBook::new();
         for font in &fonts {
@@ -322,8 +351,9 @@ impl InjectWorld {
         self.book = LazyHash::new(book);
     }
 
-    /// 以 typst-eval 求值主文件,得到模块(与 typst 编译器的模块求值
-    /// 同一路径,含包解析)。
+    /// Evaluates the main file with typst-eval and returns the module (the
+    /// same module-evaluation path as the typst compiler, package
+    /// resolution included).
     pub fn eval_main(&self) -> SourceResult<Module> {
         let mut sink = Sink::new();
         let source = self
@@ -331,7 +361,8 @@ impl InjectWorld {
             .get(&self.main)
             .cloned()
             .expect("main source present");
-        // Track 只实现于 `dyn World`,先升格再 track(与 typst::compile 同法)。
+        // Track is only implemented for `dyn World`; upcast first, then
+        // track (same as typst::compile).
         let world: &dyn World = self;
         typst_eval::eval(
             world.track(),
@@ -343,8 +374,9 @@ impl InjectWorld {
         )
     }
 
-    /// 以代码模式求值一段字符串;`scope` 成为 VM 的顶层作用域,
-    /// 可直接注入额外绑定(差分测试的执行口)。
+    /// Evaluates a string in code mode; `scope` becomes the VM's top-level
+    /// scope, so extra bindings can be injected directly (the execution
+    /// entry for differential tests).
     pub fn with_engine<R>(&self, f: impl FnOnce(&mut Engine) -> R) -> R {
         let mut sink = Sink::new();
         let world: &dyn World = self;
@@ -400,7 +432,8 @@ impl World for InjectWorld {
         if let Some(source) = self.sources.get(&id) {
             return Ok(source.clone());
         }
-        // 包路径回退:磁盘上的包仓库;解析一次进缓存(见字段注释)。
+        // Package path fallback: the on-disk package repository; parse once
+        // into the cache (see the field comment).
         if let Some(cached) = self.package_sources.read().unwrap().get(&id) {
             return Ok(cached.clone());
         }
@@ -421,7 +454,8 @@ impl World for InjectWorld {
         if let Some(bytes) = self.files.get(&id) {
             return Ok(bytes.clone());
         }
-        // 对源文件,提供其文本的字节视图(World trait 文档认可的等价物)。
+        // For source files, serve a byte view of their text (an equivalent
+        // the World trait docs sanction).
         if let Some(src) = self.sources.get(&id) {
             return Ok(Bytes::from_string(src.text().to_string()));
         }
@@ -429,8 +463,9 @@ impl World for InjectWorld {
             let bytes = std::fs::read(&path).map_err(|_| FileError::NotFound(path.clone()))?;
             return Ok(Bytes::new(bytes));
         }
-        // 项目根文件回退(wasm 插件、数据文件等)。vpath 以 `/` 开头,
-        // join 前必须剥掉,否则会把根整个替换掉。
+        // Project-root file fallback (wasm plugins, data files, ...). The
+        // vpath starts with `/`, which must be stripped before join or it
+        // would replace the root entirely.
         if let Some(root) = &self.fs_root
             && id.root() == &VirtualRoot::Project
         {
@@ -449,10 +484,11 @@ impl World for InjectWorld {
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        // 套件模式:对照官方 tests 世界 Time::fixed(1970-01-01
-        // 12:00).today——结果**只含日期**(时刻截断),offset 秒须在
-        // i32 范围内(越界 None → "unable to get the current
-        // date"),时刻随 offset 平移可跨日。
+        // Suite mode: mirrors the official tests world's
+        // Time::fixed(1970-01-01 12:00).today — the result **carries the
+        // date only** (the time-of-day is truncated); offset seconds must
+        // fit in i32 (out of range → None → "unable to get the current
+        // date"), and shifting by the offset may cross a day boundary.
         if self.suite_today.is_some() {
             let secs = match offset {
                 None => 0.0f64,
@@ -472,14 +508,15 @@ impl World for InjectWorld {
                     total
                 }
             };
-            let shifted = 43_200.0 + secs; // 12:00 起算
+            let shifted = 43_200.0 + secs; // counted from 12:00
             let days = shifted.div_euclid(86_400.0) as i64;
             let (y, m, d) = civil_from_days(days);
             return Datetime::from_ymd(y as i32, m as u8, d as u8);
         }
-        // 系统当前时间(带时区偏移;测试世界两侧同源,touying 的
-        // `sys.datetime` 等日期访问曾因 None 报 "unable to get the
-        // current date")。
+        // The system's current time (with the timezone offset; both sides
+        // of a test world share this source — returning None here would
+        // make date accesses like `sys.datetime` fail with "unable to get
+        // the current date").
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()?;
@@ -504,7 +541,7 @@ impl World for InjectWorld {
     }
 }
 
-/// 天数→公历(Howard Hinnant 算法)。
+/// Days since the epoch → Gregorian date (Howard Hinnant's algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -523,10 +560,11 @@ mod tests {
     use super::*;
     use typst::foundations::{Args, Closure, ClosureNode, Func};
 
-    /// 在纯 Rust 里构造 `(a, b) => a + b`:
-    /// 语法节点来自官方解析器,defaults 在创建期已求值(这里无命名参数),
-    /// captured 为空 Scope——字段与求值语义对照 `typst-eval` 的
-    /// `Eval for ast::Closure`。
+    /// Builds `(a, b) => a + b` in pure Rust: the syntax node comes from
+    /// the official parser, defaults are evaluated at creation time (none
+    /// here — no named parameters), and captured is an empty Scope — the
+    /// fields and evaluation semantics mirror `typst-eval`'s
+    /// `Eval for ast::Closure`.
     fn add_closure() -> Func {
         let root = typst_syntax::parse_code("(a, b) => a + b");
         let node = root.children().next().expect("one child").clone();
@@ -559,7 +597,7 @@ mod tests {
         );
         world.eval_main().expect("markup eval with injected module");
 
-        // 代码模式 + 全局可见性
+        // Code mode + global visibility
         let v = world
             .eval_code("cetz.util.add(1, 2)", Scope::new())
             .expect("code eval");
@@ -578,7 +616,7 @@ mod tests {
             .expect("virtualize");
         world.eval_main().expect("package import through shim");
 
-        // 代码模式同样走包解析路径
+        // Code mode goes through package resolution too
         let v = world
             .eval_code(
                 "import \"@preview/cetz:0.5.2\": add; add(20, 22)",
@@ -590,8 +628,8 @@ mod tests {
 
     #[test]
     fn with_composition_carries_state() {
-        // Func::with(vanilla 公开组合子)预置参数,得到携带状态的函数;
-        // 等价于 fork 里为 palette.new 加的 with_args。
+        // Func::with (a stock public combinator) presets arguments,
+        // producing a function that carries state.
         let add = add_closure();
         let mut args = Args::new(Span::detached(), [Value::Int(2)]);
         let add2 = add.with(&mut args);
@@ -606,8 +644,9 @@ mod tests {
     }
 }
 
-/// 官方测试套件的全局函数(逐字对照 tests/src/world.rs 的 #[func]
-/// 定义;`bounds` 的 BoundsElem 经 mark_box_in_place 画界框)。
+/// Globals for the official test suite (verbatim mirrors of the #[func]
+/// definitions in tests/src/world.rs; `bounds`'s BoundsElem draws its
+/// boundary box via mark_box_in_place).
 mod suite {
     use typst::diag::{At, SourceResult, StrResult, bail};
     use typst::engine::Engine;

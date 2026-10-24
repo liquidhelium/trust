@@ -1,6 +1,6 @@
 [package]
 name = "trust-runtime"
-description = "机器翻译生成的 Rust 代码的运行时支撑层(参数解构、调用协议、闭包构造、join/迭代语义)"
+description = "Runtime support layer for trust-generated Rust code: parameter destructuring, call protocol, closure construction, join/iteration semantics"
 version.workspace = true
 edition.workspace = true
 publish = false

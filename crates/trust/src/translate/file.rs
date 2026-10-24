@@ -1,13 +1,17 @@
-//! 单文件驱动:一个 typst 模块源文件 → 一个 Rust 模块源文件。
+//! Single-file driver: one typst module source file → one Rust module
+//! source file.
 //!
-//! 生成形态(per-build 槽板,见 `_things/DESIGN-per-build.md`):
-//! - `__State`:每个顶层绑定一个写一次槽(`OnceLock<Value>`),
-//!   每构建一份实例,按源序在 `module_init` 中求值填充;
-//! - `module_init(engine, context) -> Module`:模块求值的镜像,
-//!   宿主每次构建调用一次;顶层内容(含 set/show 规则)按源序
-//!   折叠进模块 body(`Module::with_content`);
-//! - 函数:体内引用模块槽时编译为 `rt::read(&__st.槽名)?`,
-//!   函数体带 `__st` 序言(`rt::state_require(engine)`)。
+//! Output shape (per-build slot board, see `_things/DESIGN-per-build.md`):
+//! - `__State`: one write-once slot (`OnceLock<Value>`) per top-level
+//!   binding, one instance per build, filled in source order during
+//!   `module_init`;
+//! - `module_init(engine, context) -> Module`: the mirror of module
+//!   evaluation; the host calls it once per build; top-level content
+//!   (including set/show rules) folds into the module body in source order
+//!   (`Module::with_content`);
+//! - functions: references to module slots inside a body compile to
+//!   `rt::read(&__st.slot)?`, and the body gets the `__st` prologue
+//!   (`rt::state_require(engine)`).
 
 use std::fmt::Write as _;
 
@@ -18,8 +22,9 @@ use super::ctx::{Ctx, Env, Ref};
 use super::func::gen_func_data;
 use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 
-/// 顶层绑定:(名字, 槽) 对列表 + 形态(函数闭包节点或值 init;
-/// 解构绑定贡献多个名字)。
+/// Top-level binding: a list of (name, slot) pairs + its kind (function
+/// closure node or value init; a destructuring binding contributes several
+/// names).
 struct TopBinding<'a> {
     names: Vec<(String, String)>,
     kind: TopKind<'a>,
@@ -35,10 +40,11 @@ enum TopKind<'a> {
     },
 }
 
-/// 把一个 typst 模块源文件翻译为 Rust 源码文本。
+/// Translate one typst module source file into Rust source text.
 pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
-    // 经 Source 解析:span 携带 FileId(与生成物 file_span 同源),
-    // 错误站点的定位可直接指向源表达式。
+    // Parse through Source: spans carry a FileId (same origin as the
+    // output's file_span), so error sites can point directly at the source
+    // expression.
     let id = typst_syntax::RootedPath::new(
         typst_syntax::VirtualRoot::Project,
         typst_syntax::VirtualPath::new("main.typ").expect("path"),
@@ -49,13 +55,14 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
     let Some(markup) = root.cast::<ast::Markup>() else {
         return Err(vec![Diag {
             span: typst_syntax::Span::detached(),
-            message: "源文件未能解析为 markup 模块".into(),
+            message: "source file failed to parse as a markup module".into(),
             file: None,
         }]);
     };
 
     let mut cx = Ctx::new(false);
-    // 第一遍:收集顶层绑定与内容项(交错保序:求值按源序)。
+    // Pass one: collect top-level bindings and content items (interleaved
+    // to preserve order: evaluation follows source order).
     #[derive(Clone)]
     enum Seq<'a> {
         Binding(usize),
@@ -69,13 +76,15 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
             collect_top(expr, &mut tops, &mut cx);
             if tops.len() > before {
                 seq.push(Seq::Binding(tops.len() - 1));
-                // 对照 eval_markup:let 求值后同样并入一个 display 槽
-                // (None.display() 为空内容)。
+                // Mirrors eval_markup: an evaluated let likewise joins the
+                // output as a display slot (None.display() is empty
+                // content).
                 seq.push(Seq::Content(super::expr::ContentItem::Part(expr)));
             }
             continue;
         }
-        // 其余顶层表达式(含 Space/Parbreak)都是模块 body 内容。
+        // Every other top-level expression (including Space/Parbreak) is
+        // module body content.
         match expr {
             ast::Expr::SetRule(set) => seq.push(Seq::Content(super::expr::ContentItem::Set(set))),
             ast::Expr::ShowRule(show) => {
@@ -96,7 +105,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         match lets.kind() {
             ast::LetBindingKind::Closure(name) => {
                 let Some(ast::Expr::Closure(closure)) = lets.init() else {
-                    cx.diag(lets.span(), "闭包绑定缺少闭包初始化".into());
+                    cx.diag(lets.span(), "closure binding is missing its closure initializer".into());
                     return;
                 };
                 let id = cx.fresh_id();
@@ -111,12 +120,12 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     if let Some(name) = pattern.bindings().first() {
                         cx.diag(
                             lets.span(),
-                            format!("顶层 `#let {}` 缺少初始化", name.as_str()),
+                            format!("top-level `#let {}` is missing an initializer", name.as_str()),
                         );
                     }
                     return;
                 };
-                // 每个模式名字开一个槽(解构绑定多名)。
+                // One slot per pattern name (destructuring binds several).
                 let names: Vec<(String, String)> = pattern
                     .bindings()
                     .iter()
@@ -129,7 +138,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     })
                     .collect();
                 if names.is_empty() {
-                    cx.diag(lets.span(), "顶层绑定没有名字".into());
+                    cx.diag(lets.span(), "top-level binding has no name".into());
                     return;
                 }
                 tops.push(TopBinding {
@@ -143,12 +152,14 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
-    // 第二遍:按源序生成求值语句与模块 body。
+    // Pass two: emit evaluation statements and the module body in source
+    // order.
     let mut init_code = String::new();
     let mut fields = String::new();
     let mut items = String::new();
     let mut content_items: Vec<super::expr::TopItem> = Vec::new();
-    // 内容项可见的绑定集随源序增长(对照 typst 顺序求值:#17)。
+    // The set of bindings visible to content items grows with source order
+    // (mirrors typst's sequential evaluation; #17).
     let mut visible: Vec<(String, Ref)> = Vec::new();
     for step in &seq {
         let Seq::Binding(i) = step else {
@@ -172,7 +183,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         );
         let i = *i;
         let top = &tops[i];
-        // 函数体可见自身(递归)与此前全部绑定;值 init 不含本绑定。
+        // The function body sees itself (recursion) and all previous
+        // bindings; a value init does not include its own binding.
         let slots_of = |range: std::ops::RangeInclusive<usize>| {
             range
                 .flat_map(|j| {
@@ -223,9 +235,12 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 init,
                 pattern: Some(pattern),
             } => {
-                // 顶层解构:槽名预绑为临时局部,destructure 经
-                // assign=true(写既有目标)写回这些名字,再逐槽填充
-                // 注册——块的 let 遮蔽语义不适用于此(名字即槽别名)。
+                // Top-level destructuring: slot names are pre-bound as
+                // temporary locals; destructure runs with assign=true
+                // (writing to existing targets) and writes back to these
+                // names, then each slot is filled and registered — the
+                // block-let shadowing semantics do not apply here (the
+                // names are slot aliases).
                 let mut ie = init_env.clone();
                 let expr = cx.expr(*init, &mut ie);
                 let mut tmp_env = init_env.clone();
@@ -253,16 +268,20 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 let (name, slot) = &top.names[0];
                 let fun = format!("f_{}", lowercase(slot));
                 let data = format!("D_{}", uppercase(slot));
-                // 全局名创建期物化(对照 typst 闭包捕获:创建期可见即
-                // 捕获,不可见的名字留调用期解析)。
+                // Global names materialize at creation time (mirrors typst
+                // closure capture: a name visible at creation time is
+                // captured; invisible ones are left to call-time
+                // resolution).
                 let mut g_env = env.clone();
                 let mut g_code = String::new();
                 let mut g_seen = std::collections::HashSet::new();
                 let mut names = Vec::new();
-                // 先注入闭包自身绑定(名字/参数/sink)再收集——参数不是
-                // 自由名(codly 驱动:`__merge(base, …)` 的 base 曾被
-                // 收成全局槽,调用期报 unknown variable;对照
-                // CapturesVisitor 的 Closure 分支先 bind 后访体)。
+                // Inject the closure's own bindings (name/params/sink)
+                // before collecting — parameters are not free names
+                // (otherwise `__merge(base, …)`'s base was collected as a
+                // global slot and reported unknown variable at call time;
+                // mirrors CapturesVisitor's Closure branch binding before
+                // walking the body).
                 let mut g_bound: Vec<String> = Vec::new();
                 if let Some(name) = closure.name() {
                     g_bound.push(name.as_str().to_string());
@@ -312,11 +331,15 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 init_code.push_str(&g_code);
                 items.push_str(&cx.gen_function(&fun, slot, *closure, &mut g_env));
                 items.push_str(&gen_func_data(&data, &fun, name, *closure));
-                // 默认值创建期物化(对照 typst:闭包创建时逐参数求值)。
-                // 同批表达式进 stub 的 defaults——求值点即闭包值创建
-                // (module_init 内),值同时填 DEF 槽供函数体缺参取用,
-                // **单次求值**(此前 def_code 与 defaults 双发射,默认
-                // 值表达式副作用会执行两次)。
+                // Defaults materialize at creation time (mirrors typst:
+                // a closure evaluates its parameters one by one when
+                // created). The same expression batch feeds the stub's
+                // defaults — the evaluation point is the creation of the
+                // closure value (inside module_init), and the value also
+                // fills the DEF slot for the function body's
+                // missing-argument path: **evaluated once** (previously
+                // def_code and defaults were emitted twice and default
+                // expressions with side effects ran twice).
                 let mut defaults = Vec::new();
                 for param in closure.params().children() {
                     if let ast::Param::Named(named) = param {
@@ -330,8 +353,9 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         ));
                     }
                 }
-                // 原生闭包(统一 Closure 形态 stub):是否携带状态是
-                // 内部细节,不泄漏为外部身份(与包模式同款)。
+                // Native closure (uniform Closure-form stub): whether it
+                // carries state is an internal detail, not leaked into its
+                // external identity (same shape as package mode).
                 let params_src = closure.params().to_untyped().full_text();
                 let defaults = if defaults.is_empty() {
                     "Vec::new()".to_string()
@@ -355,9 +379,11 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         }
     }
 
-    // 模块 body:顶层内容按源序折叠(规则包装后续内容,逐项可见性)。
+    // Module body: top-level content folds in source order (rules wrap
+    // subsequent content; per-item visibility).
     let body = cx.content_seq_top(&content_items);
-    // C2 值位置闭包的原生体与每调用点节点静态(根级发射)。
+    // Native bodies and per-call-site node statics of C2 value-position
+    // closures (emitted at the root).
     let closure_items = format!(
         "{}{}",
         std::mem::take(&mut cx.closure_items),
@@ -370,7 +396,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
 
     let span_consts = cx.span_consts();
     Ok(format!(
-        "// 由 trust 从 `{module_name}` 生成,勿手改。\n\n\
+        "// Generated by trust from `{module_name}`; do not edit.\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
          use typst::diag::{{At, SourceResult, bail}};\n\
@@ -380,19 +406,19 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
          use typst::syntax::Span;\n\
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
-         /// 兜底错误 span(未被源站点覆盖处;差分对拍只比较值)。\n\
+         /// Fallback error span for sites not covered by a source span.\n\
          const SPAN: Span = Span::detached();\n{span_consts}\
-\
-         /// 当前文件的锚点 span(带 FileId;plugin 等按 span 定位的全局函数依赖它)。\n\
+         \
+         /// Anchor span of this file (carries a FileId; span-located global functions such as plugins rely on it).\n\
          #[allow(non_snake_case, dead_code)]\n\
          pub(crate) fn file_span() -> Span {{\n    static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n    *CELL.get_or_init(|| {{\n        let id = typst::syntax::RootedPath::new(\n            typst::syntax::VirtualRoot::Project,\n            typst::syntax::VirtualPath::new(\"main.typ\").expect(\"path\"),\n        )\n        .intern();\n        typst::syntax::Source::new(id, String::new()).root().span()\n    }})\n}}\n\n\
-         /// 本模块的求值状态:每个顶层绑定一个写一次槽(每构建一份)。\n\
+         /// Evaluation state of this module: one write-once slot per top-level binding (one instance per build).\n\
          #[derive(Default)]\n\
          struct __State {{\n{fields}}}\n\n\
-         /// 模块求值的镜像:宿主每次构建(World)调用一次,按源序求值全部顶层绑定。\n\
+         /// Mirror of module evaluation: the host calls this once per build (World); evaluates all top-level bindings in source order.\n\
          pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let mut scope = Scope::new();\n    let __st = std::sync::Arc::new(__State::default());\n    let _ = context;\n{init_code}    Ok(Module::new(\"{module_name}\", scope).with_content({body}).with_file_id(file_span().id().expect(\"file span id\")))\n}}\n\n\
-         /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
-         /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
+         /// One-line integration: drives module_init and returns the module (to inject into a host library use\n\
+         /// `rt::bind_module`; the test world's InjectWorld::init_native_module already wires it).\n\
          pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n{closure_items}{items}"
     ))
 }

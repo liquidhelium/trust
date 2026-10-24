@@ -1,4 +1,4 @@
-// 解构:数组/字典模式、spread 剩余、for 解构、解构赋值。
+// Destructuring: array/dictionary patterns, spread sinks, for destructuring, destructuring assignment.
 #let fst-snd(pair) = {
   let (a, b) = pair
   a + b
@@ -43,5 +43,5 @@
   (m.at(0), m.at(2)) = (m.at(2), m.at(0))
   m
 }
-// 错误路径(M2.x):数组解构数量不足。
+// Error path: not enough elements to destructure.
 #let destr-fail() = { let (a, b) = (1,); b }

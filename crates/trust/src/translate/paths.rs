@@ -1,8 +1,10 @@
-//! import 相关的路径与访问链解析(单文件体内 import 与包模式共用)。
+//! Resolution of import-related paths and access chains (shared by in-body
+//! imports in single-file mode and by package mode).
 
 use typst_syntax::ast;
 
-/// 解析模块值访问链:`deps.oxifmt` → ("deps", ["oxifmt"]);裸 Ident → ("x", [])。
+/// Parse a module-value access chain: `deps.oxifmt` → ("deps", ["oxifmt"]);
+/// a bare Ident → ("x", []).
 pub(super) fn parse_module_access(expr: ast::Expr) -> Option<(String, Vec<String>)> {
     fn walk(expr: ast::Expr, fields: &mut Vec<String>) -> Option<String> {
         match expr {
@@ -17,15 +19,17 @@ pub(super) fn parse_module_access(expr: ast::Expr) -> Option<(String, Vec<String
     }
     let mut fields = Vec::new();
     let root = walk(expr, &mut fields)?;
-    // walk 的 push 发生在递归返回之后,天然按源序(inner 先 outer 后:
-    // `deps.cetz.draw` → [cetz, draw])——**不要**再 reverse(单字段链
-    // 看不出颠倒,两条以上如 fletcher 的 `import deps.cetz.draw` 会把
-    // 字段读反)。
+    // walk pushes after its recursive call returns, so fields come out in
+    // natural source order (inner first, outer last: `deps.cetz.draw` →
+    // [cetz, draw]) — do **not** reverse (a single-field chain hides the
+    // inversion; with two or more, `import deps.cetz.draw` would read the
+    // fields backwards).
     Some((root, fields))
 }
 
-/// 解析 import 路径(POSIX 风格):以 `/` 开头为包根绝对路径,
-/// 其余相对当前文件目录(`..` 归一)。
+/// Normalize an import path (POSIX style): a leading `/` is an absolute
+/// path from the package root; anything else is relative to the current
+/// file's directory (`..` segments collapse).
 pub(super) fn normalize_import(from: &str, raw: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let dir = if raw.starts_with('/') {

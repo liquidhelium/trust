@@ -1,31 +1,44 @@
-//! 闭包捕获分析:确定闭包子树引用了哪些外层名字。
+//! Closure capture analysis: determine which outer names a closure subtree
+//! references.
 //!
-//! **对照原版**:`typst-eval/src/call.rs:708` 的 `CapturesVisitor`
-//! (pub)。走查结构逐分支同构(各分支注释带行号锚点),类型不同故
-//! 不复用:原版持**运行期** `Scopes`,每个 ident 当场解析并以
-//! `Binding::capture` 快照**绑定**(miss 即不捕获,留给调用期);本
-//! crate 翻译期无运行期作用域(仅依赖 typst-syntax),只能产出
-//! **名字级**自由集 `(名字, 是否数学名)`,由 `capture_pairs` 按我们的
-//! env 模型四分流(局部克隆/模块槽/通配层/pending),运行期物化走
-//! `rt::capture_code_opt` / `capture_math_opt`(直接调 pub 的
-//! `Scopes::get` / `get_in_math`,与原版分档一致)。
+//! **Mirrors the original**: `CapturesVisitor` at
+//! `typst-eval/src/call.rs:708` (pub). The walk structure is branch-for-
+//! branch isomorphic (each branch comment carries the line anchor); the
+//! types differ, so it is not reused: the original holds a **runtime**
+//! `Scopes`, resolves each ident on the spot and snapshots the binding with
+//! `Binding::capture` (a miss means no capture, left to call time). This
+//! crate has no runtime scopes at translation time (it depends only on
+//! typst-syntax), so it produces a **name-level** free set
+//! `(name, is-math-name)`; `capture_pairs` routes each name through our env
+//! model into four buckets (local clone / module slot / wildcard layer /
+//! pending), and runtime materialization goes through
+//! `rt::capture_code_opt` / `capture_math_opt` (calling the pub
+//! `Scopes::get` / `get_in_math` directly, same tiers as the original).
 //!
-//! 对应关系总表(我们 → 原版 visit() 的分支):
-//! - Closure(默认值先走,绑定罩体)      → call.rs:764-792
-//! - LetBinding(init 先走,绑定留到块边界)→ call.rs:795-806(不 enter,
-//!   绑定进当前层,块退出才失效——我们压栈不弹、块边界 truncate 同义)
-//! - ForLoop(iterable 外,模式罩体)      → call.rs:809-820
-//! - ModuleImport(源走查,列表项绑定)    → call.rs:823-830
-//! - FieldAccess / MathFieldAccess(只走 target)→ call.rs:755-762
-//! - CodeBlock / ContentBlock(作用域边界)→ call.rs:746-753
-//! - Named(名字部分不是引用,只走 expr)  → call.rs:836-841(原版在兜底臂)
-//! - Ident / MathIdent(分档捕获)        → call.rs:739-743
-//! - Keyed(键+值都走)——原版落兜底的通用
-//!   children 走查,行为一致;此处显式化并注释理由(计算键是真实求值)
-//! - 兜底 children 走查                  → call.rs:843-847
-//! 原版以 `internal.enter()/exit()` 管作用域,我们以 bound 栈的
-//! push/pop 与块边界 truncate 等价实现;成员查询语义相同
-//! (原版 `internal.get().is_ok()`,我们 `bound.contains`)。
+//! Correspondence table (ours → branches of the original's visit()):
+//! - Closure (defaults first, bindings shroud the body)
+//!   → call.rs:764-792
+//! - LetBinding (init first, binding deferred to the block boundary)
+//!   → call.rs:795-806 (no enter; the binding joins the current level and
+//!   only expires when the block exits — our push-without-pop plus
+//!   truncation at block boundaries is equivalent)
+//! - ForLoop (iterable outside, pattern shrouds the body)
+//!   → call.rs:809-820
+//! - ModuleImport (walk the source, bind list items)
+//!   → call.rs:823-830
+//! - FieldAccess / MathFieldAccess (walk target only) → call.rs:755-762
+//! - CodeBlock / ContentBlock (scope boundary) → call.rs:746-753
+//! - Named (the name part is not a reference, walk expr only)
+//!   → call.rs:836-841 (inside the original's catch-all arm)
+//! - Ident / MathIdent (capture tiers) → call.rs:739-743
+//! - Keyed (walk both key and value) — the original falls into the generic
+//!   children walk of its catch-all, same behavior; made explicit here
+//!   with the reason noted (a computed key is a real evaluation)
+//! - catch-all children walk → call.rs:843-847
+//! The original manages scopes with `internal.enter()/exit()`; we implement
+//! the equivalent with push/pop on the bound stack plus truncation at block
+//! boundaries; membership semantics match (original
+//! `internal.get().is_ok()`, ours `bound.contains`).
 
 use typst_syntax::ast::{self, AstNode};
 
@@ -37,9 +50,10 @@ pub(super) fn collect_idents(
     use typst_syntax::SyntaxKind as K;
     match node.kind() {
         K::Closure => {
-            // 对照 call.rs:764-792:命名参数默认值在 internal.enter()
-            // **之前**访问(创建期于外层作用域求值,且不得看见前面的
-            // 参数绑定)。
+            // Mirrors typst-eval call.rs:764-792: named-parameter defaults
+            // are visited **before** internal.enter() (evaluated at creation
+            // time in the outer scope, and must not see the preceding
+            // parameter bindings).
             let Some(cl) = node.cast::<ast::Closure>() else {
                 return;
             };
@@ -48,7 +62,8 @@ pub(super) fn collect_idents(
                     collect_idents(named.expr().to_untyped(), bound, out);
                 }
             }
-            // 对照 call.rs:771-790:自身名 + 三类参数绑定罩住体。
+            // Mirrors call.rs:771-790: own name + the three parameter
+            // binding kinds shroud the body.
             let mut pushed = 0;
             if let Some(name) = cl.name() {
                 bound.push(name.as_str().to_string());
@@ -80,9 +95,12 @@ pub(super) fn collect_idents(
             }
         }
         K::LetBinding => {
-            // 对照 call.rs:795-806:init 先走(绑定生效前同名引用解析
-            // 外层),绑定进当前层——语句级 let 持续到所在块结束
-            //(弹出交给块边界,同原版不 enter 的语义)。
+            // Mirrors call.rs:795-806: init is walked first (references to
+            // the same name before the binding takes effect resolve to the
+            // outer scope); the binding joins the current level — a
+            // statement-level let lasts until the end of its block (the pop
+            // is left to the block boundary, matching the original's
+            // no-enter semantics).
             let Some(lets) = node.cast::<ast::LetBinding>() else {
                 return;
             };
@@ -94,9 +112,10 @@ pub(super) fn collect_idents(
             }
         }
         K::ModuleImport => {
-            // 对照 call.rs:823-830:源表达式照常遍历,列表 import 的
-            // 名字是内部绑定(调用期由体内 import 自身绑定;bare/rename
-            // 不作处理,与原版一致)。
+            // Mirrors call.rs:823-830: the source expression is traversed
+            // as usual; names of list imports are internal bindings (bound
+            // at call time by the in-body import itself; bare/rename get no
+            // treatment, same as the original).
             let Some(import) = node.cast::<ast::ModuleImport>() else {
                 return;
             };
@@ -108,7 +127,8 @@ pub(super) fn collect_idents(
             }
         }
         K::ForLoop => {
-            // 对照 call.rs:809-820:iterable 在外,模式绑定罩住体。
+            // Mirrors call.rs:809-820: the iterable stays outside, the
+            // pattern bindings shroud the body.
             let Some(for_loop) = node.cast::<ast::ForLoop>() else {
                 return;
             };
@@ -124,33 +144,39 @@ pub(super) fn collect_idents(
             }
         }
         K::FieldAccess => {
-            // 对照 call.rs:755-758:字段名不是变量引用,只走 target。
+            // Mirrors call.rs:755-758: the field name is not a variable
+            // reference; walk the target only.
             let Some(access) = node.cast::<ast::FieldAccess>() else {
                 return;
             };
             collect_idents(access.target().to_untyped(), bound, out);
         }
-        // 数学字段访问(`$arrow.t$` / 三段链 `$arrow.t.twohead$`),
-        // 对照 call.rs:759-762:只访问目标,字段名不算捕获(commute
-        // 驱动:`$arrow.t$` 的 t 被当变量,调用期报 unknown variable)。
+        // Math field access (`$arrow.t$` / three-segment chains like
+        // `$arrow.t.twohead$`), mirrors call.rs:759-762: visit the target
+        // only; field names do not count as captures (otherwise the `t` in
+        // `$arrow.t$` is treated as a variable and reports unknown variable
+        // at call time).
         K::MathFieldAccess => {
             if let Some(access) = node.cast::<ast::MathFieldAccess>() {
                 collect_idents(access.target().to_untyped(), bound, out);
             }
         }
         K::Named => {
-            // 对照 call.rs:836-841(原版兜底臂内特判):命名参数的
-            // 名字部分不是变量引用,只走值表达式。
+            // Mirrors call.rs:836-841 (special-cased inside the original's
+            // catch-all arm): the name part of a named argument is not a
+            // variable reference; walk the value expression only.
             let Some(named) = node.cast::<ast::Named>() else {
                 return;
             };
             collect_idents(named.expr().to_untyped(), bound, out);
         }
         K::Keyed => {
-            // 原版落兜底的通用 children 走查(键+值都访):计算键
-            // `("pt-" + str(i)): v` 里的 str 等外层引用是真实求值
-            // ——跳过会让解释闭包运行期 unknown variable,此处显式
-            // 保留同形行为。
+            // The original handles this via the generic children walk of
+            // its catch-all (both key and value visited): in a computed key
+            // `("pt-" + str(i)): v`, outer references like str are really
+            // evaluated — skipping them would make the interpreted closure
+            // hit unknown variable at runtime, so the same shape is kept
+            // explicitly here.
             let Some(keyed) = node.cast::<ast::Keyed>() else {
                 return;
             };
@@ -158,8 +184,9 @@ pub(super) fn collect_idents(
             collect_idents(keyed.expr().to_untyped(), bound, out);
         }
         K::CodeBlock | K::ContentBlock => {
-            // 对照 call.rs:746-753:块作用域,离开时恢复绑定集
-            //(原版 internal.enter/exit,我们 mark/truncate)。
+            // Mirrors call.rs:746-753: block scope; the binding set is
+            // restored on exit (original internal.enter/exit, ours
+            // mark/truncate).
             let mark = bound.len();
             for child in node.children() {
                 collect_idents(child, bound, out);
@@ -167,12 +194,15 @@ pub(super) fn collect_idents(
             bound.truncate(mark);
         }
         K::Ident | K::MathIdent => {
-            // 对照 call.rs:739-743 的分档:Ident → capture(get)
-            //(局部→全局→std),MathIdent → capture(get_in_math)
-            //(局部→数学作用域→std)。原版此处当场解析快照;我们记
-            //(名字, 类别),类别贯穿到运行期物化(capture_code_opt /
-            // capture_math_opt)——数学名不回退全局(issue-2885:
-            // `$rgb$` 该报 unknown variable),代码名不回退数学作用域。
+            // Tiering mirrors call.rs:739-743: Ident → capture(get)
+            // (locals → global → std), MathIdent → capture(get_in_math)
+            // (locals → math scope → std). The original resolves and
+            // snapshots on the spot; we record (name, tier), and the tier
+            // carries through to runtime materialization
+            // (capture_code_opt / capture_math_opt) — math names do not
+            // fall back to the global scope (issue-2885: `$rgb$` should
+            // report unknown variable), and code names do not fall back to
+            // the math scope.
             let in_math = node.kind() == K::MathIdent;
             let name = node.full_text().to_string();
             if !bound.contains(&name) {
@@ -180,7 +210,8 @@ pub(super) fn collect_idents(
             }
         }
         _ => {
-            // 对照 call.rs:843-847:其余自左向右遍历。
+            // Mirrors call.rs:843-847: everything else is traversed left to
+            // right.
             for child in node.children() {
                 collect_idents(child, bound, out);
             }
@@ -200,7 +231,7 @@ mod tests {
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
             !out.iter().any(|(n, _)| n == "from-check"),
-            "内联闭包参数不应被收集: {out:?}"
+            "inline closure parameters must not be collected: {out:?}"
         );
     }
 
@@ -224,7 +255,7 @@ mod tests {
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
             !out.iter().any(|(n, _)| n == "from-check"),
-            "多行内联闭包参数不应被收集: {out:?}"
+            "multiline inline closure parameters must not be collected: {out:?}"
         );
     }
 
@@ -273,7 +304,7 @@ mod tests {
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
             !out.iter().any(|(n, _)| n == "from-check") && !out.iter().any(|(n, _)| n == "from-cast"),
-            "elembic 真实形态:内联闭包参数不应被收集: {out:?}"
+            "real elembic shape: inline closure parameters must not be collected: {out:?}"
         );
     }
 
@@ -285,7 +316,7 @@ mod tests {
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
             !out.iter().any(|(n, _)| n == "from-check"),
-            "declare 切片:from-check 不应被收集: {out:?}"
+            "declare slice: from-check must not be collected: {out:?}"
         );
     }
 
@@ -297,8 +328,8 @@ mod tests {
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
             !out.iter().any(|(n, _)| n == "twohead") && !out.iter().any(|(n, _)| n == "tt"),
-            "数学字段名不应被收集: {out:?}"
+            "math field names must not be collected: {out:?}"
         );
-        assert!(out.iter().any(|(n, _)| n == "arrow"), "目标名应收集: {out:?}");
+        assert!(out.iter().any(|(n, _)| n == "arrow"), "target names must be collected: {out:?}");
     }
 }

@@ -1,11 +1,13 @@
-//! 差分对拍驱动:golden(解释器)↔ 生成物,同一调用两侧比较。
+//! Differential test driver: golden (interpreter) ↔ generated code — the
+//! same call runs on both sides and the results are compared.
 
 use std::collections::BTreeMap;
 
 use trust_world::InjectWorld;
 use typst::foundations::{Module, Scope};
 
-/// 一个 fixture 的对拍用例:(调用表达式) 列表,以 `m.` 前缀在模块上执行。
+/// Comparison cases for one fixture: a list of call expressions, executed
+/// on the module via the `m.` prefix.
 fn cases(fixture: &str) -> Vec<&'static str> {
     match fixture {
         "arith" => vec![
@@ -132,34 +134,36 @@ fn cases(fixture: &str) -> Vec<&'static str> {
         "context" => vec!["m.ctx-size", "m.ctx-call"],
         "pkg_include" => vec!["m.greeting", "m.after"],
         "regress" => vec![
-            // A1 状态函数解构参数(stub 转发)。
+            // Stateful function with a destructuring parameter (stub
+            // forwarding).
             "m.pat((1, 2))",
             "m.pat((1, 2), k: 5)",
             "m.pat((1, 2), k: 100)",
-            // A3 多段赋值。
+            // Multi-segment assignment.
             "m.deep()",
-            // A4 while 值。
+            // Value of a while loop.
             "m.count-to(0)",
             "m.count-to(3)",
-            // A5 代码块 join。
+            // Code-block join.
             "m.block-join()",
             "m.block-none()",
             "m.block-tail-none()",
-            // A6 默认值。
+            // Default values.
             "m.def-ok()",
             "m.def-ok(x: 1)",
-            // B10 深度护栏内的自递归。
+            // Self-recursion within the depth guardrail.
             "m.down(0)",
             "m.down(40)",
-            // C2 自递归闭包(命名,体引用自身)。
+            // Self-recursive closure (named; the body references itself).
             "m.self-rec(0)",
             "m.self-rec(1)",
             "m.self-rec(5)",
             "m.self-rec(30)",
-            // C2 值位置闭包(多捕获 + 复合算术)。
+            // Value-position closure (multiple captures + compound
+            // arithmetic).
             "m.big-closure(3, 4)",
             "m.big-closure(1, -2)",
-            // Equation 经源码片段解释求值。
+            // Equations interpreted from source snippets.
             "m.eq-simple()",
             "m.eq-sym()",
             "m.eq-captured(2)",
@@ -168,19 +172,19 @@ fn cases(fixture: &str) -> Vec<&'static str> {
     }
 }
 
-/// fixture 源码(构建期同一份文件)。
+/// Fixture source (the same file the build consumed).
 fn fixture_src(name: &str) -> String {
     let path = format!("fixtures/{name}.typ");
     std::fs::read_to_string(path).unwrap_or_else(|_| panic!("read fixture {name}"))
 }
 
-/// 包 fixture 内单个文件。
+/// A single file inside a package fixture.
 fn fixture_file(name: &str, rel: &str) -> String {
     let path = format!("fixtures/{name}/{rel}");
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"))
 }
 
-/// 包 fixture 的全部 (相对路径, 源码)。
+/// All (relative path, source) pairs of a package fixture.
 fn pkg_files(name: &str) -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -206,14 +210,16 @@ fn pkg_files(name: &str) -> Vec<(String, String)> {
     out
 }
 
-/// 双路执行并比较:golden = 解释器求值 fixture 模块;rust = 生成物模块。
+/// Runs both sides and compares: golden = the interpreter evaluating the
+/// fixture module; rust = the generated module.
 fn differential(fixture: &str) {
     let calls = cases(fixture);
     if calls.is_empty() {
-        panic!("fixture {fixture} 没有对拍用例");
+        panic!("fixture {fixture} has no comparison cases");
     }
 
-    // golden:解释器(包 fixture 需装配全部源文件)。
+    // Golden: the interpreter (package fixtures need all source files
+    // assembled).
     let golden_world = if fixture.starts_with("pkg_") {
         let mut world = InjectWorld::new(&fixture_file(fixture, "entry.typ"), vec![]);
         for (rel, src) in pkg_files(fixture) {
@@ -225,25 +231,26 @@ fn differential(fixture: &str) {
     } else {
         InjectWorld::new(&fixture_src(fixture), vec![])
     };
-    let golden: Module = golden_world.eval_main().expect("golden 模块求值");
+    let golden: Module = golden_world.eval_main().expect("golden module evaluation");
     let mut golden_scope = Scope::new();
     golden_scope.define("m", golden.clone());
 
-    // rust:生成物(module_init = 模块求值的镜像,per-build 槽板)。
+    // Rust: the generated code (module_init = the mirror of module
+    // evaluation, per-build slots).
     let mut rust_world = InjectWorld::new("", vec![]);
     let rust_module = rust_world.init_native_module("m", gen_module_init(fixture));
-    // 模块体对拍(顶层内容与 include)。
+    // Compare module bodies (top-level content and includes).
     let (gb, rb) = (
         format!("{:?}", golden.content()),
         format!("{:?}", rust_module.clone().content()),
     );
-    assert_eq!(gb, rb, "模块 body 不一致(输入 {fixture})");
+    assert_eq!(gb, rb, "module body mismatch (input {fixture})");
 
     let mut rust_scope = Scope::new();
     rust_scope.define("m", rust_module.clone());
 
-    // 错误路径对拍:双侧都须报错,消息文案逐字一致(定位不比:
-    // 两侧文件 id 不同;错误站点 span 映射见 KNOWN-ISSUES #4 的修复)。
+    // Compare error paths: both sides must error with verbatim-identical
+    // messages (locations are not compared: the two sides' file ids differ).
     for call in error_cases(fixture) {
         let g = golden_world.eval_code(call, golden_scope_clone(&golden_scope));
         let r = rust_world.eval_code(call, golden_scope_clone(&rust_scope));
@@ -257,20 +264,20 @@ fn differential(fixture: &str) {
                 })
                 .collect::<Vec<_>>()
                 .join("; "),
-            Ok(value) => format!("(未报错,返回 {value:?})"),
+            Ok(value) => format!("(no error, returned {value:?})"),
         };
         let (gm, rm) = (render(g), render(r));
-        assert_eq!(gm, rm, "错误用例 {call}:两侧消息不一致");
+        assert_eq!(gm, rm, "error case {call}: messages differ between sides");
     }
 
     let mut failures = Vec::new();
     for call in calls {
         let g = golden_world
             .eval_code(call, golden_scope_clone(&golden_scope))
-            .unwrap_or_else(|e| panic!("golden 执行失败 {call}: {e:?}"));
+            .unwrap_or_else(|e| panic!("golden execution failed for {call}: {e:?}"));
         let r = rust_world
             .eval_code(call, golden_scope_clone(&rust_scope))
-            .unwrap_or_else(|e| panic!("rust 执行失败 {call}: {e:?}"));
+            .unwrap_or_else(|e| panic!("rust execution failed for {call}: {e:?}"));
         let (g, r) = (format!("{g:?}"), format!("{r:?}"));
         if g != r {
             failures.push(format!("  {call}\n    golden: {g}\n    rust:   {r}"));
@@ -278,21 +285,23 @@ fn differential(fixture: &str) {
     }
     assert!(
         failures.is_empty(),
-        "fixture {fixture} 差分失败({} 例):\n{}",
+        "fixture {fixture} differential failure ({} cases):\n{}",
         failures.len(),
         failures.join("\n")
     );
 }
 
 fn error_cases(fixture: &str) -> Vec<&'static str> {
-    // 通用运算错误(两侧共用 typst ops,验证接线与 span 不进文案)。
+    // Generic operator errors (both sides share typst ops; this checks the
+    // wiring and that spans do not leak into messages).
     let mut cases = vec!["1 / 0", "2 + \"x\"", "\"a\" - \"b\"", "none + 1"];
     match fixture {
-        // 生成物运行时复刻的文案(rt::boolean/iter_values/d_array_finish)。
+        // Messages reproduced by the generated runtime
+        // (rt::boolean/iter_values/d_array_finish).
         "control" => cases.push("m.bool-fail()"),
         "collections" => cases.push("m.iter-fail()"),
         "destructuring" => cases.push("m.destr-fail()"),
-        // A/B 批修复的错误路径(文案+hint 逐字)。
+        // Error paths of fixed regressions (message + hint verbatim).
         "regress" => cases.extend([
             "m.mid-missing()",
             "m.compound-missing()",
@@ -310,7 +319,7 @@ fn error_cases(fixture: &str) -> Vec<&'static str> {
 }
 
 fn golden_scope_clone(scope: &Scope) -> Scope {
-    // eval_code 会消耗 scope;逐用例重建。
+    // eval_code consumes the scope; rebuild it per case.
     scope.clone()
 }
 
@@ -331,7 +340,7 @@ fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
         "context" => trust_diff::gen_modules::context::module_init,
         "pkg_include" => trust_diff::gen_modules::pkg_include::module_init,
         "regress" => trust_diff::gen_modules::regress::module_init,
-        _ => panic!("未登记的 fixture {fixture}"),
+        _ => panic!("unregistered fixture {fixture}"),
     }
 }
 
@@ -363,7 +372,8 @@ diff_test!(
 
 #[test]
 fn all_fixtures_covered() {
-    // fixtures 目录里的每个文件都必须有用例与生成物登记。
+    // Every file in the fixtures directory must be registered with cases
+    // and a generated module.
     let mut declared: BTreeMap<String, bool> = BTreeMap::new();
     for entry in std::fs::read_dir("fixtures").unwrap() {
         let name = entry
@@ -395,7 +405,7 @@ fn all_fixtures_covered() {
     for name in declared.keys() {
         assert!(
             covered.contains(&name.as_str()),
-            "fixture {name} 未登记用例(cases/gen_module)"
+            "fixture {name} has no registered cases (cases/gen_module)"
         );
     }
 }

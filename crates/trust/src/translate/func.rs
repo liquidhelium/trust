@@ -1,7 +1,8 @@
-//! 函数体与 `NativeFuncData` 静态的生成。
+//! Generation of function bodies and `NativeFuncData` statics.
 //!
-//! `gen_function` 编译参数解构 + 体直译;`gen_func_data` 手写函数的
-//! `NativeFuncData` 描述(参数表按闭包 AST 推导)。
+//! `gen_function` compiles parameter destructuring + direct body
+//! translation; `gen_func_data` writes the function's `NativeFuncData`
+//! descriptor by hand (parameter table derived from the closure AST).
 
 use std::fmt::Write as _;
 
@@ -11,7 +12,8 @@ use super::ctx::{Ctx, Env, bind_local};
 use super::naming::{escape, sanitize, sanitize_key};
 
 impl Ctx {
-    /// 生成一个函数:参数解构 + 体直译。
+    /// Generate one function: parameter destructuring + direct body
+    /// translation.
     pub(super) fn gen_function(
         &mut self,
         fun: &str,
@@ -21,30 +23,43 @@ impl Ctx {
     ) -> String {
         let mut body = String::new();
         let mut fn_env = env.clone();
-        // 是否需要 `__st`(函数体/默认值引用了模块槽)在生成中追踪。
+        // Whether `__st` is needed (function body / defaults reference
+        // module slots) is tracked during generation.
         self.used_state = false;
-        // 函数体上下文:return 编译为 Rust return,仅此上下文合法。
+        // Function-body context: return compiles to a Rust return, legal
+        // only in this context.
         self.in_fn += 1;
-        // 顶层函数在 typst 里同样是闭包(CapturesVisitor 捕获自由名):
-        // 体内引用模块绑定 = 捕获,**只读**(对照 `Binding::capture`)。
+        // A top-level function is likewise a closure in typst
+        // (CapturesVisitor captures free names): referencing a module
+        // binding inside the body is a capture, **read-only** (mirrors
+        // `Binding::capture`).
         self.in_closure += 1;
-        // 对照 eval_closure 的绑定协议(声明序逐参绑定,sink 特殊):
-        // - sink_size = 位置实参总数 − 显式位置参数数(saturating);
-        // - Spread 处按 sink_size 从**队首** consume 位置实参暂存;
-        // - 显式位置参数(含在其后的)从剩余里按序 expect;
-        // - 末尾 sink = take()(剩余全部,含具名)+ 暂存队首项 extend。
-        // 曾错为先绑显式参数再 take 全部剩余:`(..args, body)` 在
-        // 多配置实参下 body 错拿队首配置、内容落入 args.pos(),
-        // touying 的 merge-dicts 因此收到内容(add-dicts .keys() 崩,
-        // touying 驱动;gdb 断点错误构造处定位的调用链)。
+        // Mirrors eval_closure's binding protocol (parameters bound one by
+        // one in declaration order, sink special):
+        // - sink_size = total positional arguments − explicit positional
+        //   parameters (saturating);
+        // - at the Spread position, `sink_size` positional arguments are
+        //   consumed from the **queue head** and stashed;
+        // - explicit positional parameters (including those after the
+        //   sink) are expected in order from the remainder;
+        // - the trailing sink = take() (everything remaining, including
+        //   named) plus the stashed queue-head items extended back in.
+        // Binding the explicit parameters first and taking the whole
+        // remainder afterwards was once wrong: with `(..args, body)` and
+        // multi-config arguments, body wrongly took the first config and
+        // the content landed in args.pos(), so a merge-dicts call received
+        // content and crashed on .keys() (located by breaking on the wrong
+        // construction).
         let num_pos_params = closure
             .params()
             .children()
             .filter(|p| matches!(p, ast::Param::Pos(_)))
             .count();
         let mut sink_stash: Vec<(Option<String>, String)> = Vec::new();
-        // 位置实参总数须在**任何绑定前**取(sink_size 的分母是全量;
-        // 在 Spread 处现算会被先声明的参数扣掉)。
+        // The total positional-argument count must be taken **before any
+        // binding** (sink_size's denominator is the full count; computing
+        // it at the Spread position would already have earlier parameters
+        // deducted).
         let has_sink = closure
             .params()
             .children()
@@ -64,22 +79,26 @@ impl Ctx {
                     );
                 }
                 ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
-                    // 占位符消费一个位置实参(对照 eval_closure 的
-                    // `args.expect::<Value>("pattern parameter")`)。
+                    // A placeholder consumes one positional argument
+                    // (mirrors eval_closure's
+                    // `args.expect::<Value>("pattern parameter")`).
                     let _ = writeln!(
                         body,
                         "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
                     );
                 }
                 ast::Param::Pos(pattern) => {
-                    // 解构参数(对照 eval_closure:"pattern parameter")。
+                    // Destructuring parameter (mirrors eval_closure:
+                    // "pattern parameter").
                     let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
                     body.push_str(&self.destructure(pattern, value, &mut fn_env, false));
                 }
                 ast::Param::Named(named) => {
                     let name = named.name().as_str().to_string();
-                    // 默认值在定义期(module_init)求值物化进槽,调用期
-                    // 只读:求值时机与 typst 一致(创建期一次)。
+                    // Defaults are evaluated and materialized into slots at
+                    // definition time (module_init) and only read at call
+                    // time: evaluation timing matches typst (once, at
+                    // creation).
                     let def_slot = format!("DEF_{slot}_{}", sanitize_key(&name));
                     self.used_state = true;
                     let rust = bind_local(&mut fn_env, &name);
@@ -106,8 +125,9 @@ impl Ctx {
                 }
             }
         }
-        // sink = take()(剩余,含具名)按声明序 + 暂存的队首位置项
-        // (对照 eval_closure 末尾 `remaining_args.items.extend(sink_pos)`)。
+        // sink = take() (the remainder, including named) in declaration
+        // order + the stashed queue-head positional items (mirrors
+        // eval_closure's trailing `remaining_args.items.extend(sink_pos)`).
         for (sink, stash) in sink_stash {
             let target = sink.as_deref().unwrap_or("_sink");
             let _ = writeln!(
@@ -117,7 +137,8 @@ impl Ctx {
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
 
-        // 裸表达式函数体(let 表达式提升壳;块体由 block() 自扫)。
+        // Bare-expression function body (let-expression hoisting shell;
+        // block bodies re-scan themselves in block()).
         let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
         let value = self.expr(closure.body(), &mut fn_env);
         self.close_let_hoists();
@@ -128,9 +149,11 @@ impl Ctx {
         };
         let _ = writeln!(body, "    Ok({value})");
 
-        // 序言:状态从首个位置参数解包(stub 转发必带,对照原生闭包
-        // C 方案:数据随函数值走,全局注册表寻址退场)。必须在参数
-        // 解包前——state 占据首个位置参数。
+        // Prologue: state is unpacked from the first positional argument
+        // (the stub always forwards it; mirrors the native-closure scheme
+        // C: data travels with the function value, the global registry
+        // lookup is gone). It must precede parameter unpacking — state
+        // occupies the first positional argument.
         let prologue = if self.used_state {
             "    let __st = rt::take_state::<__State>(__args)?;\n"
         } else {
@@ -151,9 +174,11 @@ pub(super) fn gen_closure_fn(
     self_name: Option<&str>,
     params_src: &str,
 ) -> String {
-    // 闭包体的求值环境 = 自身参数 + 捕获(全部自由名都已入捕获元组,
-    // 不继承外层 env)。has_st(体引用 __st:模块槽读取或体内字符串
-    // import)在体生成后判定——序言与元组类型随后组。
+    // The closure body's evaluation environment = its own parameters +
+    // captures (all free names are in the capture tuple; nothing is
+    // inherited from the outer env). has_st (body references __st: module
+    // slot reads or in-body string imports) is decided after the body is
+    // generated — prologue and tuple type are assembled afterwards.
     let mut fn_env = super::ctx::Env {
         locals: Vec::new(),
         module: Vec::new(),
@@ -163,30 +188,37 @@ pub(super) fn gen_closure_fn(
     self.used_state = false;
     self.in_fn += 1;
     self.in_closure += 1;
-    // 捕获名帧:本层闭包物化进环境的捕获 rust 名(对照 typst 闭包
-    // captured 作用域的 `Binding::capture` 只读标)——赋值/可变方法
-    // 落在这些名字上时运行期报只读错。
+    // Captured-name frame: the capture Rust names materialized into the
+    // environment for this closure level (mirroring typst's read-only
+    // `Binding::capture` marker in the closure's captured scope) —
+    // assignments / mutating methods landing on these names report a
+    // read-only error at runtime.
     self.captured_locals.push(Default::default());
 
-    // 先绑定捕获名(体的自由名解析到这些局部)。
+    // Bind the captured names first (the body's free names resolve to
+    // these locals).
     for name in capture_names {
         let rust = bind_local(&mut fn_env, name);
         self.captured_locals
             .last_mut()
-            .expect("捕获名帧已在入栈时压入")
+            .expect("captured-name frame is pushed on entry")
             .insert(rust);
     }
-    // 自引用名在体生成**前**注入 env(此前在序言构造段才绑定,
-    // 体生成时名字不可见,递归点落到 global 回退——unknown variable)。
+    // The self-reference name is injected into env **before** body
+    // generation (it used to be bound only in the prologue-construction
+    // section; at body-generation time the name was invisible, so the
+    // recursion point fell to the global fallback — unknown variable).
     let mut self_binding: Option<(String, String)> = None;
     if let Some(name) = self_name {
         let rust = bind_local(&mut fn_env, name);
         self_binding = Some((name.to_string(), rust));
     }
-    // 参数绑定:位置/解构/sink 与顶层同款;命名参数 stub 已填齐,
-    // 直接必取。
-    // 声明序绑定,sink 按队首 consume 暂存(与顶层函数序言同协议,
-    // 对照 eval_closure;详见顶层函数处的协议注释)。
+    // Parameter binding: positional/destructuring/sink same as top level;
+    // named parameters are already filled by the stub, taken as required.
+    // Bound in declaration order; the sink consumes from the queue head
+    // into a stash (same protocol as the top-level function prologue,
+    // mirrors eval_closure; see the protocol comment at the top-level
+    // function).
     let mut params_code = String::new();
     let num_pos_params = closure
         .params()
@@ -213,7 +245,8 @@ pub(super) fn gen_closure_fn(
                 );
             }
             ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
-                // 占位符消费一个位置实参(同顶层函数序言)。
+                // A placeholder consumes one positional argument (same as
+                // the top-level function prologue).
                 let _ = writeln!(
                     params_code,
                     "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
@@ -255,7 +288,8 @@ pub(super) fn gen_closure_fn(
     }
     let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
 
-    // 裸表达式体提升壳(同 gen_function;块体由 block() 自扫)。
+    // Bare-expression body hoisting shell (same as gen_function; block
+    // bodies re-scan themselves in block()).
     let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
     let value = self.expr(closure.body(), &mut fn_env);
     self.close_let_hoists();
@@ -266,17 +300,22 @@ pub(super) fn gen_closure_fn(
     };
     let body_code = format!("    Ok({value})\n");
 
-    // has_st 判定(体/参数代码生成期间的标记),恢复外层计数并留下
-    // 本闭包的判定给调用方读取。
-    // has_st = 体自身判定;used_state 留给调用方读取后恢复外层计数
-    //(勿在此恢复——外层再读会被污染,创建元组与序言形态不一致)。
+    // has_st decision (flags set during body/parameter code generation);
+    // restore the outer counter and leave this closure's decision for the
+    // caller to read.
+    // has_st = the body's own decision; used_state is left for the caller
+    // to read, then the outer counter is restored
+    // (do not restore here — the outer read would be polluted and the
+    // creation tuple and prologue shape would disagree).
     let has_st = self.used_state;
     self.in_fn -= 1;
     self.captured_locals.pop();
     self.in_closure = self.in_closure.saturating_sub(1);
 
-    // 状态元组与解包序言(has_st 后置判定)。自递归闭包:���部追加
-    // SelfFuncCell(自身 stub 的每实例一次重建缓存),序言保留槽。
+    // State tuple and unpacking prologue (has_st decided afterwards). A
+    // self-recursive closure: the tuple gets a trailing SelfFuncCell (a
+    // once-per-instance rebuild cache for the stub itself); the prologue
+    // keeps the slot.
     let mut tuple_t: Vec<&str> = Vec::new();
     let mut destruct: Vec<String> = Vec::new();
     if has_st {
@@ -311,8 +350,9 @@ pub(super) fn gen_closure_fn(
             destruct.join(", ")
         )
     };
-    // 捕获按名解包(None 即创建期不可见名字,调用期报 unknown
-    // variable,与原生捕获语义一致)。按 env 绑定序取局部名。
+    // Captures unpack by name (None means the name was invisible at
+    // creation time; call time reports unknown variable, matching native
+    // capture semantics). Local names taken in env binding order.
     for (i, name) in capture_names.iter().enumerate() {
         let rust = fn_env
             .locals
@@ -328,8 +368,10 @@ pub(super) fn gen_closure_fn(
         );
     }
     if let Some((name, rust)) = &self_binding {
-        // 自引用绑定发射(绑定时机见上方 env 注入;序言在此)。
-        // 重建走每调用点静态节点(与创建点同一份,零查找零锁)。
+        // Self-reference binding emission (injection timing into env is
+        // noted above; the prologue goes here). The rebuild uses the
+        // per-call-site static node (the same one as the creation point;
+        // zero lookups, zero locks).
         let stub_src = trust_runtime::compose_stub(name, params_src);
         let node_name = self.closure_node_static(&stub_src);
         let _ = writeln!(
@@ -344,7 +386,8 @@ pub(super) fn gen_closure_fn(
 }
 }
 
-/// `NativeParamInfo` 字面量(元数据按闭包参数形态推导)。
+/// `NativeParamInfo` literal (metadata derived from the closure parameter
+/// shapes).
 fn format_param(name: &str, named: bool, positional: bool, variadic: bool) -> String {
     format!(
         "NativeParamInfo {{ name: \"{}\", docs: \"\", def_site: None, input: CastInfo::Any, default: None, positional: {positional}, named: {named}, variadic: {variadic}, required: {}, settable: false }}",
@@ -362,7 +405,8 @@ pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Clo
             }
             ast::Param::Pos(_) => params.push(format_param("_", false, true, false)),
             ast::Param::Named(named) => {
-                // 命名参数仅按名绑定(args.named),元数据保持一致(KNOWN-ISSUES #10)。
+                // Named parameters bind by name only (args.named); metadata
+                // stays consistent (KNOWN-ISSUES #10).
                 params.push(format_param(named.name().as_str(), true, false, false))
             }
             ast::Param::Spread(_) => params.push(format_param("args", false, true, true)),

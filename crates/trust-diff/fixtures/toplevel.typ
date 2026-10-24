@@ -1,4 +1,4 @@
-// 顶层引擎值:模块加载期即求值的函数调用与标准库引用。
+// Top-level engine values: function calls and stdlib references evaluated at module load time.
 #let make-table(n) = {
   let out = ()
   for i in range(n) {

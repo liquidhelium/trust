@@ -1,4 +1,4 @@
-// 闭包:捕获、高阶、默认参数、sink、参数按名。
+// Closures: captures, higher-order functions, default parameters, sinks, named arguments.
 #let adder = (n) => (x) => x + n
 #let compose = (f, g) => (x) => f(g(x))
 #let apply-twice(f, x) = f(f(x))

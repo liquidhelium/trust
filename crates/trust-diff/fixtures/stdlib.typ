@@ -1,4 +1,4 @@
-// 标准库调用:math/calc/str/int、构造器与转换。
+// Standard library calls: math/calc/str/int, constructors and conversions.
 #let hypot(a, b) = calc.sqrt(a * a + b * b)
 #let clamp01(x) = calc.clamp(x, 0, 1)
 #let mins(nums) = calc.min(..nums)

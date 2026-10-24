@@ -1,21 +1,28 @@
-//! 多文件包驱动:一个 typst 包 → 单文件或目录树两种 Rust 产物。
+//! Multi-file package driver: one typst package → Rust output in two
+//! forms, a single file or a directory tree.
 //!
-//! 生成形态(per-build 槽板,见 `_things/DESIGN-per-build.md`):
-//! - `__State`:包内全部顶层绑定槽 + import 槽(外部包、bare/rename
-//!   模块值),每构建一份实例;
-//! - 每个源文件一个模块:`eval(&__st, engine, context)` 按源序填本
-//!   文件槽位(模块求值的镜像),`module(&__st)` 从已填槽位构建该文件
-//!   的导出面(含引擎值);
-//! - 顶层 `module_init` 按拓扑序驱动各文件求值,返回入口模块。
+//! Output shape (per-build slot board, see `_things/DESIGN-per-build.md`):
+//! - `__State`: all top-level binding slots of the package + import slots
+//!   (external packages, bare/rename module values), one instance per
+//!   build;
+//! - one module per source file: `eval(&__st, engine, context)` fills this
+//!   file's slots in source order (the mirror of module evaluation);
+//!   `module(&__st)` builds the file's export surface from the filled
+//!   slots (including engine values);
+//! - the top-level `module_init` drives the files' evaluation in
+//!   topological order and returns the entry module.
 //!
-//! 单文件形态(`render_single`):全部文件体内联为扁平 `mod` 块,是
-//! 差分与快照的锁定基准;目录形态(`translate_package_tree`):镜像
-//! 源码树,每个 typ 文件一个 rust 文件,跨文件引用经根的 `__State`
-//! 与 `use super::*` 链(私有 use 对后代可见)。`x.typ` 与 `x/` 目录
-//! 并存时,目录声明并入 `x.rs`(rust 文件模块的子模块查找目录恰为
-//! `x/`),否则目录用 `mod.rs`。
+//! Single-file form (`render_single`): all file bodies inlined as flat
+//! `mod` blocks — the locked baseline for snapshots; directory form
+//! (`translate_package_tree`): mirrors the source tree, one rust file per
+//! typ file, cross-file references through the root's `__State` and
+//! `use super::*` chains (a private use is visible to descendants). When
+//! `x.typ` and an `x/` directory coexist, the directory declaration is
+//! appended to `x.rs` (a rust file module looks for child modules in
+//! exactly the `x/` directory); otherwise the directory gets `mod.rs`.
 //!
-//! 包内 `#import` 在翻译期解析为跨文件槽引用;结构分析见 `plan.rs`。
+//! In-package `#import` resolves at translation time into cross-file slot
+//! references; structure analysis lives in `plan.rs`.
 
 use std::fmt::Write as _;
 
@@ -30,35 +37,44 @@ use super::plan::{
     FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, module_stem, nth_slot,
     topo_order, spec_name, spec_prefix, resolve_import_slot_file};
 
-/// 待翻译的多文件包。
+/// The multi-file package to translate.
 pub struct PackageInput {
-    /// 相对路径(POSIX 风格,相对包根)→ 源码。递归依赖形态下,
-    /// 被翻译的依赖包文件以 `{spec}/{包内相对路径}` 为键并入
-    /// (spec 形如 `@preview/cetz:0.3.4`;与文件内路径规范化兼容,
-    /// mod 名带序号前缀天然无槽名冲突)。
+    /// Relative paths (POSIX style, relative to the package root) →
+    /// source. In the recursive-dependency form, translated dependency
+    /// files are merged in under `{spec}/{path-inside-that-package}` keys
+    /// (spec like `@preview/cetz:0.3.4`; compatible with in-file path
+    /// normalization, and the numbered mod-name prefix avoids slot-name
+    /// collisions naturally).
     pub files: std::collections::BTreeMap<String, String>,
-    /// 入口文件相对路径。
+    /// Entry file's relative path.
     pub entry: String,
-    /// 已并入翻译的外部包:spec → 其入口的合并键(`{spec}/{entry}`)。
-    /// 命中这些 spec 的 import 边**静态化**(求值期直接装配对应生成
-    /// 模块,不再运行时 import_external 解释);未命中的保持运行时
-    /// 回退(混合执行)。
+    /// External packages merged into the translation: spec → the merge key
+    /// of their entry (`{spec}/{entry}`). Import edges hitting these specs
+    /// are **staticized** (at evaluation time the corresponding generated
+    /// module is assembled directly, no runtime import_external
+    /// interpretation); misses keep the runtime fallback (mixed
+    /// execution).
     pub dep_entries: std::collections::BTreeMap<String, String>,
 }
 
-/// 一个 typ 文件的可发射产物:文件体 + 单文件/目录两种模块名。
+/// The emittable output for one typ file: the file body + module names for
+/// both the single-file and directory forms.
 struct FileOut {
-    /// 文件体(`mod` 块内部形态,与单文件产物逐字节同形)。
+    /// File body (the inside of a `mod` block; byte-identical to the
+    /// single-file output).
     body: String,
-    /// 单文件形态的扁平 mod 名(`m{i}_{stem}`)。
+    /// Flat mod name for the single-file form (`m{i}_{stem}`).
     flat_name: String,
-    /// 目录形态的完整模块路径段(镜像 typ 路径,如 `[src, draw, shapes]`)。
+    /// Full module path segments for the directory form (mirroring the typ
+    /// path, e.g. `[src, draw, shapes]`).
     tree_full: Vec<String>,
 }
 
-/// 包翻译的中间产物:header(带 `{EVAL_CALLS}`/`{ITEMS}` 占位)+
-/// 双形态 eval 驱动 + 各文件体,由 `render_single`/`translate_package_tree`
-/// 组装为最终产物。空态(header 空、files 空)对应早退。
+/// Intermediate product of package translation: header (with
+/// `{EVAL_CALLS}`/`{ITEMS}` placeholders) + the two-form eval drivers +
+/// per-file bodies, assembled into the final output by
+/// `render_single`/`translate_package_tree`. The empty state (empty
+/// header, no files) corresponds to an early exit.
 #[derive(Default)]
 struct PackageParts {
     header: String,
@@ -67,13 +83,16 @@ struct PackageParts {
     registry_flat: String,
     registry_tree: String,
     files: Vec<FileOut>,
-    /// C2 值位置闭包的原生体汇集(去重后跨文件共用,发射到产物根部)。
+    /// Collection of C2 value-position closure native bodies (deduped,
+    /// shared across files; emitted at the output root).
     closure_items: String,
-    /// 每调用点节点静态(零锁创建协议,发射到根)。
+    /// Per-call-site node statics (zero-lock creation protocol; emitted at
+    /// the root).
     closure_nodes: String,
 }
 
-/// 宽松翻译(探索用):缺口降级为占位,返回 (代码, 诊断清单)。
+/// Lenient translation (for exploration): gaps degrade to placeholders;
+/// returns (code, diagnostic list).
 pub fn translate_package_lenient(input: &PackageInput, module_name: &str) -> (String, Vec<Diag>) {
     let mut cx = Ctx::new(true);
     let mut parts = translate_package_parts(input, module_name, &mut cx);
@@ -90,10 +109,12 @@ pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<Stri
 }
 
 
-// ─── 分阶段装配(对照 typst-eval `eval()` 的目录式入口:每步全部
-// 委托,读完入口即知全流程)────────────────────────────────
+// ─── Staged assembly (mirrors typst-eval `eval()`'s directory-style entry:
+// every step fully delegates; reading the entry shows the whole
+// flow)──────────────────────────────────────
 
-/// 解析:每文件 `Source`(span 携带 FileId,与生成物 file_span 同源)。
+/// Parsing: one `Source` per file (spans carry a FileId, same origin as
+/// the output's file_span).
 fn parse_sources(input: &PackageInput) -> Vec<(String, typst_syntax::Source)> {
     let mut roots: Vec<(String, typst_syntax::Source)> = Vec::new();
     for (path, src) in input.files.iter() {
@@ -107,8 +128,9 @@ fn parse_sources(input: &PackageInput) -> Vec<(String, typst_syntax::Source)> {
     roots
 }
 
-/// 第一遍:每个文件的计划(import 边/顶层绑定槽/解析诊断/可变根)。
-/// markup 取自 `Box::leak` 的静态根,计划全 'static。
+/// Pass one: each file's plan (import edges / top-level binding slots /
+/// parse diagnostics / mutable roots). The markup comes from `Box::leak`ed
+/// static roots, so plans are entirely 'static.
 fn plan_files(
     input: &PackageInput,
     roots: &[(String, typst_syntax::Source)],
@@ -120,7 +142,7 @@ fn plan_files(
         let Some(markup) = root.cast::<ast::Markup>() else {
             cx.diag(
                 typst_syntax::Span::detached(),
-                format!("{path} 未能解析为 markup 模块"),
+                format!("{path} failed to parse as a markup module"),
             );
             continue;
         };
@@ -140,30 +162,33 @@ fn plan_files(
             .split('.')
             .next()
             .unwrap_or("f");
-        // 复合模块名(槽前缀/路径引用):sanitize_key——裸 sanitize 对
-            // 关键字产出 r# 前缀,嵌在复合里是词法错(hy-dro-gen 的
-            // mod.typ → m21_r#mod,touying 驱动)。
-            let mod_name = format!("m{idx}_{}", sanitize_key(stem));
+        // Composite module names (slot prefixes / path references) use
+        // sanitize_key — plain sanitize produces an r# prefix for
+        // keywords, which is a lexical error when embedded in a composite
+        // (mod.typ → m21_r#mod).
+        let mod_name = format!("m{idx}_{}", sanitize_key(stem));
         let mut tops = Vec::new();
         let mut imports = Vec::new();
         for expr in markup.exprs() {
             match expr {
                 ast::Expr::Space(_) | ast::Expr::Parbreak(_) => {}
-                // (其内的 <Label> 等标记不是代码)。
+                // (Markup like <Label> inside is not code.)
                 ast::Expr::ModuleImport(import) => {
                     let mut source_node: Option<typst_syntax::SyntaxNode> = None;
                     let (raw, external, module_access) = match import.source() {
-                        // 字符串路径:外部包或包内相对/绝对路径。
+                        // String path: an external package or an
+                        // in-package relative/absolute path.
                         ast::Expr::Str(path_expr) => {
                             let raw = path_expr.get().to_string();
                             let external = raw.starts_with('@');
                             (raw, external, None)
                         }
-                        // 模块值表达式 import(`import deps.oxifmt: x`)。
-                        // 其余任意表达式(如 `import plugin("…")`,
-                        // touying/hy-dro-gen 驱动)存源节点,二遍求值
-                        // 为模块值再绑定(对照 typst-eval:源求值为模块
-                        // 即可 import)。
+                        // Module-value expression import (`import
+                        // deps.oxifmt: x`). Any other expression (e.g.
+                        // `import plugin("…")`) stores the source node,
+                        // evaluated into a module value and bound in pass
+                        // two (mirrors typst-eval: an import source just
+                        // has to evaluate to a module).
                         other => match parse_module_access(other) {
                             Some(access) => (String::new(), false, Some(access)),
                             None => {
@@ -175,9 +200,10 @@ fn plan_files(
                     let target = if module_access.is_some() {
                         String::new()
                     } else if external {
-                        // 外部包:已并入翻译的依赖指向其入口合并键
-                        // (依赖图/求值序随之打通);否则保持原始 spec
-                        // (运行时 import_external 解释)。
+                        // External package: a merged dependency points at
+                        // its entry merge key (the dependency graph /
+                        // evaluation order follow); otherwise the raw spec
+                        // is kept (runtime import_external interpretation).
                         input
                             .dep_entries
                             .get(&raw)
@@ -185,10 +211,12 @@ fn plan_files(
                             .unwrap_or_else(|| raw.clone())
                     } else {
                         let mut target = normalize_import(path, &raw);
-                        // 依赖包内的**绝对** import(`/src/x.typ`)限定在
-                        // 该包的合并键空间内(相对 import 经 dir 拼接
-                        // 天然带前缀;绝对 import 会落到顶层键,丢失
-                        // 包归属)。
+                        // An **absolute** import inside a dependency package
+                        // (`/src/x.typ`) is qualified into that package's
+                        // merged key space (relative imports get the prefix
+                        // naturally via directory joining; absolute ones
+                        // would land at top-level keys and lose package
+                        // ownership).
                         if raw.starts_with('/') && let Some(colon) = path.find(':')
                             && let Some(rel) = path[colon..].find('/')
                         {
@@ -203,9 +231,11 @@ fn plan_files(
                         }
                         target
                     };
-                    // 不在文件集的非外部 Str:不再翻译期拦截——世界
-                    // 可能仍能运行期解析(套件 fixture 等);交胶水
-                    // 路径,原版 import 的 file-not-found 自然承担。
+                    // A non-external Str not in the file set: no
+                    // translate-time interception anymore — the world may
+                    // still resolve it at runtime (suite fixtures etc.);
+                    // hand it to the glue path and let the original
+                    // import's file-not-found carry it.
                     let _ = &raw;
                     let items = match import.imports() {
                         None => match import.new_name() {
@@ -213,8 +243,8 @@ fn plan_files(
                             None => ImportItems::Bare,
                         },
                         Some(ast::Imports::Wildcard) => ImportItems::Wildcard,
-                        // 模块改名 + 成员列表:双绑定(elembic 驱动,
-                        // `import "base.typ" as base: ok, err`)。
+                        // Module rename + member list: double binding
+                        // (`import "base.typ" as base: ok, err`).
                         Some(ast::Imports::Items(items)) => match import.new_name() {
                             Some(new_name) => ImportItems::RenameList(
                                 new_name.as_str().to_string(),
@@ -245,10 +275,13 @@ fn plan_files(
                                 items
                                     .iter()
                                     .map(|item| {
-                                        // 完整名字含点号路径(`a.b as c`):
-                                        // original_name() 只给末段,这里按
-                                        // 段连出全名(hydra 驱动);未改名时
-                                        // 绑定名= 末段(typst 语义)。
+                                        // Full names carry a dotted path
+                                        // (`a.b as c`):
+                                        // original_name() gives only the
+                                        // last segment, so the full name is
+                                        // rejoined here; without a rename
+                                        // the bound name = the last segment
+                                        // (typst semantics).
                                         let original = item
                                             .path()
                                             .iter()
@@ -278,17 +311,19 @@ fn plan_files(
                         external,
                         module_access,
                         source_node,
-                        // 语句原文:区 1 胶水(rt::eval_import 重解析驱动
-                        // 原版 Eval;span 合成回原语句)。
+                        // Statement text: zone-1 glue (rt::eval_import
+                        // re-parses and drives the original Eval; the span
+                        // is synthesized back onto the original statement).
                         stmt_text: Some(expr.to_untyped().full_text().to_string()),
                         raw: raw.clone(),
                         is_include: false,
                     });
                 }
                 ast::Expr::ModuleInclude(include) => {
-                    // include 边:进依赖图(环检测/拓扑),名字不绑定。
+                    // Include edge: enters the dependency graph (cycle
+                    // detection / topo order), binds no names.
                     let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
-                        cx.diag(expr.span(), "include 源暂只支持字符串路径".into());
+                        cx.diag(expr.span(), "include source must currently be a string path".into());
                         continue;
                     };
                     let raw = path_expr.get().to_string();
@@ -296,7 +331,7 @@ fn plan_files(
                     if !input.files.contains_key(&target) {
                         cx.diag(
                             expr.span(),
-                            format!("include \"{raw}\" 解析到 {target},不在文件集"),
+                            format!("include \"{raw}\" resolves to {target}, which is not in the file set"),
                         );
                         continue;
                     }
@@ -326,8 +361,9 @@ fn plan_files(
                         tops.push((name.clone(), format!("V{id}_{}", sanitize_key(&name))));
                     }
                 }
-                // 其余顶层表达式(文本/嵌入/set/show)是模块 body
-                // 内容,由第二遍收集折叠;此处无需处理。
+                // Other top-level expressions (text/embedded/set/show) are
+                // module body content, collected and folded by pass two;
+                // nothing to do here.
                 _ => {}
             }
         }
@@ -344,26 +380,29 @@ fn plan_files(
     plans
 }
 
-/// 包世界装配产物:求值拓扑序、导出查找表、路径→mod 名表。
+/// Package world assembly product: evaluation topological order, export
+/// lookup table, path → mod name table.
 struct PkgWorld {
     order: Vec<usize>,
     export_table: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     package_mods: std::rc::Rc<std::collections::BTreeMap<String, String>>,
 }
 
-/// 世界装配:环检测(None = 成环)→ 拓扑序/导出表 → cx 侧的
-/// files/mods/export/slot_files 注册与可变槽标记。
+/// World assembly: cycle detection (None = cycle) → topo order / export
+/// table → cx-side files/mods/export/slot_files registration and mutable
+/// slot marking.
 fn assemble_package_world(
     input: &PackageInput,
     plans: &[FilePlan],
     entry: &str,
     cx: &mut Ctx,
 ) -> Option<PkgWorld> {
-    // import 环检测(typst 模块循环求值同样报错)。
+    // Import cycle detection (typst likewise errors on circular module
+    // evaluation).
     if has_import_cycle(plans, entry) {
         cx.diags.push(Diag {
             span: typst_syntax::Span::detached(),
-            message: "包内 import 成环(typst 运行时同样会报循环求值)".into(),
+            message: "imports form a cycle within the package (typst's runtime likewise reports circular evaluation)".into(),
             file: None,
         });
         return None;
@@ -377,14 +416,17 @@ fn assemble_package_world(
     cx.package_files = Some(package_files.clone());
     cx.package_mods = Some(package_mods.clone());
 
-    // 拓扑序(被依赖者在前):求值顺序。导出查找表按同序展开,
-    // 下游 list/wildcard import 可达上游的 import 转出名。
+    // Topological order (dependencies first): evaluation order. The export
+    // lookup table expands in the same order, so downstream list/wildcard
+    // imports can reach upstream import re-exports.
     let order = topo_order(plans);
     let export_table = build_export_table(plans, &order, &input.dep_entries);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
-    // 可变槽:被就地修改的根名并集,标记各计划自身定义的同名槽
-    // (对照 typst 顶层绑定可就地修改的语义;跨文件导入名不改本槽)。
+    // Mutable slots: the union of in-place-mutated root names, marking each
+    // plan's own same-named slots (mirrors typst's in-place mutation
+    // semantics for top-level bindings; cross-file imported names do not
+    // mutate their own slot).
     {
         let roots: std::collections::HashSet<String> = plans
             .iter()
@@ -399,9 +441,11 @@ fn assemble_package_world(
         }
     }
 
-    // 槽名→文件索引(第二遍开始前一次性构建,体内模块值链通配用):
-    // 槽名→文件索引(一次性构建,体内模块值链通配用):
-    // V{i}_{name} → plans[i].path;IMPORT_{mod}_{bound} → 边目标。
+    // Slot name → file index (built once before pass two starts, used by
+    // in-body module-value-chain wildcards):
+    // Slot name → file index (built once, used by in-body
+    // module-value-chain wildcards):
+    // V{i}_{name} → plans[i].path; IMPORT_{mod}_{bound} → edge target.
     if cx.slot_files.is_none() {
     let mut idx = std::collections::BTreeMap::new();
     for (i, p) in plans.iter().enumerate() {
@@ -438,8 +482,9 @@ fn assemble_package_world(
     );
     }
     }
-    // 回填:LIST/RenameList 项槽与跨文件链式身份,经通用解析器
-    // (finite 的 `import t4t: *`,t4t 为内部 list 项引入的模块)。
+    // Backfill: LIST/RenameList item slots and cross-file chained
+    // identities, via the generic resolver (e.g. `import t4t: *` where t4t
+    // is a module introduced via an internal list item).
     for p in plans.iter() {
         for edge in &p.imports {
             if edge.is_include {
@@ -487,22 +532,25 @@ fn assemble_package_world(
     Some(PkgWorld { order, export_table, package_mods })
 }
 
-/// 第二遍单文件累积器(Vm 等价物:一文件一束,顶层语句生成共享;
-/// package 级共享的 `state_fields` 由调用方传参)。
+/// Pass-two single-file accumulator (the Vm equivalent: one bundle per
+/// file, top-level statement generation shared; the package-level shared
+/// `state_fields` is passed in by the caller).
 struct TopGen {
-    /// 当前可见 env(import 注入与绑定可见性按源序演进)。
+    /// The currently visible env (import injection and binding visibility
+    /// evolve in source order).
     env: Env,
-    /// 本文件已处理的顶层绑定(名,槽)。
+    /// This file's processed top-level bindings (name, slot).
     own: Vec<(String, String)>,
-    /// 同名绑定的第 n 次出现(解构多名配对槽用)。
+    /// nth occurrence of same-named bindings (pairing destructured names
+    /// with slots).
     own_seen: std::collections::HashMap<String, usize>,
-    /// 求值序绑定代码(eval 体内)。
+    /// Evaluation-order binding code (inside the eval body).
     binding_code: String,
-    /// 导出面 define 序列(module 体内)。
+    /// Export-surface define sequence (inside the module body).
     file_defines: String,
-    /// 函数体与静态汇集(文件 body)。
+    /// Function bodies and statics collection (file body).
     file_fns: String,
-    /// import 槽填充序列(eval 体头部)。
+    /// Import slot fill sequence (head of the eval body).
     import_fills: String,
 }
 
@@ -519,7 +567,8 @@ impl TopGen {
         }
     }
 
-    /// 内容项的可见 env(当前 env + 此前顶层绑定)。
+    /// The visible env for content items (current env + prior top-level
+    /// bindings).
     fn content_env(&self) -> Env {
         let mut e = self.env.clone();
         for (seen, seen_slot) in &self.own {
@@ -528,8 +577,10 @@ impl TopGen {
         e
     }
 
-    /// 顶层 `#let`(函数/闭包/普通绑定/解构):计划槽配对、全局名
-    /// 创建期物化、绑定代码与导出面写入。对照 eval 的 LetBinding 分支。
+    /// Top-level `#let` (function/closure/plain binding/destructuring):
+    /// plan-slot pairing, creation-time materialization of global names,
+    /// binding code and export-surface writes. Mirrors eval's LetBinding
+    /// branch.
     fn gen_let(
         &mut self,
         cx: &mut Ctx,
@@ -540,7 +591,7 @@ impl TopGen {
             match lets.kind() {
                 ast::LetBindingKind::Closure(name) => {
                     let Some(ast::Expr::Closure(closure)) = lets.init() else {
-                        cx.diag(lets.span(), "闭包绑定缺少闭包初始化".into());
+                        cx.diag(lets.span(), "closure binding is missing its closure initializer".into());
 return;
                     };
                     let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
@@ -557,10 +608,12 @@ return;
                         .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
                     let fun = format!("f_{}", lowercase(&slot));
                     let data = format!("D_{}", uppercase(&slot));
-                    // 全局名创建期物化(对照 typst 闭包捕获)。先注入
-                    // 闭包自身绑定(名字/参数/sink)——参数不是自由名
-                    // (codly 驱动:`__merge(base, …)` 的 base 曾被收成
-                    // 全局槽;对照 CapturesVisitor 的 Closure 分支)。
+                    // Global names materialize at creation time (mirrors
+                    // typst closure capture). Inject the closure's own
+                    // bindings first (name/params/sink) — parameters are
+                    // not free names (otherwise `__merge(base, …)`'s base
+                    // was collected as a global slot; mirrors
+                    // CapturesVisitor's Closure branch).
                     let mut g_env = env2.clone();
                     let mut names = Vec::new();
                     let mut g_bound: Vec<String> = Vec::new();
@@ -612,10 +665,12 @@ return;
                     }
                     self.file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &mut g_env));
                     self.file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
-                    // 默认值创建期物化(对照 typst:闭包创建时逐参数求值;
-                    // env2 = import + 此前绑定,不含本函数自身)。同一批
-                    // 表达式进 stub 的 defaults(调用期缺失参数取值用,
-                    // 对照 Closure.defaults 语义)。
+                    // Defaults materialize at creation time (mirrors typst:
+                    // a closure evaluates its parameters when created; env2
+                    // = imports + prior bindings, without the function
+                    // itself). The same expression batch feeds the stub's
+                    // defaults (used for missing arguments at call time,
+                    // mirroring Closure.defaults semantics).
                     let mut defaults = Vec::new();
                     for param in closure.params().children() {
                         if let ast::Param::Named(named) = param {
@@ -628,18 +683,22 @@ return;
                             ));
                         }
                     }
-                    // 原生闭包(C 方案):签名保真 stub + 状态随值走。
-                    // 不引用模块槽的纯函数保持裸 native(无状态前缀,
-                    // 序言无 take_state,两边按同一 used_state 判定)。
+                    // Native closure (scheme C): signature-faithful stub +
+                    // state travels with the value. Pure functions that
+                    // reference no module slots stay bare native (no state
+                    // prefix, no take_state prologue; both sides decided by
+                    // the same used_state flag).
                     let params_src = closure.params().to_untyped().full_text();
                     let defaults = if defaults.is_empty() {
                         "Vec::new()".to_string()
                     } else {
                         format!("vec![{}]", defaults.join(", "))
                     };
-                    // 统一 Closure 形态 stub:是否携带状态是内部细节,
-                    // 不得泄漏为外部身份(裸 Native 的 scope()=Some 会
-                    // 被 import 分派当原生函数;对照原版用户闭包 None)。
+                    // Uniform Closure-form stub: whether state is carried
+                    // is an internal detail and must not leak into the
+                    // external identity (a bare Native's scope()=Some would
+                    // be dispatched as a native function by imports;
+                    // mirrors the original's None for user closures).
                     let state_arg = if cx.used_state {
                         "Some(&rt::StateSlot::new(__st.clone()))"
                     } else {
@@ -660,8 +719,9 @@ return;
                     self.own.push((name.as_str().to_string(), slot.clone()));
                 }
                 ast::LetBindingKind::Normal(pattern) => {
-                    // 无初值声明(`#let x`):绑定 none(对照 typst-eval
-                    // LetBinding 无 init 的 define(name, None))。
+                    // Declaration without initializer (`#let x`): binds
+                    // none (mirrors typst-eval LetBinding's define(name,
+                    // None) for the no-init case).
                     let Some(init_expr) = lets.init().map(|e| e) else {
                         if let Some(name) = pattern.bindings().first() {
                             let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
@@ -683,7 +743,8 @@ return;
                         }
 return;
                     };
-                    // 每个模式名字配对本文件的下一个同名槽(解构多名)。
+                    // Each pattern name pairs with this file's next
+                    // same-named slot (destructuring binds several).
                     let mut bound: Vec<(String, String)> = Vec::new();
                     for ident in pattern.bindings().iter() {
                         let name = ident.as_str();
@@ -702,11 +763,15 @@ return;
                         env2.module
                             .push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
-                    // init 在绑定生效前求值:同名引用解析到外层(如全局
-                    // 类型),env2 不含本绑定。单名快速路径只适用于
-                    // **纯标识符模式**——`(a,)` 这类单绑定解构模式仍须
-                    // 走解构(整值绑定曾是 destructuring-let 单元数组
-                    // 与字典 sink 族的根因)。
+                    // The init is evaluated before the binding takes
+                    // effect: same-name references resolve to the outer
+                    // scope (e.g. a global type); env2 excludes this
+                    // binding. The single-name fast path applies only to
+                    // **plain identifier patterns** — single-binding
+                    // destructuring patterns like `(a,)` must still go
+                    // through destructuring (binding the whole value was
+                    // once the root cause of the destructuring-let
+                    // single-element-array and dictionary-sink failures).
                     let plain_ident = matches!(
                         pattern,
                         ast::Pattern::Normal(ast::Expr::Ident(_))
@@ -734,8 +799,10 @@ return;
                             escape(name)
                         );
                     } else {
-                        // 顶层解构:槽名预绑为临时局部,destructure 写回
-                        // 这些名字,再逐槽填充注册。
+                        // Top-level destructuring: slot names are pre-bound
+                        // as temporary locals; destructure writes back to
+                        // these names, then each slot is filled and
+                        // registered.
                         let value = cx.expr(init_expr, &mut env2);
                         let mut tmp_env = env2.clone();
                         let mut decls = String::new();
@@ -747,8 +814,9 @@ return;
                             cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
                         let mut fills = String::new();
                         for (name, slot) in &bound {
-                            // 可变槽(fill_ms/read_ms)与写一次槽(fill/read)
-                            // 按计划期标记分流。
+                            // Mutable slots (fill_ms/read_ms) and write-once
+                            // slots (fill/read) split by the plan-time
+                            // marking.
                             let (fill_call, read_call) =
                                 if cx.mutable_slots.contains(slot) {
                                     (
@@ -784,28 +852,33 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     if !input.files.contains_key(entry) {
         cx.diags.push(Diag {
             span: typst_syntax::Span::detached(),
-            message: format!("入口文件 {entry} 不在文件集中"),
+            message: format!("entry file {entry} is not in the file set"),
             file: None,
         });
         return PackageParts::default();
     }
 
-    // 解析:每文件 Source(span 带 FileId,与生成物 file_span 同源)。
+    // Parsing: one Source per file (spans carry a FileId, same origin as
+    // the output's file_span).
     let roots = parse_sources(input);
-    // 第一遍:每个文件的计划(import 边/顶层绑定槽/解析诊断/可变根)。
-    // 注意:计划期直接使用形参 cx(此前误建局部同名 Ctx 遮蔽形参,
-    // 导致包模式的诊断从未传回壳层,严格性失效)。
+    // Pass one: each file's plan (import edges / top-level binding slots /
+    // parse diagnostics / mutable roots). Note: the plan phase uses the cx
+    // parameter directly (a locally shadowed same-named Ctx once swallowed
+    // the parameter, so package-mode diagnostics never reached the shell
+    // and strictness silently failed).
     let plans = plan_files(input, &roots, cx);
     if !cx.diags.is_empty() && !cx.lenient {
-        // 壳层负责返回 Err。
+        // The shell returns Err.
         return PackageParts::default();
     }
-    // 世界装配:环检测 → 拓扑序/导出表 → 可变槽标记 → 槽→文件表。
+    // World assembly: cycle detection → topo order / export table →
+    // mutable-slot marking → slot→file table.
     let Some(world) = assemble_package_world(input, &plans, entry, cx) else {
         return PackageParts::default();
     };
     let PkgWorld { order, export_table, package_mods } = world;
-    // 第二遍:逐文件生成 eval(填槽)+ module(导出面)+ 函数体。
+    // Pass two: per file, generate eval (slot filling) + module (export
+    // surface) + function bodies.
     let mut top_defines = String::new();
     let mut state_fields: Vec<String> = Vec::new();
     let mut files: Vec<FileOut> = Vec::new();
@@ -817,21 +890,27 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let plan = &plans[idx];
         cx.current_file = Some(plan.path.clone());
         let is_entry = plan.path == entry;
-        // 单文件累积器(env 按源序演进;import 槽表与边游标本文件局部)。
+        // Single-file accumulator (env evolves in source order; the import
+        // slot table and edge cursor are local to this file).
         let mut top = TopGen::new();
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        // 顶层 import 边不再整体前置:由下方源序流水在语句位置处理
-        //(见 process_import_edge 与 ModuleImport 臂的 edge 游标)。
+        // Top-level import edges are no longer hoisted wholesale: handled
+        // at their statement position by the source-order stream below (see
+        // process_import_edge and the ModuleImport arm's edge cursor).
         let mut edge_cursor = 0usize;
         let mut content_items: Vec<super::expr::TopItem> = Vec::new();
         for expr in plan.markup.exprs() {
-            // 内容项:顶层文本/嵌入表达式/set/show/include(逐项可见性)。
+            // Content items: top-level text / embedded expressions /
+            // set/show/include (per-item visibility).
             match expr {
                 ast::Expr::ModuleImport(_) => {
-                    // 源序流水:在此语句位置处理对应 import 边(env 注入
-                    // 即时生效——此后的 let 才能看见它;此前的 let 仍
-                    // 解析到外层,对照原生逐语句求值)。
+                    // Source-order stream: the corresponding import edge is
+                    // processed at this statement position (the env
+                    // injection takes effect immediately — lets after it
+                    // can see it; lets before it still resolve to the outer
+                    // scope, mirroring native statement-by-statement
+                    // evaluation).
                     if let Some(edge) = plan.imports.get(edge_cursor) {
                         edge_cursor += 1;
                         cx.process_import_edge(
@@ -850,14 +929,16 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             &mut top.binding_code,
                         );
                     }
-                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    // Mirrors eval_markup: the statement joins the output
+                    // as an empty display slot.
                     content_items.push(super::expr::TopItem {
                         item: super::expr::ContentItem::Part(expr),
                         env: top.content_env(),
                     });
                 }
                 ast::Expr::LetBinding(lets) => {
-                    // 对照 eval_markup:语句并入一个空 display 槽。
+                    // Mirrors eval_markup: the statement joins the output
+                    // as an empty display slot.
                     content_items.push(super::expr::TopItem {
                         item: super::expr::ContentItem::Part(expr),
                         env: top.content_env(),
@@ -879,8 +960,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             continue;
                         }
                     }
-                    // 动态源/越界:区 1 胶水项(rt::eval_include 驱动
-                    // 原版 Eval;世界可能仍能解析,file-not-found 原版报)。
+                    // Dynamic source / out of range: zone-1 glue item
+                    // (rt::eval_include drives the original Eval; the world
+                    // may still resolve it, file-not-found reported by the
+                    // original).
                     let stmt_text = expr.to_untyped().full_text().trim().to_string();
                     let at = cx.span_of(expr.span());
                     let refs: Vec<(String, Ref)> = top.env.module.clone();
@@ -932,7 +1015,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 }
             }
         }
-        // 累积器移出:文件装配段按原局部名消费。
+        // Move out of the accumulator: the file assembly section consumes
+        // it under the original local names.
         let TopGen {
             env,
             own,
@@ -946,7 +1030,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         for (_, slot) in &plan.tops {
             state_fields.push(slot.clone());
         }
-        // 模块 body:顶层内容按源序折叠(规则包装后续内容),入槽。
+        // Module body: top-level content folds in source order (rules wrap
+        // subsequent content) into the slot.
         let body_slot = format!("BODY_{}", plan.mod_name);
         state_fields.push(body_slot.clone());
         let mut body_env = env.clone();
@@ -961,14 +1046,17 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
         );
 
-        // 文件体:file_span 锚点 + 函数体 + eval(填槽)+ module(导出面);
-        // 单文件形态包进 `mod` 块,目录形态独立成文件(镜像源码树)。
+        // File body: file_span anchor + function bodies + eval (slot
+        // filling) + module (export surface); wrapped in a `mod` block for
+        // the single-file form, an independent file mirroring the source
+        // tree for the directory form.
         let mut body = format!(
             "\n    #[allow(non_snake_case, dead_code)]\n    pub(crate) fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
             plan.path
         );
-        // 解析诊断(对照官方 compile parse 阶段):首条错误即 bail;
-        // 多条时信息集合口径的差由错误测试自然承载。
+        // Parse diagnostics (mirrors the official compile parse stage):
+        // bail on the first error; with several, the message-set difference
+        // is naturally carried by the error tests.
         let parse_guard = if plan.parse_diags.is_empty() {
             String::new()
         } else {
@@ -977,8 +1065,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 .iter()
                 .map(|m| format!("{m:?}"))
                 .collect();
-            // 多条解析诊断一次带全(Err 携 EcoVec;对照官方 compile
-            // 的 parse 阶段收集行为——单条 bail 曾让多错误测试失配)。
+            // All parse diagnostics in one go (Err carries an EcoVec;
+            // mirrors the official compile parse stage's collection — a
+            // single bail once made multi-error tests mismatch).
             format!(
                 "        return Err(eco_vec![{}]);\n",
                 msgs.iter()
@@ -989,14 +1078,14 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         };
         let _ = writeln!(
             body,
-            "\n    /// `{}` 的求值:填 import 槽与自身绑定槽(模块求值的镜像)。\n\
+            "\n    /// Evaluation of `{}`: fills import slots and its own binding slots (the mirror of module evaluation).\n\
              \x20   pub(super) fn eval(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
              \x20       let _ = (&*engine, context);\n{parse_guard}{import_fills}{binding_code}        Ok(())\n    }}",
             plan.path
         );
         let _ = writeln!(
             body,
-            "\n    /// `{}` 的模块作用域(import 抄入 + 本文件顶层绑定),从已填槽位构建。\n\
+            "\n    /// Module scope of `{}` (imports copied in + this file's top-level bindings), built from filled slots.\n\
              \x20   #[allow(non_snake_case, dead_code)]\n\
              \x20   pub(super) fn module(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n\
              \x20       let _ = __st;\n\
@@ -1010,14 +1099,17 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             module_stem(&plan.path),
             path_repr = plan.path
         );
-        // 目录形态的完整模块路径段(镜像 typ 路径,目录消歧)。
+        // Full module path segments for the directory form (mirroring the
+        // typ path; disambiguating directories).
         let tree_full: Vec<String> = plan
             .path
             .strip_suffix(".typ")
             .unwrap_or(&plan.path)
             .split('/')
-            // 树段名兼作文件名与模块声明:`r#` 前缀会进文件名(非法)
-            // 与 mod 声明/路径不一致——用 sanitize_key(剥 r# 加 _kw)。
+            // Tree segments double as file names and module declarations:
+            // an `r#` prefix would end up in a file name (illegal) and
+            // disagree with the mod declaration/path — use sanitize_key
+            // (strips r#, adds _kw).
             .map(sanitize_key)
             .collect();
         let tree_path = tree_full.join("::");
@@ -1029,8 +1121,8 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 
         if is_entry {
             top_defines = file_defines;
-            let _ = writeln!(eval_flat, "    // 入口 `{entry}`(被依赖文件已在上方求值)。");
-            let _ = writeln!(eval_tree, "    // 入口 `{entry}`(被依赖文件已在上方求值)。");
+            let _ = writeln!(eval_flat, "    // Entry `{entry}` (dependencies were evaluated above).");
+            let _ = writeln!(eval_tree, "    // Entry `{entry}` (dependencies were evaluated above).");
         }
         let _ = writeln!(
             eval_flat,
@@ -1038,8 +1130,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             plan.mod_name
         );
         let _ = writeln!(eval_tree, "    {tree_path}::eval(&__st, engine, context)?;");
-        // 按路径装配臂:依赖闭包拓扑序求值 + 自身求值与装配(fresh
-        // 槽板,单测试只装配该文件——与解释器单文件编译同阶)。
+        // Assemble-by-path arm: evaluate the dependency closure in
+        // topological order + the file's own evaluation and assembly (a
+        // fresh slot board; a single test assembles just that file — same
+        // order of magnitude as the interpreter's single-file compile).
         let closure = dep_closure(&plans, idx);
         let mut arm_flat = format!("        \"{}\" => Some((|| {{\n", plan.path);
         let mut arm_tree = arm_flat.clone();
@@ -1073,7 +1167,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
 
     let degraded_header = if cx.lenient && !cx.diags.is_empty() {
-        let mut header = String::from("// 降级清单(宽松模式,功能缺失点,运行时将发 warning):\n");
+        let mut header = String::from("// Degradation list (lenient mode; missing features, warned at runtime):\n");
         for d in &cx.diags {
             header.push_str(&format!(
                 "// - [{}] {}\n",
@@ -1092,9 +1186,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         .map(|p| p.mod_name.clone())
         .expect("entry in plans");
     let mut fields = String::new();
-    // 去重:源面的重复参数名(如 `f(v: 1, v: 2)` 的错误测试)会对
-    // 同名默认槽登记两次,重复字段让生成物无法编译(scripting-closure
-    // 驱动);重复参数的语义分歧由该错误测试自然承载。
+    // Dedup: duplicate parameter names in the source (e.g. the error test
+    // `f(v: 1, v: 2)`) register the same default slot twice; a duplicate
+    // field makes the output uncompilable. The semantic divergence for
+    // duplicate parameters is naturally carried by that error test.
     let mut seen_fields = std::collections::BTreeSet::new();
     for slot in &state_fields {
         if seen_fields.insert(slot.clone()) {
@@ -1109,7 +1204,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 
     let span_consts = cx.span_consts();
     let header = format!(
-        "// 由 trust 从包 `{module_name}`(入口 {entry})生成,勿手改。\n{degraded_header}\n\n\
+        "// Generated by trust from package `{module_name}` (entry {entry}); do not edit.\n{degraded_header}\n\n\
          use std::sync::LazyLock;\n\
          use comemo::Tracked;\n\
          use typst::diag::{{At, SourceResult, bail}};\n\
@@ -1120,20 +1215,21 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          const SPAN: Span = Span::detached();\n{span_consts}\n\
-         /// 本包的求值状态:全部顶层绑定槽与 import 槽(每构建一份)。\n\
+         /// Evaluation state of this package: all top-level binding slots and import slots (one instance per build).\n\
          #[derive(Default)]\n\
          pub struct __State {{\n{fields}}}\n\n\
-         /// 包求值的镜像:宿主每次构建(World)调用一次,按拓扑序求值各文件。\n\
+         /// Mirror of package evaluation: the host calls this once per build (World); evaluates the files in topological order.\n\
          pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n\n\
-         /// 一行接入:驱动 module_init 求值并返回模块(注入宿主 library 用\n\
-         /// `rt::bind_module`;测试世界 InjectWorld::init_native_module 已内置)。\n\
+         /// One-line integration: drives module_init and returns the module (to inject into a host library use\n\
+         /// `rt::bind_module`; the test world's InjectWorld::init_native_module already wires it).\n\
          pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n\n\
-         /// 新建求值槽板(批驱动自管生命周期时用)。\n\
+         /// Creates a fresh evaluation slot board (for batch drivers managing their own lifecycle).\n\
          pub fn new_state() -> std::sync::Arc<__State> {{ std::sync::Arc::new(__State::default()) }}\n\n\
-         /// 按文件路径按需装配:在给定槽板上先按拓扑序求值该文件的\n\
-         /// 依赖闭包,再求值自身并装配模块。官方 tests/suite 批驱动:\n\
-         /// 每测试 fresh 槽板 + 单文件装配,全程只构建**一个**二进制\n\
-         /// (翻译产物整体一次编译,编译次数与测试数无关)。\n\
+         /// Assembles on demand by file path: on the given slot board, first evaluates the file's\n\
+         /// dependency closure in topological order, then evaluates the file itself and assembles its\n\
+         /// module. Drives the official tests/suite batch runner: each test gets a fresh board +\n\
+         /// single-file assembly, all inside **one** binary (the translated output is compiled once;\n\
+         /// the compile count is independent of the test count).\n\
          pub fn module_by_path(path: &str, board: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> Option<SourceResult<Module>> {{\n    match path {{\n{{REGISTRY}}        _ => None,\n    }}\n}}\n{{ITEMS}}"
     );
     PackageParts {
@@ -1148,9 +1244,10 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
 }
 
-/// 单文件形态:header 的占位替换为扁平 eval 驱动与全部 `mod` 块。
-/// 逐段 `push_str` 拼接(`writeln!` 格式串的 `{{}}}}` 转义易错),
-/// 与重构前产物逐字节同形,是差分与快照的锁定基准。
+/// Single-file form: the header's placeholders are replaced with the flat
+/// eval driver and all `mod` blocks. Assembled from `push_str` segments
+/// (the `{{}}}}` escapes of a `writeln!` format string are error-prone);
+/// byte-identical to the pre-refactor output and locked by snapshots.
 fn render_single(parts: &PackageParts) -> String {
     let mut items = String::new();
     for f in &parts.files {
@@ -1160,7 +1257,8 @@ fn render_single(parts: &PackageParts) -> String {
         items.push_str(&f.body);
         items.push_str("}\n");
     }
-    // C2 闭包原生体与每调用点节点静态(根级,可见 __State 与导入)。
+    // C2 closure native bodies and per-call-site node statics (at the root,
+    // with visibility of __State and the imports).
     items.push_str(&parts.closure_items);
     items.push_str(&parts.closure_nodes);
     parts
@@ -1170,13 +1268,16 @@ fn render_single(parts: &PackageParts) -> String {
         .replace("{ITEMS}", &items)
 }
 
-/// 目录形态:镜像源码树的多文件产物(相对路径 → 内容,根为 `mod.rs`)。
-/// 每个 typ 文件一个 rust 文件(首行 `use super::*;`,文件体剥掉单
-/// 文件 `mod` 块的一层缩进,`pub(super)` 放宽为 `pub(crate)`,扁平
-/// 模块路径 `m<i>_<stem>::module` 换为树路径);`x.typ` 与 `x/` 目录
-/// 并存时子模块声明并入 `x.rs` 尾部,否则目录用 `mod.rs`(声明
-/// `use super::*;` + `pub mod 子;`)。glob 链靠"父的私有 use 对后代
-/// 可见",与单文件形态同机制。
+/// Directory form: a multi-file output mirroring the source tree (relative
+/// path → content, root being `mod.rs`). One rust file per typ file (first
+/// line `use super::*;`, the file body dedented one level from the
+/// single-file `mod` block, `pub(super)` widened to `pub(crate)`, and the
+/// flat module path `m<i>_<stem>::module` replaced by the tree path); when
+/// `x.typ` and an `x/` directory coexist, the child-module declarations
+/// are appended to the tail of `x.rs`, otherwise the directory gets a
+/// `mod.rs` (declaring `use super::*;` + `pub mod child;`). The glob chain
+/// relies on "a parent's private use is visible to descendants", the same
+/// mechanism as the single-file form.
 pub fn translate_package_tree(
     input: &PackageInput,
     module_name: &str,
@@ -1188,7 +1289,8 @@ pub fn translate_package_tree(
     Ok(tree)
 }
 
-/// 宽松目录形态:缺口降级为占位,返回 (文件树, 诊断清单)。
+/// Lenient directory form: gaps degrade to placeholders; returns (file
+/// tree, diagnostic list).
 pub fn translate_package_tree_lenient(
     input: &PackageInput,
     module_name: &str,
@@ -1206,7 +1308,8 @@ fn tree_impl(
 
     let mut tree = std::collections::BTreeMap::new();
 
-    // 根 `mod.rs`:header(树形态 eval 驱动)+ 顶层模块声明。
+    // Root `mod.rs`: header (tree-form eval driver) + top-level module
+    // declarations.
     let mut root_segs: Vec<String> = Vec::new();
     for f in &parts.files {
         let seg = f.tree_full[0].clone();
@@ -1224,9 +1327,10 @@ fn tree_impl(
         .replace("{REGISTRY}", &parts.registry_tree)
         .replace("{ITEMS}", &root_decls);
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
-    // C2 闭包段与文件体同款:体内对其他文件的扁平模块引用
-    // (`{flat}::module(` 与提升体限定的 `{flat}::file_span(`)
-    // 换为树路径。
+    // The C2 closure section gets the same treatment as file bodies:
+    // flat-module references to other files inside the bodies
+    // (`{flat}::module(` and the hoisted-body-qualified `{flat}::file_span(`)
+    // are replaced with tree paths.
     let mut closure_items = parts.closure_items.clone();
     for g in &parts.files {
         closure_items = closure_items.replace(
@@ -1242,7 +1346,8 @@ fn tree_impl(
     root.push_str(&cx_nodes);
     tree.insert("mod.rs".to_string(), root);
 
-    // 目录 → 直接子段(有序去重);根为空段,深度 = 段下标。
+    // Directory → direct child segments (ordered, deduped); the root is
+    // the empty segment, depth = segment index.
     let mut dir_subs: std::collections::BTreeMap<Vec<String>, Vec<String>> =
         std::collections::BTreeMap::new();
     for f in &parts.files {
@@ -1256,7 +1361,8 @@ fn tree_impl(
         }
     }
 
-    // typ 文件 → 镜像 `.rs`;与目录同名的文件兼作目录声明。
+    // typ file → mirrored `.rs`; a file with the same name as a directory
+    // doubles as that directory's declaration.
     let by_tree: std::collections::HashMap<Vec<String>, ()> = parts
         .files
         .iter()
@@ -1264,8 +1370,10 @@ fn tree_impl(
         .collect();
     for f in &parts.files {
         let mut body = dedent4(&f.body).replace("pub(super) fn", "pub(crate) fn");
-        // body 内对其他文件的引用(`{flat}::module(`,import 填充与
-        // 模块路径表达式)换为树路径;扁平名唯一,前缀替换无歧义。
+        // References to other files inside the body (`{flat}::module(`,
+        // import fills and module-path expressions) are replaced with tree
+        // paths; flat names are unique, so the prefix replacement is
+        // unambiguous.
         for g in &parts.files {
             if g.flat_name != f.flat_name {
                 body = body.replace(
@@ -1281,12 +1389,12 @@ fn tree_impl(
             }
             body.push_str(&decls);
         }
-        // rust 文件名用 sanitize 段(与模块声明一致:`mark-shapes.typ`
-        // → `mark_shapes.rs`)。
+        // Rust file names use sanitize segments (consistent with the
+        // module declarations: `mark-shapes.typ` → `mark_shapes.rs`).
         let rel = format!("{}.rs", f.tree_full.join("/"));
         tree.insert(rel, format!("use super::*;\n{body}"));
     }
-    // 无同名文件的目录:`dir/mod.rs`。
+    // Directories with no same-named file: `dir/mod.rs`.
     for (dir, subs) in &dir_subs {
         if dir.is_empty() || by_tree.contains_key(dir) {
             continue;
@@ -1300,7 +1408,9 @@ fn tree_impl(
     (tree, cx.diags)
 }
 
-/// 目录形态剥掉单文件 `mod` 块的一层缩进(每行前导 4 空格,不足则原样)。
+/// Strip one level of indentation (the single-file `mod` block's 4 spaces)
+/// for the directory form (lines with fewer leading spaces pass through
+/// unchanged).
 fn dedent4(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for line in s.split_inclusive('\n') {
@@ -1311,9 +1421,10 @@ fn dedent4(s: &str) -> String {
 
 
 
-/// 收集被就地修改的绑定根名:可变方法调用(push/pop/insert/remove)
-/// 与赋值/复合赋值的目标根标识符(对照 typst 的 access 可变语义——
-/// 模块绑定同样可就地修改)。
+/// Collect the root names of bindings mutated in place: targets of
+/// mutating method calls (push/pop/insert/remove) and of
+/// assignments/compound assignments (mirrors typst's mutable access
+/// semantics — module bindings are likewise mutable in place).
 pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
     use typst_syntax::SyntaxKind as K;
     if let Some(fc) = node.cast::<typst_syntax::ast::FuncCall>()
@@ -1337,8 +1448,9 @@ pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut V
     {
         out.push(root);
     }
-    // 解构赋值 `(a, b, ..c) = ...` / `(a.at(i),) = ...`:模式内全部
-    // 可放叶子的根(对照 binding.rs DestructAssignment 叶子走 access)。
+    // Destructuring assignment `(a, b, ..c) = ...` / `(a.at(i),) = ...`:
+    // all placeable-leaf roots in the pattern (mirrors binding.rs
+    // DestructAssignment's leaves going through access).
     if let Some(assign) = node.cast::<typst_syntax::ast::DestructAssignment>() {
         collect_pattern_roots(assign.pattern().to_untyped(), out);
     }
@@ -1347,8 +1459,9 @@ pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut V
     }
 }
 
-/// 解构模式的可放叶子根收集(叶子 = Ident 或以 Ident 根的
-/// 字段/accessor 链;重复无害,消费侧为集合)。
+/// Collect placeable-leaf roots of a destructuring pattern (leaf = Ident,
+/// or a field/accessor chain rooted at an Ident; duplicates are harmless —
+/// the consumer is a set).
 fn collect_pattern_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
     if let Some(root) = place_root(node) {
         out.push(root);
@@ -1358,8 +1471,9 @@ fn collect_pattern_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>)
     }
 }
 
-/// 可放路径的根名(Ident 或以 Ident 开头的字段/accessor 链
-/// ——含 `at`/`first`/`last` 存取器调用;其余形态 None)。
+/// The root name of a placeable path (an Ident, or a field/accessor chain
+/// starting at an Ident — including `at`/`first`/`last` accessor calls;
+/// None otherwise).
 fn place_root(node: &typst_syntax::SyntaxNode) -> Option<String> {
     use typst_syntax::ast::AstNode;
     if let Some(ident) = node.cast::<typst_syntax::ast::Ident>() {
@@ -1380,8 +1494,9 @@ fn place_root(node: &typst_syntax::SyntaxNode) -> Option<String> {
     None
 }
 
-/// 文件的依赖闭包(含自身),依赖在前(与 topo_order 的访问一致,
-/// include 边亦为依赖)。
+/// A file's dependency closure (including itself), dependencies first
+/// (consistent with topo_order's visit; include edges count as
+/// dependencies too).
 fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
     fn visit(
         i: usize,
@@ -1407,10 +1522,11 @@ fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
     order
 }
 
-/// 项绑定(模块字段)的目标文件:基础模块入口导出表 → 项槽 →
-/// 文件索引(仅 IMPORT 槽——其边目标即模块文件身份)。供体内
-/// `import 项名: *` 静态展开(alchemist/diagraph 驱动);链不通
-/// 返回 None,通配落运行期层。
+/// Target file of an item binding (module field): base module entry export
+/// table → item slot → file index (IMPORT slots only — their edge target
+/// is the module's file identity). Feeds the static expansion of in-body
+/// `import item: *`; returns None when the chain is unavailable and the
+/// wildcard falls to the runtime layer.
 fn item_file(
     export_table: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     slot_files: &Option<std::rc::Rc<std::collections::BTreeMap<String, String>>>,
@@ -1424,12 +1540,15 @@ fn item_file(
     slot_files.as_ref()?.get(slot).cloned()
 }
 
-/// 从包 spec 取短名(`@preview/oxifmt:1.0.0` → `oxifmt`)。
-/// 合并键 `{spec}/{包内路径}` 的 spec 前缀提取(spec 自含 `/`,
-/// 以冒号后的首个 `/` 为界);非合并键返回空串。
+/// Take the short name from a package spec (`@preview/oxifmt:1.0.0` →
+/// `oxifmt`). Extracting the spec prefix of a merge key
+/// `{spec}/{path-inside-package}` (the spec itself contains `/`; bounded
+/// by the first `/` after the colon); returns an empty string for
+/// non-merge keys.
 
-/// 槽名→所属文件(`V{i}_…` 的 i 是 plan 序号;`IMPORT_{mod}_…`
-/// 反查该 mod 的内部 import 边目标)。模块值链通配解析用。
+/// Slot name → owning file (`V{i}_…` where i is the plan index;
+/// `IMPORT_{mod}_…` reverse-looks-up that mod's internal import edge
+/// target). Used by module-value-chain wildcard resolution.
 fn slot_target_file(
     slot: &str,
     plans: &[super::plan::FilePlan],
@@ -1442,7 +1561,8 @@ fn slot_target_file(
         return Some(plans[i].path.clone());
     }
     if let Some(rest) = slot.strip_prefix("IMPORT_") {
-        // mod_name 自身含下划线(m55_anchors)——按"plan 前缀 + _"剥离。
+        // The mod_name itself contains underscores (m55_anchors) — strip
+        // by "plan prefix + _".
         let plan = plans.iter().find(|p| {
             rest.strip_prefix(&p.mod_name)
                 .and_then(|r| r.strip_prefix('_'))
@@ -1453,7 +1573,8 @@ fn slot_target_file(
             if edge.is_include {
                 continue;
             }
-            // 外部包(含已并入翻译的依赖):绑定名按 spec 名或改名。
+            // External packages (including merged dependencies): the
+            // binding name is the spec name or the rename.
             let bound = if edge.external {
                 match &edge.items {
                     super::plan::ImportItems::Rename(name)
@@ -1476,7 +1597,8 @@ fn slot_target_file(
     None
 }
 
-/// module_stem 的模块级可达副本(plan.rs 内为 pub(super))。
+/// A module-level reachable copy of module_stem (pub(super) inside
+/// plan.rs).
 fn module_stem_pub(path: &str) -> String {
     path.rsplit('/')
         .next()
@@ -1495,9 +1617,12 @@ fn import_edge_via_glue(
     env: &mut Env,
     own: &[(String, String)],
     state_fields: &mut Vec<String>,
-    // 语句位 sink(binding_code):胶水求值依赖此前的顶层 let 槽,
-    // 不得随 import_fills 提前(静态边的填充序无关,提升无害;胶水
-    // 边的求值位 = 源序语句位,对照原版逐语句求值)。
+    // The statement-position sink (binding_code): the glue evaluation
+    // depends on the top-level let slots above it, so it must not be
+    // hoisted with import_fills (static edges' fill order is irrelevant,
+    // hoisting them is harmless; a glue edge's evaluation position = its
+    // source-order statement position, mirroring the original's
+    // statement-by-statement evaluation).
     inline_sink: &mut String,
     file_defines: &mut String,
     bare_expected: Option<&str>,
@@ -1506,7 +1631,7 @@ fn import_edge_via_glue(
     let stmt = edge
         .stmt_text
         .as_deref()
-        .expect("胶水边带语句原文(计划期捕获)");
+        .expect("glue edge carries its statement text (captured at plan time)");
     let expected: Vec<String> = match &edge.items {
         ImportItems::Bare => bare_expected
             .map(|n| vec![n.to_string()])
@@ -1524,15 +1649,17 @@ fn import_edge_via_glue(
             .iter()
             .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone()))
             .collect(),
-        ImportItems::Wildcard => unreachable!("通配不走差集胶水(层机制)"),
+        ImportItems::Wildcard => unreachable!("wildcards do not take the set-difference glue (layer mechanism)"),
     };
-    // 可见名物化(当前 env 模块域;对照原版:语句位点的词法面)。
+    // Materialize the visible names (the current env's module domain;
+    // mirrors the original: the lexical surface at the statement position).
     let refs: Vec<(String, Ref)> = env.module.clone();
     let mut caps: Vec<String> = refs
         .iter()
         .map(|(n, r)| format!("(\"{}\", {})", escape(n), cx.ref_value(r)))
         .collect();
-    // 本文件此前顶层绑定(env.module 不含 own,须显式并入)。
+    // This file's prior top-level bindings (env.module excludes own; they
+    // must be merged in explicitly).
     for (seen, seen_slot) in own {
         caps.push(format!(
             "(\"{}\", rt::read(&__st.{seen_slot})?)",
@@ -1584,18 +1711,25 @@ fn import_edge_via_glue(
 
 
 impl Ctx {
-    /// 单条顶层 import 边的处理(env 注入 + 槽填充 + 导出面;由第二遍
-    /// 的**源序流水**在 ModuleImport 语句位置调用——import 在 let 之前
-    /// 还是之后影响名字解析,与原生逐语句求值一致,不能整体前置)。
+    /// Handling of a single top-level import edge (env injection + slot
+    /// filling + export surface; called by pass two's **source-order
+    /// stream** at the ModuleImport statement position — whether an import
+    /// precedes or follows a let affects name resolution, consistent with
+    /// native statement-by-statement evaluation, so it must not be hoisted
+    /// wholesale).
     #[allow(clippy::too_many_arguments)]
 
 
-/// 区 1 胶水边处理:语句原文经 `rt::eval_import` 驱动原版
-/// `Eval for ast::ModuleImport`(源分派/加载含 file-not-found 与环/
-/// bare 名三档/Items 嵌套与 unresolved/全部警告,均为原版代码),
-/// 差集按静态可知的绑定名填槽转出。
-/// `bare_expected`:bare 形态的静态名(Str 字面量的 stem / 模块链末段
-/// 或根名);动态源 bare 传 None(原版运行期报 dynamic 错)。
+/// Zone-1 glue edge handling: the statement text drives the original
+/// `Eval for ast::ModuleImport` via `rt::eval_import` (source
+/// dispatch/loading including file-not-found plus the cycle/bare-name
+/// tiers/Items nesting and unresolved/all warnings — all original code);
+/// the difference set fills slots and re-exports by the statically known
+/// binding names.
+/// `bare_expected`: the static name for the bare form (the stem of a Str
+/// literal / the last segment of a module chain or the root name); pass
+/// None for a dynamic-source bare (the original reports the dynamic error
+/// at runtime).
     fn process_import_edge(
         &mut self,
         edge: &super::plan::ImportEdge,
@@ -1616,18 +1750,22 @@ impl Ctx {
         binding_code: &mut String,
     ) {
         let cx = self;
-        // 单次迭代壳:方法体内的裸 `continue` 语义 == 跳过本条边
-        //(原属边循环体;内层循环的 continue 不受影响)。
+        // Single-iteration shell: a bare `continue` in the method body
+        // means "skip this edge" (formerly the edge loop's body; inner
+        // loops' continues are unaffected).
         for _ in std::iter::once(()) {
 
             if edge.is_include {
                 continue;
             }
-            // 外部包:槽位 + 装配期运行时导入(未翻译依赖走解释器)。
+            // External package: slots + assembly-time runtime import
+            // (untranslated dependencies go through the interpreter).
             if edge.external {
-                // 已并入翻译的依赖:spec 在 target(入口合并键)前缀
-                // (spec 自含 `/`,取到冒号后的首个 `/` 为止);求值期
-                // 静态装配生成模块,不经 import_external。
+                // A merged dependency: the spec prefixes the target (the
+                // entry merge key; the spec itself contains `/`, taken up
+                // to the first `/` after the colon); at evaluation time
+                // the generated module is assembled statically, without
+                // import_external.
                 let spec = spec_prefix(&edge.target);
                 let name = match &edge.items {
                     ImportItems::Rename(name) => name.clone(),
@@ -1661,7 +1799,7 @@ impl Ctx {
                             escape(&name)
                         );
                     }
-                    // 模块改名 + 成员列表:双绑定(elembic 驱动)。
+                    // Module rename + member list: double binding.
                     ImportItems::RenameList(mname, list) => {
                         env.module.push((mname.clone(), Ref::Slot(slot.clone())));
                         let _ = writeln!(
@@ -1714,8 +1852,9 @@ impl Ctx {
                     }
                     ImportItems::Wildcard => {
                         if input.dep_entries.contains_key(&spec) {
-                            // 合并依赖的通配:按入口导出表展开(与 LIST
-                            // 同形,字段访问物化;gentle-clues 驱动)。
+                            // Wildcard of a merged dependency: expanded via
+                            // the entry export table (same shape as LIST,
+                            // materializing field accesses).
                             for (wname, _) in &export_table[&edge.target] {
                                 if env.module.iter().any(|(n, _)| n == wname) {
                                     continue;
@@ -1739,19 +1878,22 @@ impl Ctx {
                                 );
                             }
                         } else {
-                            cx.diag(edge.span, "外部包的通配 import 暂不支持(须翻译该包)".into());
+                            cx.diag(edge.span, "wildcard import from an external package is not supported (the package must be translated)".into());
                         }
                     }
                 }
                 continue;
             }
-            // 任意表达式源(`import plugin("…") as hypher`,
-            // touying/hy-dro-gen 驱动):源翻译求值为模块值,后续绑定
-            // 与模块值 import 同款(对照 typst-eval:import 源求值为
-            // 模块即可)。
+            // Arbitrary-expression source (`import plugin("…") as hypher`):
+            // the source is translated and evaluated into a module value,
+            // and the bindings then follow the module-value import shape
+            // (mirrors typst-eval: an import source just has to evaluate to
+            // a module).
             if edge.source_node.is_some() {
-                // 区 1 胶水:任意表达式源经原版 Eval 分派(模块/Str/Path/
-                // 校验/警告全原版),差集填槽;通配走层 + 导出面枚举。
+                // Zone-1 glue: the arbitrary-expression source dispatched
+                // through the original Eval (module/Str/Path/validation/
+                // warnings all original), difference set filling slots;
+                // wildcards take the layer + export-surface enumeration.
                 if matches!(edge.items, ImportItems::Wildcard) {
                     let expr_node = edge
                         .source_node
@@ -1792,11 +1934,15 @@ impl Ctx {
                 }
                 continue;
             }
-            // 模块值表达式 import(`import deps.oxifmt: strfmt`)。
+            // Module-value expression import (`import deps.oxifmt:
+            // strfmt`).
             if let Some((root, fields)) = &edge.module_access {
-                // 非通配形态一律走胶水(值类型运行期才知:模块/Str/Path/
-                // 全局类型的 scope;原版分派+校验全承担,含 `import enum`
-                // 的 no-effect 警告与 `import p`(p 为串)的 dynamic 错)。
+                // Non-wildcard shapes always go through glue (the value's
+                // type is only known at runtime: module/Str/Path/global
+                // type's scope; the original's dispatch + validation covers
+                // everything, including the no-effect warning for `import
+                // enum` and the dynamic error for `import p` where p is a
+                // string).
                 if !matches!(edge.items, ImportItems::Wildcard) {
                     let bare =
                         fields.last().cloned().unwrap_or_else(|| root.clone());
@@ -1813,10 +1959,12 @@ impl Ctx {
                     );
                     continue;
                 }
-                // 通配:静态解析链(root 须可见)展开;根不可见(全局
-                // 类型/函数的 scope,如 `import assert.with(true): *`)
-                // 走运行期层 + 导出面运行期枚举(对照原版通配分支的
-                // `scope.iter()` 逐名 bind)。
+                // Wildcard: expanded via the static resolution chain (the
+                // root must be visible); a root that is not (the scope of a
+                // global type/function, e.g. `import assert.with(true): *`)
+                // takes the runtime layer + runtime export-surface
+                // enumeration (mirroring the original wildcard branch's
+                // per-name `scope.iter()` bind).
                 let base = match env.module.iter().rev().find(|(n, _)| n == root) {
                     Some((_, module_ref)) => cx.ref_value(module_ref),
                     None => {
@@ -1831,11 +1979,15 @@ impl Ctx {
                         escape(field)
                     );
                 }
-                // 绑定进**槽**(eval 期填充 + 模块作用域转出):与外部包
-                // import 同款形态——下游 `import "本文件": 名字` 可达
-                // (对照原生:模块作用域含 import 引入的名字)。此前绑定
-                // 为即时表达式,文件内可用但不可转出,fletcher 0.5.9 的
-                // `#import cetz: vector`(外部模块的子模块值)踩中此缺口。
+                // Bindings go into **slots** (filled at eval time +
+                // re-exported through the module scope): the same shape as
+                // external package imports — a downstream `import
+                // "this-file": name` can reach them (mirroring the
+                // original: the module scope contains names introduced by
+                // imports). These used to be immediate expressions — usable
+                // within the file but not re-exportable, which hit the
+                // `#import cetz: vector` case (a sub-module value of an
+                // external module).
                 match &edge.items {
                     ImportItems::Bare => {
                         let name = fields.last().cloned().unwrap_or_else(|| root.clone());
@@ -1874,7 +2026,7 @@ impl Ctx {
                             escape(&name)
                         );
                     }
-                    // 模块改名 + 成员列表:双绑定(elembic 驱动)。
+                    // Module rename + member list: double binding.
                     ImportItems::RenameList(mname, list) => {
                         let mslot = format!(
                             "IMPORT_{}_{}",
@@ -1942,9 +2094,11 @@ impl Ctx {
                         }
                     }
                     ImportItems::Wildcard => {
-                        // 模块值链的通配:静态解析链(root→文件,逐字段
-                        // 经导出表到目标文件)后按其导出表展开
-                        // (alchemist 的 `import cetz.draw: *` 等)。
+                        // Wildcard of a module-value chain: after the
+                        // static resolution chain (root → file, then field
+                        // by field through the export table to the target
+                        // file), expand by that file's export table (e.g.
+                        // `import cetz.draw: *`).
                         let mut cur: Option<String> = None;
                         if let Some((_, r#ref)) =
                             env.module.iter().rev().find(|(n, _)| n == root)
@@ -1993,9 +2147,11 @@ impl Ctx {
                                 );
                             }
                         } else {
-                            // 静态链不通:运行期层(体内名字经层解析)
-                            // + 导出面运行期枚举(模块作用域逐名 bind,
-                            // 对照原版通配分支)。
+                            // Static chain unavailable: runtime layer
+                            // (in-body names resolve through the layer) +
+                            // runtime export-surface enumeration (per-name
+                            // scope bind, mirroring the original wildcard
+                            // branch).
                             let mslot = format!(
                                 "IMPORT_{}_WILD_{}",
                                 sanitize_key(&plan.mod_name),
@@ -2022,11 +2178,14 @@ impl Ctx {
                 }
                 continue;
             }
-            // 世界可能仍能运行期解析(fixture 等):胶水,原版
-            // file-not-found 自然承担(此前翻译期拦截吞掉了错误)。
+            // The world may still resolve it at runtime (fixtures etc.):
+            // glue; the original file-not-found carries it (translate-time
+            // interception used to swallow the error).
             let Some(target_plan) = plans.iter().find(|p| p.path == edge.target) else {
-                // 通配越界:模块值经 import_external(pub import,含
-                // file-not-found)物化,运行期层 + 导出面运行期枚举。
+                // Wildcard out of range: the module value is materialized
+                // via import_external (public import, including
+                // file-not-found); runtime layer + runtime export-surface
+                // enumeration.
                 if matches!(edge.items, ImportItems::Wildcard) && !edge.raw.is_empty() {
                     let mslot = format!(
                         "IMPORT_{}_WILD",
@@ -2110,8 +2269,9 @@ impl Ctx {
                         escape(&bound)
                     );
                 }
-                // 模块改名 + 成员列表:模块槽绑定 + 逐成员字段访问
-                // (elembic 驱动:`import "base.typ" as base: ok, err`)。
+                // Module rename + member list: module slot binding + member
+                // field accesses one by one (`import "base.typ" as base:
+                // ok, err`).
                 ImportItems::RenameList(mname, list) => {
                     let mslot = match import_slots.get(&edge.target) {
                         Some(slot) => slot.clone(),
@@ -2157,8 +2317,10 @@ impl Ctx {
                 }
                 ImportItems::List(list) => {
                     for (name, rename) in list {
-                        // 点分项(`a.b as c`,hydra 驱动:首段按导出表
-                        // 解析,余段字段链物化进独立 IMPORT 槽)。
+                        // Dotted item (`a.b as c`): the first segment
+                        // resolves via the export table, the remaining
+                        // field chain is materialized into an independent
+                        // IMPORT slot.
                         let (first, rest): (&str, &[&str]) = match name.split_once('.') {
                             Some((f, r)) => {
                                 (f, r.split('.').collect::<Vec<_>>().leak())
@@ -2166,7 +2328,7 @@ impl Ctx {
                             None => (name.as_str(), &[]),
                         };
                         let Some(slot) = exports.get(first) else {
-                            cx.diag(edge.span, format!("`{}` 不包含导出 `{first}`", edge.target));
+                            cx.diag(edge.span, format!("`{}` does not export `{first}`", edge.target));
                             continue;
                         };
                         let as_name = rename.clone().unwrap_or_else(|| name.clone());

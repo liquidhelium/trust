@@ -1,7 +1,8 @@
-//! 代码块与语句直译:let 绑定、体内局部 import、赋值与解构赋值。
+//! Direct translation of code blocks and statements: let bindings, in-body
+//! local imports, assignments and destructuring assignments.
 //!
-//! 非末位语句值按 join 语义累积,末位表达式为块值(对照 typst code
-//! block 求值)。
+//! Non-final statement values accumulate with join semantics; the final
+//! expression is the block value (mirrors typst code-block evaluation).
 
 use std::fmt::Write as _;
 
@@ -19,10 +20,13 @@ impl Ctx {
     ) -> String {
         let mut out = String::from("{ let mut __out = Value::None;\n");
         let mut env = env.clone();
-        // 表达式位置 `let` 的提升槽(块作用域;对照 typst:let 是
-        // 表达式,在当前词法作用域绑定,块退出即弃)。语句位置的
-        // `#let` 由下方语句臂走 bind_local,不入提升面——只扫其
-        // init(init 内的 let 表达式仍绑定本块)。
+        // Hoisted slots for expression-position `let` (block-scoped;
+        // mirrors typst: let is an expression that binds in the current
+        // lexical scope and is discarded when the block exits).
+        // Statement-position `#let` goes through bind_local in the
+        // statement arm below and stays off the hoisting surface — only its
+        // init is scanned (a let expression inside the init still binds
+        // this block).
         let stmt_vec: Vec<ast::Expr> = stmts.collect();
         let hoist_decls = self.open_let_hoists(stmt_vec.iter().map(|s| match s {
             ast::Expr::LetBinding(lets) => match lets.init() {
@@ -36,19 +40,23 @@ impl Ctx {
                 let _ = writeln!(out, "    {line}");
             }
         }
-        // (尾表达式代码, 其 span):非末位语句值按 join 语义累积,
-        // 末位表达式同样并入 __out 后返回——对照 `eval_code` 的
-        // `output = ops::join(output, value).at(span)?`(每个表达式的
-        // 值都 join,错误站点为该表达式自身 span)。
+        // (tail expression code, its span): non-final statement values
+        // accumulate with join semantics, and the final expression is
+        // likewise joined into __out before returning — mirrors
+        // `eval_code`'s `output = ops::join(output, value).at(span)?`
+        // (every expression's value is joined; the error site is that
+        // expression's own span).
         let mut last: Option<(String, String)> = None;
         let mut iter = stmt_vec.into_iter();
         while let Some(stmt) = iter.next() {
             if let Some((prev, prev_at)) = last.take() {
                 let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
             }
-            // 代码块内的 set/show 规则:样式/规则先求值,**剩余全部**
-            // 语句作为代码块求值、display 成内容后挂上(对照
-            // `eval_code` 的 SetRule/ShowRule 特例——规则包装块尾)。
+            // set/show rules inside a code block: the styles/recipe are
+            // evaluated first, then **all remaining** statements are
+            // evaluated as a code block, displayed into content, and the
+            // styles attached (mirrors the SetRule/ShowRule special cases
+            // of `eval_code` — the rule wraps the block tail).
             if let ast::Expr::SetRule(set) = stmt {
                 let rest: Vec<ast::Expr> = iter.collect();
                 let tail = self.block(rest.into_iter(), &mut env);
@@ -113,7 +121,9 @@ impl Ctx {
                 continue;
             }
             if let ast::Expr::ModuleImport(import) = stmt {
-                // 函数体内局部 import:解析模块值表达式后抄入局部绑定。
+                // Local import inside a function body: resolve the
+                // module-value expression, then copy the bindings into
+                // locals.
                 let source = import.source();
                 let module_expr: Option<String> = match source {
                     ast::Expr::Ident(_) | ast::Expr::FieldAccess(_) => {
@@ -122,14 +132,16 @@ impl Ctx {
                                 let base = if let Some((_, rust)) =
                                     env.locals.iter().rev().find(|(n, _)| *n == root)
                                 {
-                                    // 局部/参数(tidy 的 `import style: *`):
-                                    // 运行期模块值,遮蔽同名模块绑定。
+                                    // Local/parameter (e.g. `import style:
+                                    // *`): a runtime module value that
+                                    // shadows a same-named module binding.
                                     format!("{rust}.clone()")
                                 } else {
                                     match env.module.iter().rev().find(|(n, _)| *n == root) {
                                         Some((_, module_ref)) => self.ref_value(module_ref),
                                         None => {
-                                            // 全局模块(如 `import calc: abs`)。
+                                            // A global module (e.g.
+                                            // `import calc: abs`).
                                             let at = self.span_of(stmt.span());
                                             format!("rt::global(engine, \"{root}\", {at})?")
                                         }
@@ -146,13 +158,14 @@ impl Ctx {
                                 Some(expr)
                             }
                             None => {
-                                self.diag(source.span(), "体内 import 源须为模块访问".into());
+                                self.diag(source.span(), "in-body import source must be a module access".into());
                                 continue;
                             }
                         }
                     }
                     ast::Expr::Str(str_expr) => {
-                        // 字符串路径:包模式解析到包内文件的模块值。
+                        // String path: in package mode, resolves to the
+                        // module value of a file inside the package.
                         let raw = str_expr.get().to_string();
                         let (Some(file), Some(files), Some(mods)) = (
                             self.current_file.clone(),
@@ -161,14 +174,16 @@ impl Ctx {
                         ) else {
                             self.diag(
                                 str_expr.span(),
-                                "体内字符串 import 仅在包模式支持(须用模块访问形态)".into(),
+                                "in-body string import is only supported in package mode (module-access form required)".into(),
                             );
                             continue;
                         };
-                        // 外部包 spec(`@preview/meander:0.4.4`,touying
-                        // 驱动):已并入翻译的依赖在合并模块表里按
-                        // `{spec}/` 前缀查入口文件,静态装配;未并入的
-                        // 回退运行时 import_external 解释。
+                        // External package spec (`@preview/meander:0.4.4`):
+                        // merged dependencies are looked up in the merged
+                        // module table by their `{spec}/` prefix to find
+                        // the entry file and assembled statically; others
+                        // fall back to runtime import_external
+                        // interpretation.
                         if raw.starts_with('@') {
                             if let Some((entry, _)) = mods
                                 .iter()
@@ -185,8 +200,9 @@ impl Ctx {
                             );
                         }
                         let mut target = normalize_import(&file, &raw);
-                        // 依赖包内的绝对 import 限定在该包合并键空间
-                        // (同顶层 import 的处理)。
+                        // Absolute imports inside a dependency package are
+                        // qualified into that package's merged key space
+                        // (same treatment as top-level imports).
                         if raw.starts_with('/')
                             && let Some(colon) = file.find(':')
                             && let Some(rel) = file[colon..].find('/')
@@ -200,15 +216,17 @@ impl Ctx {
                         }
                         match (files.contains_key(&target), mods.get(&target)) {
                             (true, Some(mod_name)) => {
-                                // 目标文件的模块作用域从槽板构建。
+                                // The target file's module scope is built
+                                // from the slot board.
                                 self.used_state = true;
                                 Some(format!(
                                     "Value::Module({mod_name}::module(&__st, engine, context)?)"
                                 ))
                             }
                             _ => {
-                                // 世界可能仍能运行期解析:胶水(原版
-                                // file-not-found 自然承担)。
+                                // The world may still resolve it at runtime:
+                                // glue (the original file-not-found carries
+                                // it naturally).
                                 let code =
                                     self.in_body_import_glue(&stmt, import, &mut env);
                                 let _ = writeln!(out, "    {{ {code} }}");
@@ -217,7 +235,8 @@ impl Ctx {
                         }
                     }
                     _ => {
-                        // 区 1 胶水:任意源表达式经原版 Eval 分派。
+                        // Zone-1 glue: any source expression dispatched
+                        // through the original Eval.
                         let code = self.in_body_import_glue(&stmt, import, &mut env);
                         let _ = writeln!(out, "    {{ {code} }}");
                         continue;
@@ -226,8 +245,10 @@ impl Ctx {
                 let Some(module_expr) = module_expr else {
                     continue;
                 };
-                // 形态:bare / rename → 模块值;列表 → 字段取值;
-                // 通配:内部文件目标按导出表静态展开(求值序保证槽已填)。
+                // Shapes: bare / rename → module value; list → field
+                // extraction; wildcard: internal file targets expand
+                // statically via the export table (evaluation order
+                // guarantees the slots are filled).
                 let internal_target = match (&source, import.imports()) {
                     (ast::Expr::Str(str_expr), Some(ast::Imports::Wildcard)) => {
                         let raw = str_expr.get().to_string();
@@ -271,8 +292,9 @@ impl Ctx {
                         let mut expanded = internal_target.as_ref().and_then(|target| {
                             self.export_table.as_ref().and_then(|t| t.get(target).cloned())
                         });
-                        // 模块值源(import cetz.draw: *,alchemist 驱动):
-                        // 槽→文件索引 + 导出表链式解析到目标文件。
+                        // Module-value source (`import cetz.draw: *`):
+                        // slot → file index + chained export-table
+                        // resolution to the target file.
                         if expanded.is_none()
                             && let Some((root, fields)) =
                                 parse_module_access(source)
@@ -307,9 +329,10 @@ impl Ctx {
                                     self.export_table.as_ref().and_then(|t| t.get(f).cloned())
                                 });
                         }
-                        // 模块字段绑定名(`import cetz: draw` / 顶层通配项,
-                        // alchemist/diagraph 驱动):Ref 携带的目标文件 →
-                        // 导出表静态展开,零运行期开销。
+                        // Module-field binding names (`import cetz: draw` /
+                        // top-level wildcard items): the target file carried
+                        // by the Ref → static expansion through the export
+                        // table, zero runtime cost.
                         if expanded.is_none()
                             && let Some((root, _)) = parse_module_access(source)
                             && let Some((
@@ -330,11 +353,16 @@ impl Ctx {
                                 }
                             }
                             None => {
-                                // 静态链不通:运行期通配层(对照 typst-eval
-                                // import.rs 通配分支——源求值为模块,scope
-                                // 逐名 bind 进当前作用域;此后本作用域的
-                                // 名字先查层再沿静态链回落)。仅此作用域
-                                // 受影响;静态可达的通配 import 不走此路。
+                                // Static chain unavailable: runtime wildcard
+                                // layer (mirrors the wildcard branch of
+                                // typst-eval import.rs — the source
+                                // evaluates to a module, and the scope binds
+                                // each name into the current scope; from
+                                // then on, names in this scope check the
+                                // layer first and fall back along the
+                                // static chain). Only this scope is
+                                // affected; statically reachable wildcard
+                                // imports do not take this path.
                                 let w = format!("__wild{}", self.fresh_id());
                                 let at = self.span_of(stmt.span());
                                 let _ = writeln!(
@@ -362,7 +390,8 @@ impl Ctx {
                 continue;
             }
             if let ast::Expr::DestructAssignment(assign_) = stmt {
-                // 解构赋值:目标须为已存在局部(对照 `Access` 语义)。
+                // Destructuring assignment: targets must be existing locals
+                // (mirrors `Access` semantics).
                 let value = self.expr(assign_.value(), &mut env);
                 let stmts = self.destructure(assign_.pattern(), value, &mut env, true);
                 out.push_str("    ");
@@ -379,8 +408,9 @@ impl Ctx {
                         | ast::BinOp::DivAssign
                 )
             {
-                // 赋值:统一走 classify_place 分类(局部/模块槽/捕获/
-                // 未命中/临时值,对照 `apply_assignment` + `Access`)。
+                // Assignment: uniformly classified via classify_place
+                // (local / module slot / captured / unresolved / temporary;
+                // mirrors `apply_assignment` + `Access`).
                 let code = self.assign_code(binary, &mut env);
                 let _ = writeln!(out, "    {code};");
                 continue;
@@ -389,8 +419,9 @@ impl Ctx {
             let at = self.span_of(stmt.span());
             last = Some((value, at));
         }
-        // 块值 = 全部语句值的 join(尾语句并入后返回 __out;无表达式
-        // 语句时 __out 保持 None,与空块值一致)。
+        // Block value = join of all statement values (the tail statement is
+        // joined in before returning __out; with no expression statements,
+        // __out stays None, matching the empty-block value).
         if let Some((tail, tail_at)) = last {
             let _ = writeln!(out, "    __out = rt::join(__out, {tail}, {tail_at})?;");
         }
@@ -400,12 +431,15 @@ impl Ctx {
         out.push('}');
         out
     }
-    /// 赋值/可变方法目标的分类(对照 typst-eval `access.rs` 的可
-    /// access 形态与 `Scopes::get_mut` 的解析序:局部层 → 模块槽 →
-    /// 全局)。路径段为字段访问与 accessor 方法(`at`/`first`/`last`)。
+    /// Classification of assignment / mutating-method targets (mirrors
+    /// typst-eval `access.rs`'s accessible shapes and `Scopes::get_mut`'s
+    /// resolution order: local level → module slot → global). Path segments
+    /// are field accesses and accessor methods (`at`/`first`/`last`).
     ///
-    /// 注:`at` 的参数在段处求值,先走目标链后求参数(纯下标表达式
-    /// 下与 typst 的"参数先求"等价;带副作用的下标才有顺序差)。
+    /// Note: `at`'s argument is evaluated at the segment, target chain
+    /// first, argument after (equivalent to typst's "arguments first" for
+    /// pure index expressions; only side-effecting indices see an ordering
+    /// difference).
     pub(super) fn classify_place(&mut self, expr: ast::Expr, env: &mut Env) -> Place {
         let mut segs = Vec::new();
         let mut root: Option<String> = None;
@@ -415,9 +449,10 @@ impl Ctx {
         let Some(root) = root else {
             return Place::Temporary;
         };
-        // 局部判定先于模块(捕获名以局部形态绑定进闭包环境;对照
-        // typst 词法层由内向外)。捕获局部(对照 `Binding::capture`
-        // 只读标)单独成类。
+        // Locality is decided before module bindings (captured names bind
+        // into the closure environment as locals; mirrors typst's
+        // inside-out lexical layers). Captured locals (mirroring the
+        // read-only `Binding::capture` marker) form their own class.
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == root) {
             if self.captured_locals.iter().any(|f| f.contains(rust)) {
                 return Place::Captured;
@@ -431,29 +466,36 @@ impl Ctx {
             .find(|(n, _)| *n == root)
             .map(|(_, r)| r)
         {
-            // 模块顶层流(in_closure==0)的可变槽:就地修改。
+            // Mutable slot on the module's top-level flow (in_closure==0):
+            // in-place mutation.
             Some(super::ctx::Ref::Slot(s))
                 if self.mutable_slots.contains(s) && self.in_closure == 0 =>
             {
                 Place::Slot { slot: s.clone(), path: segs }
             }
-            // 函数/闭包体内:模块绑定是捕获(对照 typst CapturesVisitor
-            // ——顶层函数同样是闭包),写即只读错。
+            // Inside a function/closure body: module bindings are captures
+            // (mirrors typst CapturesVisitor — top-level functions are
+            // closures too); writing is a read-only error.
             Some(_) if self.in_closure > 0 => Place::Captured,
-            // 模块域内的运行期引用(ModuleField/Value/未标可变的槽):
-            // 可变语义本轮不承载,保留翻译期诊断。
+            // Runtime references inside the module domain
+            // (ModuleField/Value/unmarked-mutable slots): mutable semantics
+            // are not carried in this iteration; keep the translate-time
+            // diagnostic.
             Some(_) => Place::Deferred,
-            // 词法层全部未命中:运行期查全局(对照 `Scopes::get_mut`
-            // 的 miss 分支:命中全局报常量,否则未知变量)。
+            // Lexical layers all miss: look up the global at runtime
+            // (mirrors the miss branch of `Scopes::get_mut`: a global hit
+            // reports constant, otherwise unknown variable).
             None => Place::Unresolved { name: root },
         }
     }
 
-    /// 赋值/复合赋值的统一发射(语句与表达式两处共用)。对照
-    /// typst-eval/src/ops.rs `apply_assignment`:**RHS 先求**,目标后
-    /// 访问;普通赋值且目标为字段链时末段走"缺失即创建"的字典插入
-    /// (对照 `access_dict` + `insert` 特例);复合赋值单次寻址 +
-    /// mem::take。
+    /// Unified emission for assignments and compound assignments (shared by
+    /// the statement and expression sites). Mirrors
+    /// typst-eval/src/ops.rs `apply_assignment`: **RHS evaluates first**,
+    /// target accessed after; a plain assignment whose target is a field
+    /// chain takes the "create-on-missing" dictionary insert at the last
+    /// segment (mirrors the `access_dict` + `insert` special case); a
+    /// compound assignment does a single addressing pass + mem::take.
     pub(super) fn assign_code(&mut self, binary: ast::Binary, env: &mut Env) -> String {
         use ast::BinOp;
         let compound = match binary.op() {
@@ -462,7 +504,7 @@ impl Ctx {
             BinOp::SubAssign => Some("sub"),
             BinOp::MulAssign => Some("mul"),
             BinOp::DivAssign => Some("div"),
-            _ => unreachable!("assign_code 只接赋值族"),
+            _ => unreachable!("assign_code only accepts assignment operators"),
         };
         let at = self.span_of(binary.span());
         let rhs = self.expr(binary.rhs(), env);
@@ -479,8 +521,9 @@ impl Ctx {
                 }
             }
             Place::Slot { slot, path } => {
-                // 可变模块槽:读改写回(对照 typst 顶层绑定的就地修改
-                // 语义);体引用 __st 须置 used_state。
+                // Mutable module slot: read-modify-write (mirrors typst's
+                // in-place mutation semantics for top-level bindings); the
+                // body's reference to __st must set used_state.
                 self.used_state = true;
                 let path_lit = place_path_lit(&path);
                 match compound {
@@ -492,19 +535,23 @@ impl Ctx {
                     ),
                 }
             }
-            // 写捕获:对照 `Binding::write` 对 Captured 的拒绝
-            //(RHS 已先求,保持副作用顺序)。
+            // Write to a capture: mirrors `Binding::write` rejecting
+            // Captured (RHS already evaluated first, preserving side-effect
+            // order).
             Place::Captured => format!(
                 "{{ let __rhs = {rhs}; rt::bail_captured(typst::foundations::Capturer::Function)? }}"
             ),
-            // 词法层未命中的标识符:运行期经 `Scopes::get_mut`
-            // 触发常量/未知变量错(文案与 hint 由 typst 侧生成)。
+            // Identifier missing from the lexical layers: at runtime,
+            // `Scopes::get_mut` raises the constant / unknown-variable
+            // error (message and hint generated on the typst side).
             Place::Unresolved { name } => format!(
                 "{{ let __rhs = {rhs}; rt::check_mut_unknown(engine, \"{}\", {at})?; Value::None }}",
                 super::naming::escape(&name)
             ),
-            // 非左值:求目标副作用后报 temporary(对照 `Access`
-            // 兜底臂;FieldAccess 只求目标链不求字段读)。
+            // Not an lvalue: evaluate the target's side effects, then
+            // report temporary (mirrors the `Access` catch-all arm;
+            // FieldAccess evaluates only the target chain, not the field
+            // read).
             Place::Temporary => {
                 let lhs = self.eval_for_access(binary.lhs(), env);
                 format!("{{ let __rhs = {rhs}; let _ = {lhs}; rt::bail_temporary({at})? }}")
@@ -512,15 +559,16 @@ impl Ctx {
             Place::Deferred => {
                 self.diag(
                     binary.span(),
-                    "赋值目标为运行期模块引用(本轮不承载)".into(),
+                    "assignment target is a runtime module reference (not yet supported)".into(),
                 );
                 "Value::None".into()
             }
         }
     }
 
-    /// 临时值目标的副作用求值,对照 `Access` 各臂的递归形态:
-    /// FieldAccess 只深入**目标**(不读字段),其余表达式整体求值。
+    /// Side-effect evaluation of temporary targets, mirroring the recursive
+    /// shapes of the `Access` arms: FieldAccess descends into the **target
+    /// only** (does not read the field); everything else evaluates whole.
     pub(super) fn eval_for_access(&mut self, expr: ast::Expr, env: &mut Env) -> String {
         match expr {
             ast::Expr::FieldAccess(access) => self.eval_for_access(access.target(), env),
@@ -529,9 +577,11 @@ impl Ctx {
         }
     }
 
-    /// 解构赋值叶子的统一写回(Ident 与 at 位置叶子共用;对照
-    /// binding.rs DestructAssignment 的叶子 f:`expr.access(vm)?` +
-    /// 写回,at_mut 语义**不**插入缺失键;value 由调用方先求)。
+    /// Unified write-back for destructuring-assignment leaves (shared by
+    /// Ident and at-position leaves; mirrors the leaf f of binding.rs
+    /// DestructAssignment: `expr.access(vm)?` + write-back, at_mut
+    /// semantics do **not** insert missing keys; the value is evaluated by
+    /// the caller first).
     pub(super) fn place_write_leaf(
         &mut self,
         expr: ast::Expr,
@@ -565,18 +615,20 @@ impl Ctx {
                 format!("{{ let _ = {value}; let _ = {ev}; rt::bail_temporary({at})?; }}\n")
             }
             Place::Deferred => {
-                self.diag(expr.span(), "解构赋值目标为运行期模块引用".into());
+                self.diag(expr.span(), "destructuring-assignment target is a runtime module reference".into());
                 String::new()
             }
         }
     }
 
 
-    /// 体内 import 的区 1 胶水:语句原文经 `rt::eval_import` 驱动原版
-    /// `Eval for ast::ModuleImport`(源分派/校验/警告全原版);可见名
-    /// (局部 + 模块域)物化为 Vm 作用域,差集按静态可知的绑定名写回
-    /// 新的 Rust 局部。bare 动态源 expected 为空(原版运行期报
-    /// dynamic 错)。
+    /// Zone-1 glue for in-body imports: the statement text drives the
+    /// original `Eval for ast::ModuleImport` via `rt::eval_import`
+    /// (source dispatch/validation/warnings all original); visible names
+    /// (locals + module domain) are materialized as Vm scopes, and the
+    /// difference set writes new Rust locals for the statically known
+    /// binding names. A bare dynamic source has an empty expected list
+    /// (the original reports the dynamic error at runtime).
     fn in_body_import_glue(
         &mut self,
         stmt: &ast::Expr,
@@ -585,8 +637,10 @@ impl Ctx {
     ) -> String {
         use std::fmt::Write as _;
         let stmt_text = stmt.to_untyped().full_text().to_string();
-        // 静态可知的绑定名(bare 的模块链/字面量名由上方快路径承担,
-        // 此处 bare 一律动态语义:expected 空,原版报错)。
+        // Statically known binding names (the module chains / literal
+        // names of bare imports are handled by the fast paths above; here a
+        // bare import always gets dynamic semantics: expected empty, the
+        // original reports the error).
         let expected: Vec<String> = match import.imports() {
             None => match import.new_name() {
                 Some(new_name) => vec![new_name.as_str().to_string()],
@@ -597,7 +651,8 @@ impl Ctx {
                 .map(|item| item.bound_name().as_str().to_string())
                 .collect(),
             Some(ast::Imports::Wildcard) => {
-                // 通配的任意源:源表达式翻译求值 → 运行期层。
+                // Wildcard with an arbitrary source: translate-evaluate the
+                // source expression → runtime layer.
                 let source = import.source();
                 let value = self.expr(source, env);
                 let w = format!("__wild{}", self.fresh_id());
@@ -607,7 +662,8 @@ impl Ctx {
                 return code;
             }
         };
-        // 可见名:局部 + 模块域(ref_value 需要 &mut self,先克隆表)。
+        // Visible names: locals + module domain (ref_value needs &mut
+        // self, so clone the tables first).
         let locals: Vec<(String, String)> = env.locals.clone();
         let modules: Vec<(String, super::ctx::Ref)> = env.module.clone();
         let mut caps: Vec<String> = locals
@@ -686,8 +742,10 @@ impl Ctx {
                         let Some(ast::Arg::Pos(index)) = call.args().items().next() else {
                             return false;
                         };
-                        // 对照 typst 的 FuncCall access:先求参数,后走
-                        // 目标链(带副作用的下标保求值顺序)。
+                        // Mirrors typst's FuncCall access: evaluate the
+                        // argument first, then walk the target chain
+                        // (side-effecting indices keep their evaluation
+                        // order).
                         let index_code = self.expr(index, env);
                         if !self.walk_place(access.target(), env, segs, root) {
                             return false;
@@ -714,7 +772,8 @@ impl Ctx {
     }
 }
 
-/// 路径段的数组字面量(空路径给 `&[]`,推断为空切片)。
+/// Array literal for path segments (an empty path yields `&[]`, inferred as
+/// an empty slice).
 pub(super) fn place_path_lit(path: &[String]) -> String {
     if path.is_empty() {
         "&[]".into()
@@ -723,20 +782,27 @@ pub(super) fn place_path_lit(path: &[String]) -> String {
     }
 }
 
-/// 赋值/可变方法目标的分类(对照 typst-eval `access.rs`:可 access
-/// 形态有限枚举,其余一律 Temporary;`Scopes::get_mut` 决定解析序)。
+/// Classification of assignment / mutating-method targets (mirrors
+/// typst-eval `access.rs`: the accessible shapes are a finite enumeration,
+/// everything else is Temporary; `Scopes::get_mut` decides the resolution
+/// order).
 pub(super) enum Place {
-    /// 根为局部变量(或字段/accessor 链落在局部上)。
+    /// Root is a local variable (or a field/accessor chain landing on a
+    /// local).
     Local { root: String, path: Vec<String> },
-    /// 根为可变模块槽(读改写回)。
+    /// Root is a mutable module slot (read-modify-write).
     Slot { slot: String, path: Vec<String> },
-    /// 根为闭包捕获名(对照 `Binding::capture` 只读标,运行期报
-    /// "variables from outside the function are read-only")。
+    /// Root is a closure-captured name (mirrors the read-only
+    /// `Binding::capture` marker; runtime reports "variables from outside
+    /// the function are read-only").
     Captured,
-    /// 标识符在词法层未命中(运行期查全局:常量/未知变量错)。
+    /// Identifier missing from the lexical layers (runtime global lookup:
+    /// constant / unknown-variable error).
     Unresolved { name: String },
-    /// 非左值表达式(求副作用后报 temporary)。
+    /// Not an lvalue expression (side effects evaluated, then a temporary
+    /// error).
     Temporary,
-    /// 模块域内的运行期引用(本轮不承载可变语义,翻译期诊断)。
+    /// Runtime reference inside the module domain (mutable semantics not
+    /// carried in this iteration; translate-time diagnostic).
     Deferred,
 }

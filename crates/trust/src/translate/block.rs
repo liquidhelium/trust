@@ -18,7 +18,6 @@ impl Ctx {
         stmts: impl Iterator<Item = ast::Expr<'a>>,
         env: &mut Env,
     ) -> String {
-        let mut out = String::from("{ let mut __out = Value::None;\n");
         let mut env = env.clone();
         // Hoisted slots for expression-position `let` (block-scoped;
         // mirrors typst: let is an expression that binds in the current
@@ -35,10 +34,9 @@ impl Ctx {
             },
             _ => s.to_untyped(),
         }));
-        if !hoist_decls.is_empty() {
-            for line in hoist_decls.lines() {
-                let _ = writeln!(out, "    {line}");
-            }
+        let mut hoists = String::new();
+        for line in hoist_decls.lines() {
+            let _ = writeln!(hoists, "    {line}");
         }
         // (tail expression code, its span): non-final statement values
         // accumulate with join semantics, and the final expression is
@@ -46,10 +44,16 @@ impl Ctx {
         // `eval_code`'s `output = ops::join(output, value).at(span)?`
         // (every expression's value is joined; the error site is that
         // expression's own span).
+        let mut out = String::new();
         let mut last: Option<(String, String)> = None;
+        // Whether a value has been flushed into `__out` yet (a second
+        // expression statement arrived). When nothing has, the block is a
+        // single-tail block and collapses below.
+        let mut flushed = false;
         let mut iter = stmt_vec.into_iter();
         while let Some(stmt) = iter.next() {
             if let Some((prev, prev_at)) = last.take() {
+                flushed = true;
                 let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
             }
             // set/show rules inside a code block: the styles/recipe are
@@ -419,17 +423,32 @@ impl Ctx {
             let at = self.span_of(stmt.span());
             last = Some((value, at));
         }
-        // Block value = join of all statement values (the tail statement is
-        // joined in before returning __out; with no expression statements,
-        // __out stays None, matching the empty-block value).
-        if let Some((tail, tail_at)) = last {
-            let _ = writeln!(out, "    __out = rt::join(__out, {tail}, {tail_at})?;");
-        }
-        let _ = writeln!(out, "    let _ = &__out;");
-        let _ = writeln!(out, "    __out");
+        // Assemble. Single-tail collapse: when no value has been flushed,
+        // the block's value is exactly the tail — `ops::join`'s `(None, b)`
+        // arm is total (`b`, no error path), so `join(None, v) ≡ v` and
+        // the accumulator never needs to exist. This is the degenerate
+        // staging of `eval_code`'s always-join loop (the interpreter
+        // cannot know the sequence statically; we can).
         self.close_let_hoists();
-        out.push('}');
-        out
+        match last {
+            Some((tail, _tail_at)) if !flushed => format!("{{\n{hoists}{out}    {tail}\n}}"),
+            _ => {
+                let mut full = String::from("{ let mut __out = Value::None;\n");
+                full.push_str(&hoists);
+                full.push_str(&out);
+                // Block value = join of all statement values (the tail
+                // statement is joined in before returning __out; with no
+                // expression statements, __out stays None, matching the
+                // empty-block value).
+                if let Some((tail, tail_at)) = last {
+                    let _ = writeln!(full, "    __out = rt::join(__out, {tail}, {tail_at})?;");
+                }
+                let _ = writeln!(full, "    let _ = &__out;");
+                let _ = writeln!(full, "    __out");
+                full.push('}');
+                full
+            }
+        }
     }
     /// Classification of assignment / mutating-method targets (mirrors
     /// typst-eval `access.rs`'s accessible shapes and `Scopes::get_mut`'s

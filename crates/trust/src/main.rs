@@ -2,6 +2,8 @@
 
 use std::io::Write;
 
+use clap::Parser;
+
 /// Download a package from the registry and unpack it into the local cache
 /// (mirrors the typst CLI's automatic download of missing packages).
 /// Returns true on success (cache directory in place).
@@ -85,35 +87,62 @@ fn fetch_package(ns: &str, name: &str, version: &str) -> bool {
     archive.unpack(&dir).is_ok()
 }
 
+/// Command-line interface (clap derive).
+#[derive(clap::Parser)]
+#[command(name = "trust", version, about = "typst → rust transpiler")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Translate a single .typ file
+    Translate {
+        /// Input .typ source file
+        input: String,
+        /// Output .rs file; prints to stdout when omitted
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Module name; defaults to the input file stem
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Translate a local package directory (entrypoint auto-detected)
+    TranslatePkg {
+        /// Package root directory
+        pkg_root: String,
+        /// Output: a .rs file, or a directory with trailing `/` for a
+        /// generated source tree
+        #[arg(short, long)]
+        output: String,
+        /// Degrade unsupported constructs to runtime warnings instead of
+        /// failing
+        #[arg(long)]
+        lenient: bool,
+        /// Recursively resolve and merge `@spec` dependencies from the
+        /// local package cache into the translation
+        #[arg(long)]
+        with_deps: bool,
+    },
+    /// Measure language coverage of a file or directory
+    Coverage {
+        /// Input file or directory
+        root: String,
+    },
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("-V" | "--version") => println!("trust {}", env!("CARGO_PKG_VERSION")),
-        Some("translate") => {
-            let mut input: Option<&str> = None;
-            let mut output: Option<&str> = None;
-            let mut name = None;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "-o" | "--output" => {
-                        output = args.get(i + 1).map(String::as_str);
-                        i += 2;
-                    }
-                    "--name" => {
-                        name = args.get(i + 1).map(String::as_str);
-                        i += 2;
-                    }
-                    other => {
-                        input = Some(other);
-                        i += 1;
-                    }
-                }
-            }
-            let Some(input) = input else {
-                eprintln!("usage: trust translate <input.typ> [--name MODULE] [-o OUTPUT.rs]");
-                std::process::exit(2);
-            };
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Translate {
+            input,
+            output,
+            name,
+        } => {
+            let input = &input;
+            let output = output.as_deref();
+            let name = name.as_deref();
             let src = match std::fs::read_to_string(input) {
                 Ok(src) => src,
                 Err(err) => {
@@ -159,33 +188,14 @@ fn main() {
                 }
             }
         }
-        Some("translate-pkg") => {
-            // Exploration entry: translate a local package directory (entry
-            // auto-detected), writing the generated source to
-            // <out>/gen.rs with a trust-runtime dependency note.
-            let mut input: Option<&str> = None;
-            let mut output: Option<&str> = None;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "-o" | "--output" => {
-                        output = args.get(i + 1).map(String::as_str);
-                        i += 2;
-                    }
-                    "--lenient" => i += 1,
-                    "--with-deps" => i += 1,
-                    other => {
-                        input = Some(other);
-                        i += 1;
-                    }
-                }
-            }
-            let (Some(input), Some(output)) = (input, output) else {
-                eprintln!("usage: trust translate-pkg <PKG_ROOT> -o <OUTPUT.rs|DIR/> [--lenient]");
-                std::process::exit(2);
-            };
-            let lenient = args.iter().any(|a| a == "--lenient");
-            let with_deps = args.iter().any(|a| a == "--with-deps");
+        Command::TranslatePkg {
+            pkg_root,
+            output,
+            lenient,
+            with_deps,
+        } => {
+            let input = pkg_root.as_str();
+            let output = output.as_str();
             let root = std::path::Path::new(input);
             let mut files = std::collections::BTreeMap::new();
             let mut stack = vec![root.to_path_buf()];
@@ -330,18 +340,8 @@ fn main() {
                 }
             }
         }
-        Some("coverage") => {
-            let Some(root) = args.get(2).map(String::as_str) else {
-                eprintln!("usage: trust coverage <DIR|FILE.typ>");
-                std::process::exit(2);
-            };
-            std::process::exit(coverage(root));
-        }
-        _ => {
-            eprintln!(
-                "trust {} — typst → rust transpiler\n\nusage:\n  trust translate <input.typ> [--name MODULE] [-o OUTPUT.rs]\n  trust coverage <DIR> (coverage measurement)",
-                env!("CARGO_PKG_VERSION")
-            );
+        Command::Coverage { root } => {
+            std::process::exit(coverage(&root));
         }
     }
 }

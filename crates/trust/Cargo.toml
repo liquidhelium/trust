@@ -14,3 +14,5 @@ typst-syntax = "0.15.1"
 # Package manifest (entrypoint parsing)
 toml = "0.8"
 trust-runtime = { path = "../trust-runtime" }
+# Command-line interface
+clap = { version = "4", features = ["derive"] }

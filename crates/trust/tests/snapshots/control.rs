@@ -64,7 +64,7 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
 
       let __v = { let mut __out = Value::None;
     __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(sp(0))?, std::cmp::Ordering::Greater)), sp(3))? { { let mut __out = Value::None;
-    __out = rt::join(__out, { rt::check_call_depth(engine, sp(1))?; let __mut_args = rt::args!(sp(1), |__args: &mut Args| -> SourceResult<()> { __args.push(sp(2), x.clone()); Ok(()) }); let __place = rt::place_mut(&mut out, &[], sp(1))?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, sp(1), "out.push")? }, sp(1))?;
+    __out = rt::join(__out, { rt::check_call_depth(engine, sp(1))?; let __mut_args = rt::args!(sp(1);  p(sp(2), { x.clone() })); let __place = rt::place_mut(&mut out, &[], sp(1))?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, sp(1), "out.push")? }, sp(1))?;
     let _ = &__out;
     __out
 } } else { Value::None }, sp(3))?;

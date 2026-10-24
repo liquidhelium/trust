@@ -58,50 +58,63 @@ macro_rules! span_table {
     };
 }
 
-/// Build an `Args` value from a [`call!`]-style fill closure (for
-/// sites that pass the argument list as a value rather than calling
-/// immediately, e.g. mutating-method dispatch).
+/// Argument-list segments, shared by [`call!`], [`mcall!`], and
+/// [`args!`]. Segments expand **inline** (token pasting, no closure), so
+/// flow expressions (`break` / `continue` / `return`) inside argument
+/// values keep their enclosing loop/function targets — exactly like the
+/// interpreter's inline argument evaluation. Forms:
+/// - `p(span, { value })` — positional
+/// - `n(span, value_span, "name", { value })` — named
+/// - `s(span, { value })` — spread
+/// Values are brace-wrapped blocks (both for readability and because
+/// `expr` fragments may not end a parenthesized matcher).
+#[doc(hidden)]
 #[macro_export]
-macro_rules! args {
-    ($at:expr, $fill:expr) => {{
-        let mut __trust_args =
-            typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
-        $fill(&mut __trust_args)?;
-        __trust_args
-    }};
+macro_rules! __args_build {
+    ($args:expr;) => {};
+    ($args:expr; p($span:expr, {$($v:tt)*}) $($rest:tt)*) => {
+        $args.push($span, {$($v)*});
+        $crate::__args_build!($args; $($rest)*);
+    };
+    ($args:expr; n($span:expr, $vspan:expr, $name:literal, {$($v:tt)*}) $($rest:tt)*) => {
+        $args.items.push($crate::named_arg($span, $vspan, $name, {$($v)*}));
+        $crate::__args_build!($args; $($rest)*);
+    };
+    ($args:expr; s($span:expr, {$($v:tt)*}) $($rest:tt)*) => {
+        $crate::spread_args(&mut $args, $span, {$($v)*})?;
+        $crate::__args_build!($args; $($rest)*);
+    };
 }
 
-/// Call a resolved callee: check_call_depth → callee value → build
-/// args → call. `$callee` is the callee expression (sites pass
-/// `rt::callee(expr, span)?`, keeping its own resolution span);
-/// `$fill` receives the `&mut Args` builder as a closure argument
-/// (positional `push`, named items, spread all go through it), so the
-/// per-site text is a single readable line. Evaluation order matches
-/// the interpreter: depth check, callee, then arguments.
+/// Call a resolved callee: depth check → callee value → arguments →
+/// call, expanded inline. `$callee` is the callee expression (sites
+/// pass `rt::callee(expr, span)?`, keeping its own resolution span).
+/// Argument evaluation order matches the interpreter: depth check,
+/// callee, then arguments left to right.
 #[macro_export]
 macro_rules! call {
-    ($engine:expr, $context:expr, $at:expr, $callee:expr, $fill:expr) => {{
+    ($engine:expr, $context:expr, $at:expr, $callee:expr; $($segs:tt)*) => {{
         $crate::check_call_depth($engine, $at)?;
         let __trust_callee = $callee;
         let mut __trust_args =
             typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
-        $fill(&mut __trust_args)?;
-        $crate::call_with(__trust_callee, None, $at, __trust_args, $engine, $context)?
+        $crate::__args_build!(__trust_args; $($segs)*);
+        $crate::call_with(__trust_callee, ::core::option::Option::None, $at, __trust_args, $engine, $context)?
     }};
 }
 
 /// Method call: resolve the method callee on a target, then call with
-/// the target bound as the implicit first argument. `$fill` builds the
-/// explicit arguments, exactly as in [`call!`].
+/// the target bound as the implicit first argument. Segments as in
+/// [`call!`].
 #[macro_export]
 macro_rules! mcall {
-    ($engine:expr, $context:expr, $at:expr, $target:expr, $field:literal, $access:literal, $field_at:expr, $tgt_at:expr, $fill:expr) => {{
+    ($engine:expr, $context:expr, $at:expr, $target:expr, $field:literal, $access:literal, $field_at:expr, $tgt_at:expr; $($segs:tt)*) => {{
         $crate::check_call_depth($engine, $at)?;
         let __trust_target = $target;
         let __trust_mc = $crate::method_callee(__trust_target, $field, $access, $engine, $field_at)?;
         let mut __trust_args =
             typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
-        $fill(&mut __trust_args)?;
+        $crate::__args_build!(__trust_args; $($segs)*);
         $crate::call_with(
             __trust_mc.0,
             __trust_mc.1.map(|t| (t, $tgt_at)),
@@ -110,6 +123,20 @@ macro_rules! mcall {
             $engine,
             $context,
         )?
+    }};
+}
+
+/// Build an `Args` value from segments (for sites that pass the
+/// argument list as a value rather than calling immediately, e.g.
+/// mutating-method dispatch). Inline block — flow expressions in
+/// argument values escape into the enclosing loop/function body.
+#[macro_export]
+macro_rules! args {
+    ($at:expr; $($segs:tt)*) => {{
+        let mut __trust_args =
+            typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
+        $crate::__args_build!(__trust_args; $($segs)*);
+        __trust_args
     }};
 }
 

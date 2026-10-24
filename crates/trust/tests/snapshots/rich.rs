@@ -103,7 +103,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut rest = Value::Args(__args.take());
     if let Value::Args(__sink_inner) = &mut rest { __sink_inner.items.extend(__sink_pos_0.into_iter()); }
     rt::finish(__args, span)?;
-    Ok(rt::call!(engine, context, sp(2), rt::callee(f.clone(), sp(3))?, |__args: &mut Args| -> SourceResult<()> { rt::spread_args(__args, sp(4), rest.clone())?; Ok(()) }))
+    Ok(rt::call!(engine, context, sp(2), rt::callee(f.clone(), sp(3))?;  s(sp(4), { rest.clone() })))
 }
 
 #[allow(non_snake_case, dead_code)]

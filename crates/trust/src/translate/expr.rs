@@ -13,63 +13,6 @@ use typst_syntax::ast::{self, AstNode};
 
 use super::captures::collect_idents;
 
-/// Generated argument code in one of two shapes: a `fill` closure for
-/// the `rt::call!`/`rt::mcall!`/`rt::args!` macros, or an inline block
-/// (legacy form) when the argument subtree contains flow expressions
-/// (`break`/`continue`/`return` must evaluate in the enclosing
-/// loop/function body, mirroring the interpreter's flow events).
-pub(super) struct ArgsCode {
-    code: String,
-    inline: bool,
-}
-
-impl ArgsCode {
-    /// Fill-closure form (for the call macros). Panics on the inline
-    /// form — callers must dispatch on [`ArgsCode::is_inline`].
-    fn fill(&self) -> &str {
-        assert!(!self.inline, "inline args passed as fill closure");
-        &self.code
-    }
-
-    /// Inline-block form (a plain `Args` expression).
-    fn inline_expr(&self) -> &str {
-        assert!(self.inline, "fill closure passed as inline block");
-        &self.code
-    }
-
-    fn is_inline(&self) -> bool {
-        self.inline
-    }
-
-    /// Value form usable directly where an `Args` expression is needed:
-    /// the macros' `rt::args!` for the fill form, the inline block as is.
-    fn value(&self, at: &str) -> String {
-        if self.inline {
-            self.code.clone()
-        } else {
-            format!("rt::args!({at}, {})", self.code)
-        }
-    }
-
-    /// Macro-argument form for `rt::call!`/`rt::mcall!`: `None` when the
-    /// site must fall back to the legacy inline emission.
-    fn fill_or_none(&self) -> Option<&str> {
-        if self.inline { None } else { Some(&self.code) }
-    }
-}
-
-/// Whether an argument subtree contains a flow expression (`break` /
-/// `continue` / `return`): those must evaluate inline in the enclosing
-/// loop/function body (mirrors the interpreter's flow events) and
-/// cannot cross the argument-builder closure — such sites fall back to
-/// the inline argument-block form.
-fn args_have_flow(node: &typst_syntax::SyntaxNode) -> bool {
-    use typst_syntax::SyntaxKind as K;
-    if matches!(node.kind(), K::Break | K::Continue | K::Return) {
-        return true;
-    }
-    node.children().any(args_have_flow)
-}
 
 use super::ctx::{Ctx, Env};
 use super::naming::{escape, sanitize_key};
@@ -832,7 +775,7 @@ impl Ctx {
                 match self.classify_place(access.target(), env) {
                     super::block::Place::Local { root, path } => {
                         let path_lit = super::block::place_path_lit(&path);
-                        let mut_args = args.value(&at);
+                        let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})? }}",
                             escape(field), access_text
@@ -845,7 +788,7 @@ impl Ctx {
                         // carries state based on it).
                         self.used_state = true;
                         let path_lit = super::block::place_path_lit(&path);
-                        let mut_args = args.value(&at);
+                        let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let mut __msv = rt::read_ms(&__st.{slot})?; let __place = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __r = rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})?; rt::write_ms(&__st.{slot}, __msv)?; __r }}",
                             escape(field), access_text
@@ -857,7 +800,7 @@ impl Ctx {
                     // modifier on a symbol reports the read-only error here
                     // as well.
                     super::block::Place::Captured => {
-                        let mut_args = args.value(&at);
+                        let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; rt::bail_captured(typst::foundations::Capturer::Function)? }}"
                         );
@@ -866,7 +809,7 @@ impl Ctx {
                     // the global at runtime (constant / unknown-variable
                     // error, mirroring `Scopes::get_mut`).
                     super::block::Place::Unresolved { name } => {
-                        let mut_args = args.value(&at);
+                        let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; rt::check_mut_unknown(engine, \"{}\", {at})?; Value::None }}",
                             escape(&name)
@@ -878,7 +821,7 @@ impl Ctx {
                     // chain), then reports temporary.
                     super::block::Place::Temporary => {
                         let target = self.eval_for_access(access.target(), env);
-                        let mut_args = args.value(&at);
+                        let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let _ = {target}; rt::bail_temporary({at})? }}"
                         );
@@ -902,17 +845,8 @@ impl Ctx {
             let field_at = self.span_of(access.field().span());
             let access_text = access.to_untyped().full_text().to_string();
             let args = self.gen_args(call.args(), env, &at);
-            if let Some(fill) = args.fill_or_none() {
-                return format!(
-                    "rt::mcall!(engine, context, {at}, {target}, \"{}\", {access_text:?}, {field_at}, {tgt_at}, {fill})",
-                    escape(field)
-                );
-            }
-            // Inline fallback: flow expressions inside the arguments
-            // evaluate in the enclosing loop/function body.
-            let inline_args = args.inline_expr().clone();
             return format!(
-                "{{ rt::check_call_depth(engine, {at})?; let __target = {target}; let __mc = rt::method_callee(__target, \"{}\", {access_text:?}, engine, {field_at})?; let __call_args = {inline_args}; rt::call_with(__mc.0, __mc.1.map(|t| (t, {tgt_at})), {at}, __call_args, engine, context)? }}",
+                "rt::mcall!(engine, context, {at}, {target}, \"{}\", {access_text:?}, {field_at}, {tgt_at}; {args})",
                 escape(field)
             );
         }
@@ -922,14 +856,8 @@ impl Ctx {
         let callee_at = self.span_of(call.callee().span());
         let callee = self.expr(call.callee(), env);
         let args = self.gen_args(call.args(), env, &at);
-        if let Some(fill) = args.fill_or_none() {
-            return format!(
-                "rt::call!(engine, context, {at}, rt::callee({callee}, {callee_at})?, {fill})"
-            );
-        }
-        let inline_args = args.inline_expr();
         format!(
-            "{{ rt::check_call_depth(engine, {at})?; let __callee = rt::callee({callee}, {callee_at})?; let __call_args = {inline_args}; rt::call_with(__callee, None, {at}, __call_args, engine, context)? }}"
+            "rt::call!(engine, context, {at}, rt::callee({callee}, {callee_at})?; {args})"
         )
     }
 
@@ -940,18 +868,14 @@ impl Ctx {
     /// Argument-list builder: emits the body of a closure receiving the
     /// `&mut Args` builder (consumed by the `rt::call!`/`rt::mcall!`
     /// macros), so a call site is one readable line.
-    fn gen_args(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> ArgsCode {
-        if args_have_flow(args.to_untyped()) {
-            let code = self.gen_args_inline(args, env, call_at);
-            return ArgsCode { code, inline: true };
-        }
-        let mut out = String::from("|__args: &mut Args| -> SourceResult<()> {");
+    fn gen_args(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> String {
+        let mut out = String::new();
         for arg in args.items() {
             let item_at = self.span_of(arg.span());
             match arg {
                 ast::Arg::Pos(expr) => {
                     let value = self.expr(expr, env);
-                    let _ = write!(out, " __args.push({item_at}, {value});");
+                    let _ = write!(out, " p({item_at}, {{ {value} }})");
                 }
                 ast::Arg::Named(named) => {
                     let name = named.name().as_str();
@@ -959,58 +883,16 @@ impl Ctx {
                     let value = self.expr(named.expr(), env);
                     let _ = write!(
                         out,
-                        " __args.items.push(rt::named_arg({item_at}, {value_at}, \"{}\", {value}));",
+                        " n({item_at}, {value_at}, \"{}\", {{ {value} }})",
                         escape(name)
                     );
                 }
                 ast::Arg::Spread(spread) => {
                     let value = self.expr(spread.expr(), env);
-                    let _ = write!(
-                        out,
-                        " rt::spread_args(__args, {item_at}, {value})?;"
-                    );
+                    let _ = write!(out, " s({item_at}, {{ {value} }})");
                 }
             }
         }
-        out.push_str(" Ok(()) }");
-        ArgsCode { code: out, inline: false }
-    }
-
-    /// Inline argument block (legacy form) for argument subtrees that
-    /// contain flow expressions: the block stays in the enclosing
-    /// loop/function body so `break`/`continue`/`return` keep their
-    /// targets.
-    fn gen_args_inline(&mut self, args: ast::Args, env: &mut Env, call_at: &str) -> String {
-        let mut out = format!(
-            "{{ let mut __call_args_v = Args::new({call_at}, std::iter::empty::<Value>());"
-        );
-        for arg in args.items() {
-            let item_at = self.span_of(arg.span());
-            match arg {
-                ast::Arg::Pos(expr) => {
-                    let value = self.expr(expr, env);
-                    let _ = write!(out, " __call_args_v.push({item_at}, {value});");
-                }
-                ast::Arg::Named(named) => {
-                    let name = named.name().as_str();
-                    let value_at = self.span_of(named.expr().span());
-                    let value = self.expr(named.expr(), env);
-                    let _ = write!(
-                        out,
-                        " __call_args_v.items.push(rt::named_arg({item_at}, {value_at}, \"{}\", {value}));",
-                        escape(name)
-                    );
-                }
-                ast::Arg::Spread(spread) => {
-                    let value = self.expr(spread.expr(), env);
-                    let _ = write!(
-                        out,
-                        " rt::spread_args(&mut __call_args_v, {item_at}, {value})?;"
-                    );
-                }
-            }
-        }
-        out.push_str(" __call_args_v }");
         out
     }
 
@@ -1327,7 +1209,7 @@ impl Ctx {
     /// set/show-set arms.
     pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &mut Env, call_at: &str) -> String {
         let args = self.gen_args(set.args(), env, call_at);
-        let args_val = args.value(call_at);
+        let args_val = format!("rt::args!({call_at}; {args})");
         let target = self.expr(set.target(), env);
         match set.condition() {
             Some(cond) => {

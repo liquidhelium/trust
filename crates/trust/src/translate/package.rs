@@ -80,8 +80,12 @@ struct PackageParts {
     header: String,
     eval_flat: String,
     eval_tree: String,
-    registry_flat: String,
-    registry_tree: String,
+    /// module_by_path registry entries: (file path, dependency closure
+    /// as (flat, tree) module-path pairs in topological order, self
+    /// last). The arm text is derived at render time — the product only
+    /// ever carries one form; the dual strings previously lived in
+    /// translator memory.
+    registry: Vec<(String, Vec<(String, String)>)>,
     files: Vec<FileOut>,
     /// Collection of C2 value-position closure native bodies (deduped,
     /// shared across files; emitted at the output root).
@@ -884,8 +888,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let mut files: Vec<FileOut> = Vec::new();
     let mut eval_flat = String::new();
     let mut eval_tree = String::new();
-    let mut registry_flat = String::new();
-    let mut registry_tree = String::new();
+    let mut registry: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for &idx in &order {
         let plan = &plans[idx];
         cx.current_file = Some(plan.path.clone());
@@ -1046,18 +1049,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
         );
 
-        // File body: file_span anchor + function bodies + eval (slot
-        // filling) + module (export surface); wrapped in a `mod` block for
-        // the single-file form, an independent file mirroring the source
-        // tree for the directory form.
-        let mut body = format!(
-            "\n    #[allow(non_snake_case, dead_code)]\n    pub(crate) fn file_span() -> Span {{\n        static CELL: std::sync::OnceLock<Span> = std::sync::OnceLock::new();\n        *CELL.get_or_init(|| {{\n            let id = typst::syntax::RootedPath::new(\n                typst::syntax::VirtualRoot::Project,\n                typst::syntax::VirtualPath::new({:?}).expect(\"path\"),\n            )\n            .intern();\n            typst::syntax::Source::new(id, String::new()).root().span()\n        }})\n    }}\n{file_fns}",
-            plan.path
-        );
-        // Parse diagnostics (mirrors the official compile parse stage):
-        // bail on the first error; with several, the message-set difference
-        // is naturally carried by the error tests.
-        let parse_guard = if plan.parse_diags.is_empty() {
+        let parse_guard_src = if plan.parse_diags.is_empty() {
             String::new()
         } else {
             let msgs: Vec<String> = plan
@@ -1076,31 +1068,32 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     .join(", ")
             )
         };
-        let _ = writeln!(
-            body,
-            "\n    /// Evaluation of `{}`: fills import slots and its own binding slots (the mirror of module evaluation).\n\
-             \x20   pub(super) fn eval(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<()> {{\n\
-             \x20       let _ = (&*engine, context);\n{parse_guard}{import_fills}{binding_code}        Ok(())\n    }}",
-            plan.path
+        // File body: the scaffolding macro (file_span anchor + eval/module
+        // signature wrappers) around per-file bodies; module_body owns its
+        // scope/FileId/Module construction (ident passthrough keeps the
+        // pasted bodies hygiene-compatible with their own locals).
+        let eval_body_src = format!(
+            "let _ = (&*engine, context);\n{parse_guard_src}{import_fills}{binding_code}        Ok(())"
         );
-        let _ = writeln!(
-            body,
-            "\n    /// Module scope of `{}` (imports copied in + this file's top-level bindings), built from filled slots.\n\
-             \x20   #[allow(non_snake_case, dead_code)]\n\
-             \x20   pub(super) fn module(__st: &std::sync::Arc<__State>, engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n\
-             \x20       let _ = __st;\n\
-             \x20       let mut scope = Scope::new();\n{file_defines}        let __fid = typst::syntax::RootedPath::new(\n\
-             \x20           typst::syntax::VirtualRoot::Project,\n\
-             \x20           typst::syntax::VirtualPath::new({path_repr:?}).expect(\"path\"),\n\
-             \x20       )\n\
-             \x20       .intern();\n\
-             \x20       Ok(Module::new(\"{}\", scope).with_content(rt::read_content(&__st.{body_slot})?).with_file_id(__fid))\n    }}",
-            plan.path,
-            module_stem(&plan.path),
-            path_repr = plan.path
+        let body_slot_name = format!("BODY_{}", plan.mod_name);
+        let module_body_src = format!(
+            "let _ = __st;\n    let mut scope = Scope::new();\n{file_defines}    let __fid = typst::syntax::RootedPath::new(\n        typst::syntax::VirtualRoot::Project,\n        typst::syntax::VirtualPath::new({path_repr:?}).expect(\"path\"),\n    )\n    .intern();\n    Ok(Module::new({stem_repr:?}, scope).with_content(rt::read_content(&__st.{body_slot_name})?).with_file_id(__fid))",
+            path_repr = plan.path,
+            stem_repr = module_stem(&plan.path),
         );
-        // Full module path segments for the directory form (mirroring the
-        // typ path; disambiguating directories).
+        let mut body = format!(
+            "\n    rt::file_module! {{\n\
+            \x20       path: {path_repr:?},\n\
+            \x20       state_ty: __State,\n\
+            \x20       eval_body(__st, engine, context) {{ {eval_body_src} }}\n\
+            \x20       module_body(__st, engine, context) {{ {module_body_src} }}\n\
+            \x20       file_fns {{ {file_fns_src} }}\n\
+            \x20   }}",
+            path_repr = plan.path,
+            file_fns_src = file_fns,
+        );
+        body.push('\n');
+
         let tree_full: Vec<String> = plan
             .path
             .strip_suffix(".typ")
@@ -1135,15 +1128,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // fresh slot board; a single test assembles just that file — same
         // order of magnitude as the interpreter's single-file compile).
         let closure = dep_closure(&plans, idx);
-        let mut arm_flat = format!("        \"{}\" => Some((|| {{\n", plan.path);
-        let mut arm_tree = arm_flat.clone();
+        let mut pairs: Vec<(String, String)> = Vec::new();
         for &j in &closure {
-            let _ = writeln!(
-                arm_flat,
-                "            {}::eval(board, engine, context)?;",
-                plans[j].mod_name
-            );
-            let dep_tree = plans[j]
+            let tree = plans[j]
                 .path
                 .strip_suffix(".typ")
                 .unwrap_or(&plans[j].path)
@@ -1151,19 +1138,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 .map(sanitize_key)
                 .collect::<Vec<_>>()
                 .join("::");
-            let _ = writeln!(arm_tree, "            {dep_tree}::eval(board, engine, context)?;");
+            pairs.push((plans[j].mod_name.clone(), tree));
         }
-        let _ = writeln!(
-            arm_flat,
-            "            {}::module(board, engine, context)\n        }})()),",
-            plan.mod_name
-        );
-        let _ = writeln!(
-            arm_tree,
-            "            {tree_path}::module(board, engine, context)\n        }})()),"
-        );
-        registry_flat.push_str(&arm_flat);
-        registry_tree.push_str(&arm_tree);
+        registry.push((plan.path.clone(), pairs));
     }
 
     let degraded_header = if cx.lenient && !cx.diags.is_empty() {
@@ -1236,8 +1213,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         header,
         eval_flat,
         eval_tree,
-        registry_flat,
-        registry_tree,
+        registry,
         files,
         closure_items: std::mem::take(&mut cx.closure_items),
         closure_nodes: std::mem::take(&mut cx.closure_nodes),
@@ -1248,6 +1224,31 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 /// eval driver and all `mod` blocks. Assembled from `push_str` segments
 /// (the `{{}}}}` escapes of a `writeln!` format string are error-prone);
 /// byte-identical to the pre-refactor output and locked by snapshots.
+
+/// Render module_by_path arms from the registry table. `module_path`
+/// maps a plan to its reference path (flat `m5_foo` or tree
+/// `dir::foo`); the arm assembles the dependency closure in
+/// topological order, then the file's own eval+module.
+fn render_registry(
+    registry: &[(String, Vec<(String, String)>)],
+    tree: bool,
+) -> String {
+    let pick = |p: &(String, String)| if tree { p.1.clone() } else { p.0.clone() };
+    let mut out = String::new();
+    for (path, closure) in registry {
+        let _ = write!(out, "        \"{path}\" => Some((|| {{\n");
+        for pair in closure {
+            let _ = writeln!(out, "            {}::eval(board, engine, context)?;", pick(pair));
+        }
+        let _ = writeln!(
+            out,
+            "            {}::module(board, engine, context)\n        }})()),",
+            pick(closure.last().expect("closure includes self"))
+        );
+    }
+    out
+}
+
 fn render_single(parts: &PackageParts) -> String {
     let mut items = String::new();
     for f in &parts.files {
@@ -1264,7 +1265,7 @@ fn render_single(parts: &PackageParts) -> String {
     parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_flat)
-        .replace("{REGISTRY}", &parts.registry_flat)
+        .replace("{REGISTRY}", &render_registry(&parts.registry, false))
         .replace("{ITEMS}", &items)
 }
 
@@ -1324,7 +1325,7 @@ fn tree_impl(
     let mut root = parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_tree)
-        .replace("{REGISTRY}", &parts.registry_tree)
+        .replace("{REGISTRY}", &render_registry(&parts.registry, true))
         .replace("{ITEMS}", &root_decls);
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
     // The C2 closure section gets the same treatment as file bodies:
@@ -1369,7 +1370,7 @@ fn tree_impl(
         .map(|f| (f.tree_full.clone(), ()))
         .collect();
     for f in &parts.files {
-        let mut body = dedent4(&f.body).replace("pub(super) fn", "pub(crate) fn");
+        let mut body = dedent4(&f.body);
         // References to other files inside the body (`{flat}::module(`,
         // import fills and module-path expressions) are replaced with tree
         // paths; flat names are unique, so the prefix replacement is

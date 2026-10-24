@@ -140,6 +140,55 @@ macro_rules! args {
     }};
 }
 
+/// Per-file scaffolding: the `file_span` anchor plus signature wrappers
+/// for the `eval`/`module` pair every generated file module carries.
+/// The bodies are pasted **from the call site with their own parameter
+/// names** (ident passthrough) — macro hygiene keeps macro-internal
+/// bindings invisible to pasted tokens, so the bodies must name their
+/// own locals; the macro contributes only types and the boilerplate
+/// anchor (file_span) that references nothing from the bodies.
+#[macro_export]
+macro_rules! file_module {
+    (
+        path: $path:literal,
+        state_ty: $state_ty:ident,
+        eval_body($st:ident, $eng:ident, $ctx:ident) { $($ev:tt)* }
+        module_body($mst:ident, $meng:ident, $mctx:ident) { $($mo:tt)* }
+        file_fns { $($fns:tt)* }
+    ) => {
+        #[allow(non_snake_case, dead_code)]
+        pub(crate) fn file_span() -> typst::syntax::Span {
+            static CELL: std::sync::OnceLock<typst::syntax::Span> =
+                std::sync::OnceLock::new();
+            *CELL.get_or_init(|| {
+                let id = typst::syntax::RootedPath::new(
+                    typst::syntax::VirtualRoot::Project,
+                    typst::syntax::VirtualPath::new($path).expect("path"),
+                )
+                .intern();
+                typst::syntax::Source::new(id, String::new()).root().span()
+            })
+        }
+        $($fns)*
+        #[allow(unused_variables)]
+        pub(crate) fn eval(
+            $st: &std::sync::Arc<$state_ty>,
+            $eng: &mut typst::engine::Engine,
+            $ctx: comemo::Tracked<typst::foundations::Context>,
+        ) -> typst::diag::SourceResult<()> {
+            $($ev)*
+        }
+        #[allow(unused_variables)]
+        pub(crate) fn module(
+            $mst: &std::sync::Arc<$state_ty>,
+            $meng: &mut typst::engine::Engine,
+            $mctx: comemo::Tracked<typst::foundations::Context>,
+        ) -> typst::diag::SourceResult<typst::foundations::Module> {
+            $($mo)*
+        }
+    };
+}
+
 pub fn source_span(path: &str, orig_raw: u64) -> Span {
     /// Mask for the low 48 bits (position number); the file number sits in
     /// the high bits (public documented convention:

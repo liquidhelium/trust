@@ -78,6 +78,9 @@ struct FileOut {
 #[derive(Default)]
 struct PackageParts {
     header: String,
+    /// slot → nested access path prefix (`dir.file`), applied to the
+    /// assembled outputs by `nest_state_access`.
+    slot_paths: std::collections::HashMap<String, String>,
     eval_flat: String,
     eval_tree: String,
     /// module_by_path registry entries: (file path, dependency closure
@@ -589,7 +592,7 @@ impl TopGen {
         &mut self,
         cx: &mut Ctx,
         plan: &super::plan::FilePlan,
-        state_fields: &mut Vec<String>,
+        state_fields: &mut Vec<(String, String)>,
         lets: ast::LetBinding,
     ) {
             match lets.kind() {
@@ -652,7 +655,7 @@ return;
                             continue;
                         }
                         let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
-                        state_fields.push(gslot.clone());
+                        state_fields.push((plan.path.clone(), gslot.clone()));
                         let gname_escaped = escape(&gname);
                         let resolver = if g_in_math { "capture_math_opt" } else { "capture_code_opt" };
                         let _ = writeln!(
@@ -680,7 +683,7 @@ return;
                         if let ast::Param::Named(named) = param {
                             let pname = named.name().as_str();
                             let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
-                            state_fields.push(def_slot.clone());
+                            state_fields.push((plan.path.clone(), def_slot.clone()));
                             let value = cx.expr(named.expr(), &mut env2);
                             defaults.push(format!(
                                 "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
@@ -884,7 +887,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     // Pass two: per file, generate eval (slot filling) + module (export
     // surface) + function bodies.
     let mut top_defines = String::new();
-    let mut state_fields: Vec<String> = Vec::new();
+    let mut state_fields: Vec<(String, String)> = Vec::new();
     let mut files: Vec<FileOut> = Vec::new();
     let mut eval_flat = String::new();
     let mut eval_tree = String::new();
@@ -1030,12 +1033,12 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         } = top;
 
         for (_, slot) in &plan.tops {
-            state_fields.push(slot.clone());
+            state_fields.push((plan.path.clone(), slot.clone()));
         }
         // Module body: top-level content folds in source order (rules wrap
         // subsequent content) into the slot.
         let body_slot = format!("BODY_{}", plan.mod_name);
-        state_fields.push(body_slot.clone());
+        state_fields.push((plan.path.clone(), body_slot.clone()));
         let mut body_env = env.clone();
         for (seen, seen_slot) in &own {
             body_env
@@ -1161,22 +1164,37 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         .find(|p| p.path == entry)
         .map(|p| p.mod_name.clone())
         .expect("entry in plans");
-    let mut fields = String::new();
+    // Per-file nested state: slots group by their owning file, mirroring
+    // the source tree (directory levels become intermediate structs, a
+    // file node holds its slots; a file sharing a stem with a sibling
+    // directory absorbs the directory's children as extra fields).
+    // Access stays O(1) — nested structs have no indirection — and the
+    // grouping keeps thousands of slots readable (`__st.dir.file.SLOT`).
+    let mut seen_fields = std::collections::BTreeSet::new();
+    let mut root = StateNode::default();
+    let mut slot_paths: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Dedup: duplicate parameter names in the source (e.g. the error test
     // `f(v: 1, v: 2)`) register the same default slot twice; a duplicate
     // field makes the output uncompilable. The semantic divergence for
     // duplicate parameters is naturally carried by that error test.
-    let mut seen_fields = std::collections::BTreeSet::new();
-    for slot in &state_fields {
-        if seen_fields.insert(slot.clone()) {
-            let ty = if cx.mutable_slots.contains(slot) {
-                "std::sync::Mutex<Value>"
-            } else {
-                "std::sync::OnceLock<Value>"
-            };
-            let _ = writeln!(fields, "    {slot}: {ty},");
+    for (file, slot) in &state_fields {
+        if !seen_fields.insert(slot.clone()) {
+            continue;
         }
+        let node = root.node_for(file);
+        node.slots.push((
+            slot.clone(),
+            cx.mutable_slots.contains(slot.as_str()),
+        ));
+        slot_paths.insert(
+            slot.clone(),
+            file_segments(file).join("."),
+        );
     }
+    let mut decls = String::new();
+    let mut fields = String::new();
+    root.emit("__S", &mut decls, &mut fields, true);
 
     let span_consts = cx.span_consts();
     let header = format!(
@@ -1191,6 +1209,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          use typst::syntax::ast::Unit;\n\
          use trust_runtime as rt;\n\n\
          const SPAN: Span = Span::detached();\n{span_consts}\n\
+{decls}\
          /// Evaluation state of this package: all top-level binding slots and import slots (one instance per build).\n\
          #[derive(Default)]\n\
          pub struct __State {{\n{fields}}}\n\n\
@@ -1210,6 +1229,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     );
     PackageParts {
         header,
+        slot_paths,
         eval_flat,
         eval_tree,
         registry,
@@ -1261,11 +1281,12 @@ fn render_single(parts: &PackageParts) -> String {
     // with visibility of __State and the imports).
     items.push_str(&parts.closure_items);
     items.push_str(&parts.closure_nodes);
-    parts
+    let rendered = parts
         .header
         .replace("{EVAL_CALLS}", &parts.eval_flat)
         .replace("{REGISTRY}", &render_registry(&parts.registry, false))
-        .replace("{ITEMS}", &items)
+        .replace("{ITEMS}", &items);
+    nest_state_access(&rendered, &parts.slot_paths)
 }
 
 /// Directory form: a multi-file output mirroring the source tree (relative
@@ -1344,7 +1365,7 @@ fn tree_impl(
     }
     root.push_str(&closure_items);
     root.push_str(&cx_nodes);
-    tree.insert("mod.rs".to_string(), root);
+    tree.insert("mod.rs".to_string(), nest_state_access(&root, &parts.slot_paths));
 
     // Directory → direct child segments (ordered, deduped); the root is
     // the empty segment, depth = segment index.
@@ -1392,6 +1413,7 @@ fn tree_impl(
         // Rust file names use sanitize segments (consistent with the
         // module declarations: `mark-shapes.typ` → `mark_shapes.rs`).
         let rel = format!("{}.rs", f.tree_full.join("/"));
+        let body = nest_state_access(&body, &parts.slot_paths);
         tree.insert(rel, format!("use super::*;\n{body}"));
     }
     // Directories with no same-named file: `dir/mod.rs`.
@@ -1613,7 +1635,7 @@ fn import_edge_via_glue(
     edge: &super::plan::ImportEdge,
     env: &mut Env,
     own: &[(String, String)],
-    state_fields: &mut Vec<String>,
+    state_fields: &mut Vec<(String, String)>,
     // The statement-position sink (binding_code): the glue evaluation
     // depends on the top-level let slots above it, so it must not be
     // hoisted with import_fills (static edges' fill order is irrelevant,
@@ -1688,7 +1710,7 @@ fn import_edge_via_glue(
             sanitize_key(&plan.mod_name),
             sanitize_key(name)
         );
-        state_fields.push(slot.clone());
+        state_fields.push((plan.path.clone(), slot.clone()));
         let _ = writeln!(
             slot_fills,
             "        rt::fill(&__st.{slot}, __imported[{i}].clone())?;"
@@ -1737,7 +1759,7 @@ impl Ctx {
         >,
         env: &mut Env,
         own: &[(String, String)],
-        state_fields: &mut Vec<String>,
+        state_fields: &mut Vec<(String, String)>,
         import_fills: &mut String,
         file_defines: &mut String,
         import_slots: &mut std::collections::HashMap<String, String>,
@@ -1766,7 +1788,7 @@ impl Ctx {
                     _ => spec_name(&spec),
                 };
                 let slot = format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&name));
-                state_fields.push(slot.clone());
+                state_fields.push((plan.path.clone(), slot.clone()));
                 let ext_at = cx.span_of(edge.span);
                 if input.dep_entries.contains_key(&spec) {
                     let target_mod = &plans
@@ -1900,7 +1922,7 @@ impl Ctx {
                         "IMPORT_{}_WILD_SRC",
                         sanitize_key(&plan.mod_name)
                     );
-                    state_fields.push(mslot.clone());
+                    state_fields.push((plan.path.clone(), mslot.clone()));
                     let at = cx.span_of(edge.span);
                     let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
                     let w = format!("__wild{}", cx.fresh_id());
@@ -1990,7 +2012,7 @@ impl Ctx {
                             sanitize(&plan.mod_name),
                             sanitize(&name)
                         );
-                        state_fields.push(slot.clone());
+                        state_fields.push((plan.path.clone(), slot.clone()));
                         let _ = writeln!(
                             import_fills,
                             "    rt::fill(&__st.{slot}, {expr})?;"
@@ -2008,7 +2030,7 @@ impl Ctx {
                             sanitize(&plan.mod_name),
                             sanitize(name)
                         );
-                        state_fields.push(slot.clone());
+                        state_fields.push((plan.path.clone(), slot.clone()));
                         let _ = writeln!(
                             import_fills,
                             "    rt::fill(&__st.{slot}, {expr})?;"
@@ -2027,7 +2049,7 @@ impl Ctx {
                             sanitize(&plan.mod_name),
                             sanitize(mname)
                         );
-                        state_fields.push(mslot.clone());
+                        state_fields.push((plan.path.clone(), mslot.clone()));
                         let _ = writeln!(
                             import_fills,
                             "    rt::fill(&__st.{mslot}, {expr})?;"
@@ -2045,7 +2067,7 @@ impl Ctx {
                                 sanitize(&plan.mod_name),
                                 sanitize(&as_name)
                             );
-                            state_fields.push(slot.clone());
+                            state_fields.push((plan.path.clone(), slot.clone()));
                             let item_expr = format!(
                                 "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
                                 escape(item)
@@ -2070,7 +2092,7 @@ impl Ctx {
                                 sanitize(&plan.mod_name),
                                 sanitize(&as_name)
                             );
-                            state_fields.push(slot.clone());
+                            state_fields.push((plan.path.clone(), slot.clone()));
                             let item_expr = format!(
                                 "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
                                 escape(item)
@@ -2149,7 +2171,7 @@ impl Ctx {
                                 sanitize_key(&plan.mod_name),
                                 sanitize_key(root)
                             );
-                            state_fields.push(mslot.clone());
+                            state_fields.push((plan.path.clone(), mslot.clone()));
                             let at = cx.span_of(edge.span);
                             let _ = writeln!(
                                 import_fills,
@@ -2183,7 +2205,7 @@ impl Ctx {
                         "IMPORT_{}_WILD",
                         sanitize_key(&plan.mod_name)
                     );
-                    state_fields.push(mslot.clone());
+                    state_fields.push((plan.path.clone(), mslot.clone()));
                     let at = cx.span_of(edge.span);
                     let raw_escaped = escape(&edge.raw);
                     let _ = writeln!(
@@ -2269,7 +2291,7 @@ impl Ctx {
                         .insert(edge.target.clone(), slot.clone())
                         .is_some();
                     if !existed {
-                        state_fields.push(slot.clone());
+                        state_fields.push((plan.path.clone(), slot.clone()));
                         let _ = writeln!(
                             import_fills,
                             "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
@@ -2298,7 +2320,7 @@ impl Ctx {
                         .insert(edge.target.clone(), mslot.clone())
                         .is_some();
                     if !existed {
-                        state_fields.push(mslot.clone());
+                        state_fields.push((plan.path.clone(), mslot.clone()));
                         let _ = writeln!(
                             import_fills,
                             "    rt::fill(&__st.{mslot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
@@ -2365,7 +2387,7 @@ impl Ctx {
                                 sanitize_key(&plan.mod_name),
                                 sanitize_key(&as_name)
                             );
-                            state_fields.push(dot_slot.clone());
+                            state_fields.push((plan.path.clone(), dot_slot.clone()));
                             let mut chain = format!("rt::read(&__st.{slot})?");
                             for field in rest {
                                 chain = format!(
@@ -2402,4 +2424,97 @@ impl Ctx {
             }
         }
     }
+}
+
+// ----------------------------------------------------- nested state tree
+
+/// Source path → sanitized tree segments ("dir/sub/file.typ" →
+/// ["dir", "sub", "file"]; a dependency merge key keeps its spec segment
+/// sanitized as one segment).
+fn file_segments(file: &str) -> Vec<String> {
+    file.split('/')
+        .map(|seg| {
+            let stem = seg.strip_suffix(".typ").unwrap_or(seg);
+            sanitize_key(stem)
+        })
+        .collect()
+}
+
+/// One node of the per-file state tree: a directory level (children) or
+/// a file (slots); a node can be both (file stem == sibling dir name).
+#[derive(Default)]
+struct StateNode {
+    slots: Vec<(String, bool)>,
+    children: std::collections::BTreeMap<String, StateNode>,
+}
+
+impl StateNode {
+    fn node_for(&mut self, file: &str) -> &mut StateNode {
+        let mut node = self;
+        for seg in file_segments(file) {
+            node = node.children.entry(seg).or_default();
+        }
+        node
+    }
+
+    /// Post-order emission: children structs first, then this one.
+    /// `prefix` is the accumulating struct-type name; writes this node's
+    /// field lines (children + slots) into `body`.
+    fn emit(&self, prefix: &str, decls: &mut String, body: &mut String, root: bool) {
+        let mut inner = String::new();
+        for (seg, child) in &self.children {
+            child.emit(&format!("{prefix}_{seg}"), decls, &mut inner, false);
+            let _ = writeln!(inner, "    {seg}: {prefix}_{seg},");
+        }
+        for (slot, mutable) in &self.slots {
+            let ty = if *mutable {
+                "std::sync::Mutex<Value>"
+            } else {
+                "std::sync::OnceLock<Value>"
+            };
+            let _ = writeln!(inner, "    {slot}: {ty},");
+        }
+        if root {
+            // The root's body becomes __State's fields directly.
+            body.push_str(&inner);
+        } else {
+            let _ = writeln!(
+                decls,
+                "#[derive(Default)]\nstruct {prefix} {{\n{inner}}}\n"
+            );
+        }
+    }
+}
+
+/// Rewrite `__st.<slot>` accesses to their nested paths
+/// (`__st.dir.file.<slot>`). Single scan; idents that are not slots
+/// (e.g. `__st.clone()`) pass through. Generated string literals never
+/// contain `__st.` (the emitter owns every literal shape involved).
+fn nest_state_access(text: &str, paths: &std::collections::HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    let mut pos = 0usize;
+    while let Some(hit) = text[pos..].find("__st.") {
+        let at = pos + hit;
+        out.push_str(&text[pos..at]);
+        let mut end = at + 5;
+        let bytes = text.as_bytes();
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+        {
+            end += 1;
+        }
+        let ident = &text[at + 5..end];
+        match paths.get(ident) {
+            Some(path) => {
+                out.push_str("__st.");
+                out.push_str(path);
+                out.push('.');
+                out.push_str(ident);
+            }
+            None => out.push_str(&text[at..end]),
+        }
+        pos = end;
+    }
+    out.push_str(&text[pos..]);
+    out
 }

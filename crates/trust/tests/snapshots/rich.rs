@@ -48,13 +48,13 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = std::sync::Arc::new(__State::default());
     let _ = context;
-    { let v = Value::Func(rt::native_closure(&D_V0_scale, "(x, k: 2)", vec![{ let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; v }], &rt::StateSlot::new(__st.clone()))); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
+    { let v = Value::Func(rt::native_closure(&D_V0_scale, "(x, k: 2)", vec![{ let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; v }], Some(&rt::StateSlot::new(__st.clone())))); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
         let mut V1_base = Value::None;
 { let __p = rt::place_mut(&mut V1_base, &[], *S1)?; *__p = v.clone(); }
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
-    { let v = Value::Func(Func::from(&D_V2_wrap)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
+    { let v = Value::Func(rt::native_closure(&D_V2_wrap, "(f, ..rest)", Vec::new(), None)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
     Ok(Module::new("rich", scope).with_content({ let __items = vec![(rt::embed(Value::None)).into_value(), (rt::embed(Value::None)).into_value(), (rt::embed(Value::None)).into_value()]; rt::attach_labels(engine, __items) }).with_file_id(file_span().id().expect("file span id")))
 }
 

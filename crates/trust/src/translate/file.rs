@@ -330,21 +330,22 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         ));
                     }
                 }
-                // 原生闭包(C 方案):引用模块槽的函数经签名保真 stub
-                // 携带状态;纯函数保持裸 native(与包模式同款判定)。
-                let func_value = if cx.used_state {
-                    let params_src = closure.params().to_untyped().full_text();
-                    let defaults = if defaults.is_empty() {
-                        "Vec::new()".to_string()
-                    } else {
-                        format!("vec![{}]", defaults.join(", "))
-                    };
-                    format!(
-                        "rt::native_closure(&{data}, {params_src:?}, {defaults}, &rt::StateSlot::new(__st.clone()))"
-                    )
+                // 原生闭包(统一 Closure 形态 stub):是否携带状态是
+                // 内部细节,不泄漏为外部身份(与包模式同款)。
+                let params_src = closure.params().to_untyped().full_text();
+                let defaults = if defaults.is_empty() {
+                    "Vec::new()".to_string()
                 } else {
-                    format!("Func::from(&{data})")
+                    format!("vec![{}]", defaults.join(", "))
                 };
+                let state_arg = if cx.used_state {
+                    "Some(&rt::StateSlot::new(__st.clone()))"
+                } else {
+                    "None"
+                };
+                let func_value = format!(
+                    "rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})"
+                );
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = Value::Func({func_value}); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",

@@ -637,13 +637,17 @@ return;
                     } else {
                         format!("vec![{}]", defaults.join(", "))
                     };
-                    let func_value = if cx.used_state {
-                        format!(
-                            "rt::native_closure(&{data}, {params_src:?}, {defaults}, &rt::StateSlot::new(__st.clone()))"
-                        )
+                    // 统一 Closure 形态 stub:是否携带状态是内部细节,
+                    // 不得泄漏为外部身份(裸 Native 的 scope()=Some 会
+                    // 被 import 分派当原生函数;对照原版用户闭包 None)。
+                    let state_arg = if cx.used_state {
+                        "Some(&rt::StateSlot::new(__st.clone()))"
                     } else {
-                        format!("Func::from(&{data})")
+                        "None"
                     };
+                    let func_value = format!(
+                        "rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})"
+                    );
                     let _ = writeln!(
                         self.binding_code,
                         "    rt::fill(&__st.{slot}, Value::Func({func_value}))?;"

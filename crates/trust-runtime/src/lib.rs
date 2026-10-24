@@ -173,20 +173,23 @@ pub fn trust_eval_closure(
 /// 作用域查找)。**全程借用**——克隆 TrustRoutine(含缺省值 Vec)
 /// 是热路径纯税:判定只需引用,直调体内也只需引用(状态句柄仅在
 /// 插入实参时克隆一次 Arc,协议要求)。
-fn stub_routine(closure: &LazyHash<Closure>) -> Option<(&TrustRoutine, &StateSlot)> {
-    let (routine, state) = (
-        closure.captured.get("__trust_routine")?,
-        closure.captured.get("__trust_state")?,
-    );
-    match (routine.read(), state.read()) {
-        (Value::Dyn(routine), Value::Dyn(state)) => {
-            match (routine.downcast::<TrustRoutine>(), state.downcast::<StateSlot>()) {
-                (Some(cell), Some(slot)) => Some((cell, slot)),
-                _ => None,
-            }
+fn stub_routine(closure: &LazyHash<Closure>) -> Option<(&TrustRoutine, Option<&StateSlot>)> {
+    let routine = closure.captured.get("__trust_routine")?;
+    let state = closure.captured.get("__trust_state");
+    let Value::Dyn(routine) = routine.read() else {
+        return None;
+    };
+    let cell = routine.downcast::<TrustRoutine>()?;
+    let slot = match state {
+        Some(state) => {
+            let Value::Dyn(state) = state.read() else {
+                return None;
+            };
+            Some(state.downcast::<StateSlot>()?)
         }
-        _ => None,
-    }
+        None => None,
+    };
+    Some((cell, slot))
 }
 
 /// memoized 的 stub 直调体(输入集与 typst-eval `eval_closure` 完全
@@ -240,7 +243,9 @@ fn eval_stub_native(
             );
         }
     }
-    args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot.clone())));
+    if let Some(slot) = slot {
+        args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot.clone())));
+    }
     (cell.f)(&mut engine, context, &mut args)
 }
 /// 把 `Library.routines.eval_closure` 换成 [`trust_eval_closure`]。
@@ -977,7 +982,7 @@ pub fn self_func(
     slot: &StateSlot,
 ) -> Func {
     cell.func
-        .get_or_init(|| native_closure(data, params_src, cell.defaults.clone(), slot))
+        .get_or_init(|| native_closure(data, params_src, cell.defaults.clone(), Some(slot)))
         .clone()
 }
 
@@ -989,7 +994,7 @@ pub fn self_func_node(
     slot: &StateSlot,
 ) -> Func {
     cell.func
-        .get_or_init(|| native_closure_node(data, node, cell.defaults.clone(), slot))
+        .get_or_init(|| native_closure_node(data, node, cell.defaults.clone(), Some(slot)))
         .clone()
 }
 
@@ -1804,7 +1809,12 @@ fn stub_scope(
     data: &'static typst::foundations::NativeFuncData,
     node: &typst_syntax::SyntaxNode,
     defaults: &[Value],
-    state: &StateSlot,
+    // None = 无状态函数(体无 take_state 序言):不携带状态句柄,
+    // 快/慢路转发均不注状态实参。**是否原生是外部不可见的实现
+    // 细节**——全部翻译函数统一 Closure 形态 stub(对照原版用户
+    // 闭包 `Func::scope()=None`;裸 Native 会泄漏身份,import 分派
+    // 按 scope() 区分用户闭包)。
+    state: Option<&StateSlot>,
 ) -> Scope {
     let mut scope = Scope::new();
     scope.define("__trust_impl", Func::from(data));
@@ -1815,10 +1825,12 @@ fn stub_scope(
             defaults: stub_named_defaults(node, defaults),
         })),
     );
-    scope.define(
-        "__trust_state",
-        Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
-    );
+    if let Some(state) = state {
+        scope.define(
+            "__trust_state",
+            Value::Dyn(typst::foundations::Dynamic::new(state.clone())),
+        );
+    }
     scope
 }
 
@@ -1834,7 +1846,7 @@ pub fn native_closure_node(
     data: &'static typst::foundations::NativeFuncData,
     node: &(typst_syntax::SyntaxNode, usize),
     defaults: Vec<Value>,
-    state: &StateSlot,
+    state: Option<&StateSlot>,
 ) -> Func {
     let (node, num_pos_params) = node.clone();
     let scope = stub_scope(data, &node, &defaults, state);
@@ -1852,11 +1864,12 @@ pub fn native_closure(
     data: &'static typst::foundations::NativeFuncData,
     params_src: &str,
     defaults: Vec<Value>,
-    state: &StateSlot,
+    // None = 无状态函数:stub 仍构造(Closure 形态身份保真),但不
+    // 携带/转发状态。
+    state: Option<&StateSlot>,
 ) -> Func {
-
     let (params, arg_list) = stub_signature(params_src);
-    let src = stub_source(data.name, &params, &arg_list);
+    let src = stub_source(data.name, &params, &arg_list, state.is_some());
     let (node, num_pos_params) = cached_closure_node(&src);
     let scope = stub_scope(data, &node, &defaults, state);
     let closure_span = node.span();
@@ -1874,7 +1887,7 @@ pub fn native_closure(
 /// 生成物把结果作为字面量嵌入每调用点静态。
 pub fn compose_stub(name: &str, params_src: &str) -> String {
     let (params, args) = stub_signature(params_src);
-    stub_source(name, &params, &args)
+    stub_source(name, &params, &args, true)
 }
 
 /// stub 签名与转发实参表(按 `params_src` 文本缓存——stub 创建高频,
@@ -1948,22 +1961,30 @@ fn stub_signature(params_src: &str) -> (String, String) {
 
 /// stub 源码 `let {name}({params}) = __trust_impl(__trust_state, {args})`
 /// 按 (函数名, 签名) 缓存(高频创建路径零格式化)。
-fn stub_source(name: &str, params: &str, args: &str) -> String {
+fn stub_source(name: &str, params: &str, args: &str, stateful: bool) -> String {
     static CACHE: std::sync::LazyLock<
-        std::sync::RwLock<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+        std::sync::RwLock<
+            std::collections::HashMap<String, std::collections::HashMap<(String, bool), String>>,
+        >,
     > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    let key = (params.to_string(), stateful);
     if let Some(inner) = CACHE.read().unwrap().get(name)
-        && let Some(hit) = inner.get(params)
+        && let Some(hit) = inner.get(&key)
     {
         return hit.clone();
     }
-    let src = format!("let {name}({params}) = __trust_impl(__trust_state, {args})");
+    // 有状态:状态句柄作首参转发;无状态:实参直传(体无 take_state)。
+    let src = if stateful {
+        format!("let {name}({params}) = __trust_impl(__trust_state, {args})")
+    } else {
+        format!("let {name}({params}) = __trust_impl({args})")
+    };
     CACHE
         .write()
         .unwrap()
         .entry(name.to_string())
         .or_default()
-        .insert(params.to_string(), src.clone());
+        .insert(key, src.clone());
     src
 }
 

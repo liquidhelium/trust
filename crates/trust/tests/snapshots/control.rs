@@ -48,7 +48,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let mut scope = Scope::new();
     let __st = std::sync::Arc::new(__State::default());
     let _ = context;
-    { let v = Value::Func(Func::from(&D_V0_pick)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
+    { let v = Value::Func(rt::native_closure(&D_V0_pick, "(items)", Vec::new(), None)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
     Ok(Module::new("control", scope).with_content({ let __items = vec![(rt::embed(Value::None)).into_value()]; rt::attach_labels(engine, __items) }).with_file_id(file_span().id().expect("file span id")))
 }
 

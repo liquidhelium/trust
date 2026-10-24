@@ -1023,7 +1023,7 @@ impl Ctx {
         let stub_src = trust_runtime::compose_stub(&stub_name, &params_src);
         let node_name = self.closure_node_static(&stub_src);
         format!(
-            "{{ let __slot_{id} = std::sync::Arc::new(({})); Value::Func(rt::native_closure_node(&D_{id}, &{node_name}, {defaults}, &rt::StateSlot::new(__slot_{id}))) }}",
+            "{{ let __slot_{id} = std::sync::Arc::new(({})); Value::Func(rt::native_closure_node(&D_{id}, &{node_name}, {defaults}, Some(&rt::StateSlot::new(__slot_{id})))) }}",
             tuple.join(", ")
         )
     }

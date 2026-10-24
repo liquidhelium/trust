@@ -15,11 +15,7 @@ use trust_runtime as rt;
 
 /// Fallback error span for sites not covered by a source span.
 const SPAN: Span = Span::detached();
-static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 289662109446693));
-static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 314764805686989));
-static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329176865792586));
-static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329312190300619));
-static S4: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 329532092626172));
+rt::span_table!(&[("main.typ", 289662109446693u64), ("main.typ", 314764805686989u64), ("main.typ", 329176865792586u64), ("main.typ", 329312190300619u64), ("main.typ", 329532092626172u64)]);
 /// Anchor span of this file (carries a FileId; span-located global functions such as plugins rely on it).
 #[allow(non_snake_case, dead_code)]
 pub(crate) fn file_span() -> Span {
@@ -51,7 +47,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     { let v = Value::Func(rt::native_closure(&D_V0_scale, "(x, k: 2)", vec![{ let v = Value::Int(2); rt::fill(&__st.DEF_V0_scale_k, v.clone())?; v }], Some(&rt::StateSlot::new(__st.clone())))); rt::fill(&__st.V0_scale, v.clone())?; scope.define("scale", v); }
     { let v = Value::Int(10);
         let mut V1_base = Value::None;
-{ let __p = rt::place_mut(&mut V1_base, &[], *S1)?; *__p = v.clone(); }
+{ let __p = rt::place_mut(&mut V1_base, &[], sp(1))?; *__p = v.clone(); }
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
     { let v = Value::Func(rt::native_closure(&D_V2_wrap, "(f, ..rest)", Vec::new(), None)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
@@ -74,7 +70,7 @@ fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args)
         None => rt::read(&__st.DEF_V0_scale_k)?,
     };
     rt::finish(__args, span)?;
-    Ok(ops::mul(x.clone(), k.clone()).at(*S0)?)
+    Ok(ops::mul(x.clone(), k.clone()).at(sp(0))?)
 }
 
 #[allow(non_snake_case, dead_code)]
@@ -107,7 +103,7 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut rest = Value::Args(__args.take());
     if let Value::Args(__sink_inner) = &mut rest { __sink_inner.items.extend(__sink_pos_0.into_iter()); }
     rt::finish(__args, span)?;
-    Ok({ rt::check_call_depth(engine, *S2)?; let __callee = rt::callee(f.clone(), *S3)?; let __call_args = { let mut __call_args_v = Args::new(*S2, std::iter::empty::<Value>()); rt::spread_args(&mut __call_args_v, *S4, rest.clone())?; __call_args_v }; rt::call_with(__callee, None, *S2, __call_args, engine, context)? })
+    Ok(rt::call!(engine, context, sp(2), rt::callee(f.clone(), sp(3))?, |__args: &mut Args| -> SourceResult<()> { rt::spread_args(__args, sp(4), rest.clone())?; Ok(()) }))
 }
 
 #[allow(non_snake_case, dead_code)]

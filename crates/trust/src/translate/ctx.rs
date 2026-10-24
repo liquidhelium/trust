@@ -93,7 +93,7 @@ pub(super) struct Ctx {
     /// slot (discarded when the block exits, so scoping stays exact).
     pub(super) let_hoists: Vec<std::collections::HashMap<String, String>>,
     /// Error-site span table: (source file path, raw AST span u64) → site
-    /// index (the generated code references `*S{idx}`; at runtime it is
+    /// index (the generated code references `sp(idx)`; at runtime it is
     /// materialized via `rt::source_span` with the current process's
     /// FileId numbering — spans are self-contained, no host pre-intern
     /// convention).
@@ -209,7 +209,7 @@ impl Ctx {
         name
     }
 
-    /// Register a source span and return its generated reference `*S{idx}`
+    /// Register a source span and return its generated reference `sp(idx)`
     /// (for error sites; mirrors the original: an error's position points
     /// at the source expression; in the output it is a LazyLock
     /// materialized on first use with the current process's FileId — see
@@ -225,7 +225,7 @@ impl Ctx {
                 .unwrap_or_default();
             self.span_table.push((path, raw));
         }
-        format!("*S{idx}")
+        format!("sp({idx})")
     }
 
     /// Register a source span and use its constant name to fill the `{at}`
@@ -235,20 +235,21 @@ impl Ctx {
         fmt.replace("{at}", &at)
     }
 
-    /// Emit the error-site span block (materialized on first use with the
-    /// current process's FileId — self-contained, no host pre-intern
-    /// convention; empty when there are no sites).
+    /// Emit the per-output span table: one `rt::span_table!` line
+    /// materializing every site span through a single `OnceLock`
+    /// (instead of one `LazyLock` static per span; self-contained, no
+    /// host pre-intern convention; empty when there are no sites).
     pub(super) fn span_consts(&self) -> String {
         if self.span_table.is_empty() {
             return String::new();
         }
-        let mut out = String::new();
-        for (idx, (path, raw)) in self.span_table.iter().enumerate() {
-            out.push_str(&format!(
-                "static S{idx}: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span({path:?}, {raw}));\n"
-            ));
-        }
-        out
+        let entries = self
+            .span_table
+            .iter()
+            .map(|(path, raw)| format!("({path:?}, {raw}u64)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("rt::span_table!(&[{entries}]);\n")
     }
 
     pub(super) fn diag(&mut self, span: typst_syntax::Span, message: String) {

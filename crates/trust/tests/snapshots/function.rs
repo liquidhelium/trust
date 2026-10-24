@@ -15,7 +15,7 @@ use trust_runtime as rt;
 
 /// Fallback error span for sites not covered by a source span.
 const SPAN: Span = Span::detached();
-static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 300716430196727));
+rt::span_table!(&[("main.typ", 300716430196727u64)]);
 /// Anchor span of this file (carries a FileId; span-located global functions such as plugins rely on it).
 #[allow(non_snake_case, dead_code)]
 pub(crate) fn file_span() -> Span {
@@ -57,7 +57,7 @@ fn f_v0_add(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -
     let mut a = rt::param_pos(__args, "a", span)?;
     let mut b = rt::param_pos(__args, "b", span)?;
     rt::finish(__args, span)?;
-    Ok(ops::add(a.clone(), b.clone()).at(*S0)?)
+    Ok(ops::add(a.clone(), b.clone()).at(sp(0))?)
 }
 
 #[allow(non_snake_case, dead_code)]

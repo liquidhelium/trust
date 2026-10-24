@@ -15,14 +15,7 @@ use trust_runtime as rt;
 
 /// Fallback error span for sites not covered by a source span.
 const SPAN: Span = Span::detached();
-static S0: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288344138459499));
-static S1: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288375944433528));
-static S2: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288378614278059));
-static S3: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288333923402147));
-static S4: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288235487394932));
-static S5: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288287491323272));
-static S6: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 288027471681572));
-static S7: std::sync::LazyLock<Span> = std::sync::LazyLock::new(|| rt::source_span("main.typ", 290479085446172));
+rt::span_table!(&[("main.typ", 288344138459499u64), ("main.typ", 288375944433528u64), ("main.typ", 288378614278059u64), ("main.typ", 288333923402147u64), ("main.typ", 288235487394932u64), ("main.typ", 288287491323272u64), ("main.typ", 288027471681572u64), ("main.typ", 290479085446172u64)]);
 /// Anchor span of this file (carries a FileId; span-located global functions such as plugins rely on it).
 #[allow(non_snake_case, dead_code)]
 pub(crate) fn file_span() -> Span {
@@ -66,22 +59,22 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(&(items.clone()), *S4)? {
+  for __it1 in rt::iter_values(&(items.clone()), sp(4))? {
       let mut x = __it1;
 
       let __v = { let mut __out = Value::None;
-    __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(*S0)?, std::cmp::Ordering::Greater)), *S3)? { { let mut __out = Value::None;
-    __out = rt::join(__out, { rt::check_call_depth(engine, *S1)?; let __mut_args = { let mut __call_args_v = Args::new(*S1, std::iter::empty::<Value>()); __call_args_v.push(*S2, x.clone()); __call_args_v }; let __place = rt::place_mut(&mut out, &[], *S1)?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, *S1, "out.push")? }, *S1)?;
+    __out = rt::join(__out, if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(sp(0))?, std::cmp::Ordering::Greater)), sp(3))? { { let mut __out = Value::None;
+    __out = rt::join(__out, { rt::check_call_depth(engine, sp(1))?; let __mut_args = rt::args!(sp(1), |__args: &mut Args| -> SourceResult<()> { __args.push(sp(2), x.clone()); Ok(()) }); let __place = rt::place_mut(&mut out, &[], sp(1))?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, sp(1), "out.push")? }, sp(1))?;
     let _ = &__out;
     __out
-} } else { Value::None }, *S3)?;
+} } else { Value::None }, sp(3))?;
     let _ = &__out;
     __out
 };
-      __out = rt::join(__out, __v, *S5)?;
+      __out = rt::join(__out, __v, sp(5))?;
   }
-  __out }, *S6)?;
-    __out = rt::join(__out, out.clone(), *S7)?;
+  __out }, sp(6))?;
+    __out = rt::join(__out, out.clone(), sp(7))?;
     let _ = &__out;
     __out
 })

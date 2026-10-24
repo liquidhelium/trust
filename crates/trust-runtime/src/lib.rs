@@ -37,6 +37,82 @@ use typst::diag::{Hint, SourceDiagnostic, Trace};
 /// process's number, so the host no longer needs a "pre-intern with the
 /// same ordering" convention. Layout drift is self-checked via `id()`
 /// equality.
+///
+/// Per-output span tables: materialize every error-site span of a
+/// generated module in one shot (one `OnceLock` instead of one
+/// `LazyLock` per span; sites read `sp(n)`). Entries are `(path, raw)`
+/// pairs.
+#[macro_export]
+macro_rules! span_table {
+    ($entries:expr) => {
+        pub(crate) fn sp(n: usize) -> typst::syntax::Span {
+            static TABLE: std::sync::OnceLock<Vec<typst::syntax::Span>> =
+                std::sync::OnceLock::new();
+            TABLE.get_or_init(|| {
+                $entries
+                    .iter()
+                    .map(|(p, r)| $crate::source_span(p, *r))
+                    .collect()
+            })[n]
+        }
+    };
+}
+
+/// Build an `Args` value from a [`call!`]-style fill closure (for
+/// sites that pass the argument list as a value rather than calling
+/// immediately, e.g. mutating-method dispatch).
+#[macro_export]
+macro_rules! args {
+    ($at:expr, $fill:expr) => {{
+        let mut __trust_args =
+            typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
+        $fill(&mut __trust_args)?;
+        __trust_args
+    }};
+}
+
+/// Call a resolved callee: check_call_depth → callee value → build
+/// args → call. `$callee` is the callee expression (sites pass
+/// `rt::callee(expr, span)?`, keeping its own resolution span);
+/// `$fill` receives the `&mut Args` builder as a closure argument
+/// (positional `push`, named items, spread all go through it), so the
+/// per-site text is a single readable line. Evaluation order matches
+/// the interpreter: depth check, callee, then arguments.
+#[macro_export]
+macro_rules! call {
+    ($engine:expr, $context:expr, $at:expr, $callee:expr, $fill:expr) => {{
+        $crate::check_call_depth($engine, $at)?;
+        let __trust_callee = $callee;
+        let mut __trust_args =
+            typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
+        $fill(&mut __trust_args)?;
+        $crate::call_with(__trust_callee, None, $at, __trust_args, $engine, $context)?
+    }};
+}
+
+/// Method call: resolve the method callee on a target, then call with
+/// the target bound as the implicit first argument. `$fill` builds the
+/// explicit arguments, exactly as in [`call!`].
+#[macro_export]
+macro_rules! mcall {
+    ($engine:expr, $context:expr, $at:expr, $target:expr, $field:literal, $access:literal, $field_at:expr, $tgt_at:expr, $fill:expr) => {{
+        $crate::check_call_depth($engine, $at)?;
+        let __trust_target = $target;
+        let __trust_mc = $crate::method_callee(__trust_target, $field, $access, $engine, $field_at)?;
+        let mut __trust_args =
+            typst::foundations::Args::new($at, std::iter::empty::<typst::foundations::Value>());
+        $fill(&mut __trust_args)?;
+        $crate::call_with(
+            __trust_mc.0,
+            __trust_mc.1.map(|t| (t, $tgt_at)),
+            $at,
+            __trust_args,
+            $engine,
+            $context,
+        )?
+    }};
+}
+
 pub fn source_span(path: &str, orig_raw: u64) -> Span {
     /// Mask for the low 48 bits (position number); the file number sits in
     /// the high bits (public documented convention:

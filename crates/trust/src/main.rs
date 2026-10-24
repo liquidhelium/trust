@@ -3,10 +3,10 @@
 use std::io::Write;
 
 /// Download a package from the registry and unpack it into the local cache
-/// (mirrors the typst CLI's automatic download of missing packages,
-/// KNOWN #49). Returns true on success (cache directory in place).
+/// (mirrors the typst CLI's automatic download of missing packages).
+/// Returns true on success (cache directory in place).
 /// Diagnostic excerpt: span → file:line:col + source line (mirrors the
-/// typst CLI's diagnostic presentation; KNOWN #69). The span's FileId,
+/// typst CLI's diagnostic presentation). The span's FileId,
 /// re-interned by path, is the same origin.
 fn diag_snippet(
     diag: &trust::Diag,
@@ -572,7 +572,7 @@ fn collect_translatable_deps(
                 rest.split_once(':').map(|(_, v)| v).unwrap_or(""),
             );
             // Automatic fetch of missing packages (mirrors the typst CLI's
-            // registry download, KNOWN #49): registry form
+            // registry download): registry form
             // {name}-{version}.tar.gz; TRUST_NO_FETCH=1 disables it. Only
             // on failure does it fall back to runtime interpretation.
             if !dir.join("typst.toml").exists() {

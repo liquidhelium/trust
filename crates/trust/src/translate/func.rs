@@ -406,7 +406,7 @@ pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Clo
             ast::Param::Pos(_) => params.push(format_param("_", false, true, false)),
             ast::Param::Named(named) => {
                 // Named parameters bind by name only (args.named); metadata
-                // stays consistent (KNOWN-ISSUES #10).
+                // stays consistent.
                 params.push(format_param(named.name().as_str(), true, false, false))
             }
             ast::Param::Spread(_) => params.push(format_param("args", false, true, true)),

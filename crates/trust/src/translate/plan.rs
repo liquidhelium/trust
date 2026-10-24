@@ -539,3 +539,28 @@ pub(super) fn resolve_import_slot_file(
     }
     None
 }
+
+/// Whether `from` reaches `to` through internal import edges (a `to == from`
+/// hit only counts via a real edge chain; callers pass an edge's target and
+/// the edge's source file — a hit means the edge closes an import cycle).
+pub(super) fn import_reaches(plans: &[FilePlan], from: &str, to: &str) -> bool {
+    let mut edges: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for plan in plans {
+        for edge in &plan.imports {
+            edges.entry(plan.path.as_str()).or_default().push(edge.target.as_str());
+        }
+    }
+    let mut visited: std::collections::BTreeSet<&str> = Default::default();
+    let mut stack: Vec<&str> = edges.get(from).cloned().unwrap_or_default();
+    while let Some(node) = stack.pop() {
+        if node == to {
+            return true;
+        }
+        if visited.insert(node) {
+            if let Some(nexts) = edges.get(node) {
+                stack.extend(nexts.iter().copied());
+            }
+        }
+    }
+    false
+}

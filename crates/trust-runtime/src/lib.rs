@@ -1359,6 +1359,26 @@ pub fn dict_put_key(
     Ok(())
 }
 
+/// Insert with an already-cast key (the dict literal's aggregating path:
+/// invalid keys were collected by the caller, the default key is
+/// inserted so later duplicates still see the same last-wins shape).
+pub fn dict_insert(dict: &mut typst::foundations::Dict, key: Str, value: Value) {
+    dict.insert(key, value);
+}
+
+/// Destructuring patterns over strings/bytes error up front at the
+/// pattern span (mirrors typst-eval flow.rs:169-171: `cannot destructure
+/// values of {ty}`; only Normal/Placeholder patterns may iterate
+/// graphemes/integers).
+pub fn for_destructure_check(iterable: &Value, pattern_at: Span) -> SourceResult<()> {
+    match iterable {
+        Value::Str(_) | Value::Bytes(_) => {
+            bail!(pattern_at, "cannot destructure values of {}", iterable.ty())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Dictionary spread `(..other)` (mirrors `Eval for ast::DictItem::Spread`).
 pub fn dict_spread(
     dict: &mut typst::foundations::Dict,
@@ -2845,4 +2865,11 @@ pub fn eval_vm_exports(
         })
         .collect();
     Ok((value, out))
+}
+
+/// Propagate a collected diagnostic list (the dict literal's
+/// invalid-key aggregation: all keys reported together, mirrors
+/// `Eval for ast::Dict` returning `invalid_keys` at the end).
+pub fn bail_diags(diags: EcoVec<SourceDiagnostic>) -> SourceResult<()> {
+    Err(diags)
 }

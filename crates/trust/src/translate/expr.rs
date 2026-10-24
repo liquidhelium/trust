@@ -222,7 +222,9 @@ impl Ctx {
                 out
             }
             ast::Expr::Dict(dict) => {
-                let mut out = String::from("{ let mut __d = Dict::new();");
+                let mut out = String::from(
+                    "{ let mut __d = Dict::new(); let mut __invalid: ecow::EcoVec<typst::diag::SourceDiagnostic> = eco_vec![];",
+                );
                 for item in dict.items() {
                     match item {
                         ast::DictItem::Named(named) => {
@@ -236,14 +238,16 @@ impl Ctx {
                         }
                         ast::DictItem::Keyed(keyed) => {
                             // The key is an expression: evaluate then cast
-                            // to string (mirrors `Eval for
-                            // ast::Dict::Keyed`).
+                            // to string. Invalid keys are **collected**
+                            // (all reported together at the end, mirroring
+                            // `Eval for ast::Dict`: invalid_keys.extend +
+                            // default key insert).
                             let key = self.expr(keyed.key(), env);
                             let key_at = self.span_of(keyed.key().span());
                             let value = self.expr(keyed.expr(), env);
                             let _ = write!(
                                 out,
-                                " rt::dict_put_key(&mut __d, {key}, {value}, {key_at})?;"
+                                " let __k = {key}; let __k = match __k.cast::<typst::foundations::Str>().at({key_at}) {{ Ok(k) => k, Err(errors) => {{ __invalid.extend(errors); typst::foundations::Str::default() }} }}; rt::dict_insert(&mut __d, __k, {value});"
                             );
                         }
                         ast::DictItem::Spread(spread) => {
@@ -253,7 +257,7 @@ impl Ctx {
                         }
                     }
                 }
-                out.push_str(" Value::Dict(__d) }");
+                out.push_str(" if !__invalid.is_empty() { rt::bail_diags(__invalid)?; } Value::Dict(__d) }");
                 out
             }
             ast::Expr::Unary(unary) => {
@@ -337,12 +341,12 @@ impl Ctx {
                 // function has a different return type, and a direct
                 // return would not compile — degrade with a diagnostic.
                 if self.in_fn == 0 {
-                    let message = "return is only supported inside a function body (v1 language subset)".to_string();
+                    // Mirrors typst-eval flow.rs:35 (an eval error, not a
+                    // degradation — the flow event bubbles out of the
+                    // module/function scope).
+                    let message = "cannot return outside of function".to_string();
                     self.diag(func_return.span(), message.clone());
-                    return format!(
-                        "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
-                        message, message
-                    );
+                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
                 let value = match func_return.body() {
                     Some(expr) => self.expr(expr, env),
@@ -355,7 +359,7 @@ impl Ctx {
                 // error; driven by the error tests): degrades to a
                 // runtime error with the same message.
                 if self.in_loop == 0 {
-                    let message = "cannot use `break` outside of a loop".to_string();
+                    let message = "cannot break outside of loop".to_string();
                     self.diag(lb.span(), message.clone());
                     return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
@@ -363,7 +367,7 @@ impl Ctx {
             }
             ast::Expr::LoopContinue(lc) => {
                 if self.in_loop == 0 {
-                    let message = "cannot use `continue` outside of a loop".to_string();
+                    let message = "cannot continue outside of loop".to_string();
                     self.diag(lc.span(), message.clone());
                     return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
@@ -373,6 +377,10 @@ impl Ctx {
                 let iterable = self.expr(for_loop.iterable(), env);
                 let id = self.fresh_id();
                 let binder = format!("__it{id}");
+                // The iterable evaluates exactly once (mirrors upstream's
+                // single `self.iterable().eval(vm)?`); the destructure
+                // pre-check and the iterator both read the binding.
+                let iter_tmp = format!("__iter{id}");
                 // Pattern destructuring expands at the head of the loop
                 // body; a simple identifier pattern binds the iterated
                 // value directly (zero clones, mirroring the original
@@ -398,9 +406,24 @@ impl Ctx {
                 self.in_loop -= 1;
                 let iter_at = self.span_of(for_loop.iterable().span());
                 let join_at = self.span_of(for_loop.body().span());
+                // Destructuring patterns over strings/bytes error up front
+                // at the pattern span (mirrors flow.rs:169-171); other
+                // type errors stay with iter_values ("cannot loop over …").
+                // `(k, v)` parses as Destructuring; `(k)` as Parenthesized —
+                // a parenthesized single name still iterates (upstream's
+                // Normal | Placeholder arms), only multi-name shapes error.
+                let destructure_check = match for_loop.pattern() {
+                    ast::Pattern::Destructuring(_) => {
+                        let pat_at = self.span_of(for_loop.pattern().span());
+                        format!("rt::for_destructure_check(&{iter_tmp}, {pat_at})?;")
+                    }
+                    _ => String::new(),
+                };
                 format!(
                     "{{ let mut __out = Value::None;\n  \
-                     for {binder} in rt::iter_values(&({iterable}), {iter_at})? {{\n  \
+                     let {iter_tmp} = {iterable};\n  \
+                     {destructure_check}\n  \
+                     for {binder} in rt::iter_values(&{iter_tmp}, {iter_at})? {{\n  \
                      \x20   {pattern_code}\n  \
                      \x20   let __v = {body};\n  \
                      \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
@@ -541,6 +564,20 @@ impl Ctx {
                         "{{ let __caps: Vec<(&'static str, Value)> = {init}; rt::eval_expr({src:?}, &__caps, {pending_lit}, engine, context)? }}"
                     )
                 }
+            }
+            // Rules outside statement position are eval errors (mirrors
+            // typst-eval code.rs:80: "{name} is only allowed directly in
+            // code and content blocks"); statement-level rules are
+            // intercepted by block()/content_seq_top and never reach here.
+            ast::Expr::SetRule(set) => {
+                let message = "set is only allowed directly in code and content blocks".to_string();
+                self.diag(set.span(), message.clone());
+                format!("{{ rt::bail_value(engine, {:?})? }}", message)
+            }
+            ast::Expr::ShowRule(show) => {
+                let message = "show is only allowed directly in code and content blocks".to_string();
+                self.diag(show.span(), message.clone());
+                format!("{{ rt::bail_value(engine, {:?})? }}", message)
             }
             other => {
                 let kind = other.to_untyped().kind();

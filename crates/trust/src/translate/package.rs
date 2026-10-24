@@ -2226,6 +2226,16 @@ impl Ctx {
             };
             let target_mod = &target_plan.mod_name;
             let exports = &export_table[edge.target.as_str()];
+            // Cyclic import: typst errors when module evaluation re-enters
+            // a file already on the route (import.rs:231-233); an edge that
+            // closes a cycle bails at its own import statement — whichever
+            // file of the cycle evaluates first reports it.
+            if super::plan::import_reaches(plans, &edge.target, &plan.path) {
+                let message = "cyclic import".to_string();
+                cx.diag(edge.span, message.clone());
+                let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+                continue;
+            }
             match &edge.items {
                 ImportItems::Bare | ImportItems::Rename(_) => {
                     let bound = match &edge.items {
@@ -2240,6 +2250,17 @@ impl Ctx {
                             .unwrap_or("m")
                             .to_string(),
                     };
+                    // A bare import's derived name must be a valid
+                    // identifier (upstream BareImportError::PathInvalid,
+                    // import.rs:99-101; `as` renames escape the check).
+                    if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound)
+                    {
+                        let message = "module name would not be a valid identifier".to_string();
+                        cx.diag(edge.span, message.clone());
+                        let _ =
+                            writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+                        continue;
+                    }
                     let slot = match import_slots.get(&edge.target) {
                         Some(slot) => slot.clone(),
                         None => format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&bound)),
@@ -2320,7 +2341,14 @@ impl Ctx {
                             None => (name.as_str(), &[]),
                         };
                         let Some(slot) = exports.get(first) else {
+                            // Upstream reports the unresolved component as an
+                            // eval error (import.rs:121); the detailed note
+                            // stays in the translator's degradation log.
                             cx.diag(edge.span, format!("`{}` does not export `{first}`", edge.target));
+                            let _ = writeln!(
+                                import_fills,
+                                "    rt::bail_value(engine, \"unresolved import\")?;"
+                            );
                             continue;
                         };
                         let as_name = rename.clone().unwrap_or_else(|| name.clone());

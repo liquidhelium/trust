@@ -59,7 +59,9 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     Ok({ let mut __out = Value::None;
     let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
         __out = rt::join(__out, { let mut __out = Value::None;
-  for __it1 in rt::iter_values(&(items.clone()), sp(4))? {
+  let __iter1 = items.clone();
+  
+  for __it1 in rt::iter_values(&__iter1, sp(4))? {
       let mut x = __it1;
 
       let __v = {

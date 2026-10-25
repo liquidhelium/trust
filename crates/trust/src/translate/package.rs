@@ -633,58 +633,29 @@ return;
                     // was collected as a global slot; mirrors
                     // CapturesVisitor's Closure branch).
                     let mut g_env = env2.clone();
-                    let mut names = Vec::new();
-                    let mut g_bound: Vec<String> = Vec::new();
-                    if let Some(cname) = closure.name() {
-                        g_bound.push(cname.as_str().to_string());
-                    }
-                    for param in closure.params().children() {
-                        match param {
-                            ast::Param::Pos(pattern) => g_bound
-                                .extend(pattern.bindings().into_iter().map(|i| i.as_str().to_string())),
-                            ast::Param::Named(named) => {
-                                g_bound.push(named.name().as_str().to_string())
-                            }
-                            ast::Param::Spread(spread) => {
-                                if let Some(ident) = spread.sink_ident() {
-                                    g_bound.push(ident.as_str().to_string());
-                                }
-                            }
-                        }
-                    }
-                    super::captures::collect_idents(
-                        closure.body().to_untyped(),
-                        &mut g_bound,
-                        &mut names,
+                    // Global names materialize at creation time (mirrors
+                    // typst closure capture). The routing rules live with
+                    // the capture analysis (see global_capture_slots).
+                    let closure_body = closure.body().to_untyped();
+                    let g_captures = super::captures::global_capture_slots(
+                        super::captures::top_closure_free_names(closure),
+                        &env2.module,
+                        super::captures::has_wildcard_import(closure_body),
+                        &slot,
                     );
-                    let mut g_seen = std::collections::HashSet::new();
-                    // A body with `import x: *` may bind pending names itself
-                    // at call time (typst leaves them uncaptured); skip the
-                    // G_ slot so body refs resolve through the body's layers.
-                    let wild_body =
-                        super::captures::has_wildcard_import(closure.body().to_untyped());
-                for (gname, g_in_math) in names {
-                        if !g_seen.insert(gname.clone()) {
-                            continue;
-                        }
-                        if env2.module.iter().any(|(n, _)| *n == gname) {
-                            continue;
-                        }
-                        if wild_body {
-                            continue;
-                        }
-                        let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
-                        state_fields.push((plan.path.clone(), gslot.clone()));
-                        let gname_escaped = escape(&gname);
-                        let resolver = if g_in_math { "capture_math_opt" } else { "capture_code_opt" };
+                    for g in &g_captures {
+                        state_fields.push((plan.path.clone(), g.slot.clone()));
+                        let gname_escaped = escape(&g.name);
+                        let resolver = if g.in_math { "capture_math_opt" } else { "capture_code_opt" };
                         let _ = writeln!(
                             self.binding_code,
-                            "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{gslot}, v)?; }}"
+                            "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{}, v)?; }}",
+                            g.slot
                         );
                         g_env.module.push((
-                            gname,
+                            g.name.clone(),
                             Ref::GlobalFallback {
-                                slot: gslot,
+                                slot: g.slot.clone(),
                                 name: gname_escaped,
                             },
                         ));

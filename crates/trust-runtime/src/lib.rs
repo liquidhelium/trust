@@ -166,6 +166,7 @@ pub fn mi_par() -> Value {
 /// - `[space]` / `[space n]` — whitespace items, n-fold
 /// - `[par]` / `[par n]` — paragraph breaks, n-fold
 /// - `[<expr>]` — any other item, already in `Value` form
+///
 /// Expands to push/extend on a pre-sized vec: the same items in the same
 /// order as the item-by-item form, with runs staying as runtime loops
 /// (fewer post-expansion tokens than unrolling). One expansion level, no

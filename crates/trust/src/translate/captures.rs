@@ -78,13 +78,84 @@ pub(super) fn bare_import_bound_name(source: ast::Expr) -> String {
 /// typst: an unresolvable name is simply not captured, and the body's
 /// in-scope import binds it at call time).
 pub(super) fn has_wildcard_import(node: &typst_syntax::SyntaxNode) -> bool {
-    if let Some(import) = node.cast::<ast::ModuleImport>() {
-        if matches!(import.imports(), Some(ast::Imports::Wildcard)) {
+    if let Some(import) = node.cast::<ast::ModuleImport>()
+        && matches!(import.imports(), Some(ast::Imports::Wildcard)) {
             return true;
         }
-    }
     node.children().any(has_wildcard_import)
 }
+
+/// Free names of a **top-level let-closure's** body, with the closure's own
+/// bindings (name/params/sink) pre-seeded — parameters are not free names
+/// (otherwise `__merge(base, …)`'s base was collected as a global slot and
+/// reported unknown variable at call time; mirrors CapturesVisitor's Closure
+/// branch binding before walking the body).
+pub(super) fn top_closure_free_names(closure: ast::Closure) -> Vec<(String, bool)> {
+    let mut bound: Vec<String> = Vec::new();
+    if let Some(name) = closure.name() {
+        bound.push(name.as_str().to_string());
+    }
+    for param in closure.params().children() {
+        match param {
+            ast::Param::Pos(pattern) => {
+                bound.extend(pattern.bindings().into_iter().map(|i| i.as_str().to_string()));
+            }
+            ast::Param::Named(named) => bound.push(named.name().as_str().to_string()),
+            ast::Param::Spread(spread) => {
+                if let Some(ident) = spread.sink_ident() {
+                    bound.push(ident.as_str().to_string());
+                }
+            }
+        }
+    }
+    let mut names = Vec::new();
+    collect_idents(closure.body().to_untyped(), &mut bound, &mut names);
+    names
+}
+
+/// One creation-time global capture of a top-level let-closure.
+pub(super) struct GlobalCapture {
+    /// The free name (typst-side).
+    pub name: String,
+    /// Minted slot: `G_{owner}_{name}`.
+    pub slot: String,
+    /// Math name (`capture_math_opt`) vs code name (`capture_code_opt`).
+    pub in_math: bool,
+}
+
+/// Which free names of a top-level let-closure take the creation-time
+/// global-slot protocol (a `G_` fill at module init; body refs read the
+/// slot with a global fallback): deduped, module-scope names excluded
+/// (they resolve statically), and — when the body contains a wildcard
+/// import — everything left uncaptured (those names resolve through the
+/// body's own runtime layers at call time, same as typst).
+pub(super) fn global_capture_slots(
+    names: Vec<(String, bool)>,
+    module_env: &[(String, super::ctx::Ref)],
+    body_has_wildcard: bool,
+    owner_slot: &str,
+) -> Vec<GlobalCapture> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (name, in_math) in names {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if module_env.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        if body_has_wildcard {
+            continue;
+        }
+        out.push(GlobalCapture {
+            slot: format!("G_{owner_slot}_{}", super::naming::sanitize_key(&name)),
+            name,
+            in_math,
+        });
+    }
+    out
+}
+
 
 pub(super) fn collect_idents(
     node: &typst_syntax::SyntaxNode,

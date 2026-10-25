@@ -346,15 +346,14 @@ pub(super) fn build_export_table(
                     }
                     // dep_entries maps spec → the dependency entry's full
                     // merge key ("@preview/cetz:0.5.2/src/lib.typ").
-                    if let Some(entry_path) = dep_entries.get(&spec) {
-                        if let Some(target_exports) = table.get(entry_path) {
+                    if let Some(entry_path) = dep_entries.get(&spec)
+                        && let Some(target_exports) = table.get(entry_path) {
                             for (wname, wslot) in target_exports {
                                 exports
                                     .entry(wname.clone())
                                     .or_insert_with(|| wslot.clone());
                             }
                         }
-                    }
                 }
                 continue;
             }
@@ -665,11 +664,10 @@ pub(super) fn import_reaches(
         if node == to {
             return true;
         }
-        if visited.insert(node) {
-            if let Some(nexts) = edges.get(node) {
+        if visited.insert(node)
+            && let Some(nexts) = edges.get(node) {
                 stack.extend(nexts.iter().copied());
             }
-        }
     }
     false
 }

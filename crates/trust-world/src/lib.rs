@@ -81,6 +81,17 @@ pub struct InjectWorld {
 /// Cheap clone of the world (all fields are Arc/value semantics; a shared
 /// base for test batches: fonts, the source table, and the file table are
 /// cloned once and each test only changes main and the injected modules).
+static SOURCE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FONT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Profiling counters (see InjectWorld::source/font).
+pub fn world_call_counts() -> (u64, u64) {
+    (
+        SOURCE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        FONT_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 impl Clone for InjectWorld {
     fn clone(&self) -> Self {
         Self {
@@ -429,6 +440,7 @@ impl World for InjectWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
+        SOURCE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(source) = self.sources.get(&id) {
             return Ok(source.clone());
         }
@@ -480,6 +492,7 @@ impl World for InjectWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
+        FONT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.fonts.get(index).cloned()
     }
 

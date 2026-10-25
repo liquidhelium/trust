@@ -1385,13 +1385,46 @@ impl Ctx {
             // element (attach_labels); other values display into the
             // sequence (the lookup semantics exercised by glossary-style
             // code).
-            // Run-length vec (`rt::markup!`): consecutive identical
-            // static items — the interpreter's inter-statement whitespace
-            // and expression-statement Nones — collapse to one `[kind n]`
-            // entry, and the leading literal is the exact item count (one
-            // precise allocation). The closed string set comes from this
-            // emitter's own static arms, so a dynamic expression can
-            // never misclassify.
+            //
+            // Item classification (closed string shapes from this
+            // emitter's own arms — a dynamic expression can never
+            // misclassify):
+            // - Static kinds (none/space/par): the interpreter's
+            //   expression-statement Nones and inter-statement
+            //   whitespace; consecutive identical items run-length
+            //   collapse.
+            // - Provable-Content expressions (`rt::text(..)`, the payload
+            //   of a `Value::Content(..)` wrapper): Label-free by
+            //   construction.
+            // - Everything else: a Value of unknown variant (may be
+            //   Label) — the sequence must go through attach_labels.
+            //
+            // When every item is static or provably Content, the whole
+            // sequence takes the `rt::cseq!` fast path: a Vec<Content>
+            // straight into Content::sequence — no Vec<Value>
+            // intermediate, no into_value wrapping, no label scan, no
+            // engine (the label warnings cannot fire).
+            enum P {
+                Run(&'static str),
+                Content(String),
+                Dyn(String),
+            }
+            let classified: Vec<P> = parts
+                .into_iter()
+                .map(|p| match p.as_str() {
+                    "rt::embed(Value::None)" => P::Run("none"),
+                    "rt::space()" => P::Run("space"),
+                    "rt::parbreak()" => P::Run("par"),
+                    _ if p.starts_with("rt::text(") => P::Content(p),
+                    _ if p.starts_with("Value::Content(") && p.ends_with(')') => {
+                        // The variant's payload is a Content expression by
+                        // construction; unwrap it for the fast path.
+                        P::Content(p["Value::Content(".len()..p.len() - 1].to_string())
+                    }
+                    _ => P::Dyn(p),
+                })
+                .collect();
+            let fast = classified.iter().all(|p| !matches!(p, P::Dyn(_)));
             let mut items: Vec<String> = Vec::new();
             let mut total: usize = 0;
             let mut run: Option<(&'static str, u32)> = None;
@@ -1407,22 +1440,28 @@ impl Ctx {
                     });
                 }
             };
-            for p in parts {
-                let kind = match p.as_str() {
-                    "rt::embed(Value::None)" => Some("none"),
-                    "rt::space()" => Some("space"),
-                    "rt::parbreak()" => Some("par"),
-                    _ => None,
-                };
-                match kind {
-                    Some(k) => match &mut run {
+            for p in classified {
+                match p {
+                    P::Run(k) => match &mut run {
                         Some((rk, n)) if *rk == k => *n += 1,
                         _ => {
                             flush(&mut run, &mut items, &mut total);
                             run = Some((k, 1));
                         }
                     },
-                    None => {
+                    P::Content(c) => {
+                        flush(&mut run, &mut items, &mut total);
+                        total += 1;
+                        // Fast path: the bare Content expression (cseq!
+                        // items are Content). Slow path (markup!, Value
+                        // items): wrapped back into the Value::Content
+                        // form the sequence originally carried.
+                        items.push(format!(
+                            "[{}]",
+                            if fast { c } else { format!("Value::Content({c})") }
+                        ));
+                    }
+                    P::Dyn(d) => {
                         flush(&mut run, &mut items, &mut total);
                         // Never-typed items (`#return`, the divergence
                         // check of always-true while): a trailing
@@ -1431,10 +1470,10 @@ impl Ctx {
                         // `.into_value()` cannot apply to never. The
                         // emitter marks them with ` /* never */`
                         // (scripting-return/while driven).
-                        let item = if p.contains("/* never */") {
-                            format!("{{ {p} }}")
+                        let item = if d.contains("/* never */") {
+                            format!("{{ {d} }}")
                         } else {
-                            format!("({p}).into_value()")
+                            format!("({d}).into_value()")
                         };
                         total += 1;
                         items.push(format!("[{item}]"));
@@ -1442,10 +1481,17 @@ impl Ctx {
                 }
             }
             flush(&mut run, &mut items, &mut total);
-            format!(
-                "{{ let __items = rt::markup![{total}; {}]; rt::attach_labels(engine, __items) }}",
-                items.join(", ")
-            )
+            if fast {
+                format!(
+                    "{{ let __parts = rt::cseq![{total}; {}]; rt::content_sequence(__parts) }}",
+                    items.join(", ")
+                )
+            } else {
+                format!(
+                    "{{ let __items = rt::markup![{total}; {}]; rt::attach_labels(engine, __items) }}",
+                    items.join(", ")
+                )
+            }
         }
     }
 

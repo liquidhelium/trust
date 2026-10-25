@@ -435,8 +435,9 @@ fn spaced(a: &TokenTree, b: &TokenTree, prev: Option<&TokenTree>) -> bool {
 
 // ------------------------------------------------------------- macro sites
 
-/// Macro names whose invocations get the DSL layout.
-const SEGMENT_MACROS: [&str; 3] = ["call", "mcall", "args"];
+/// Macro names whose invocations get the DSL layout: the `;`-shaped
+/// argument macros and the bracket-shaped sequence macros.
+const SEGMENT_MACROS: [&str; 5] = ["call", "mcall", "args", "markup", "cseq"];
 
 /// Byte ranges of `rt::<SEGMENT_MACROS>!` invocations in `text`
 /// (located spans; ranges cover `rt::…!(…)`).

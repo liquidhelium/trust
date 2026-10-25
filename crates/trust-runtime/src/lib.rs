@@ -180,6 +180,50 @@ macro_rules! markup {
     }};
 }
 
+/// The Label-free fast path of [`markup`](macro@markup): identical
+/// bracket-group syntax, but items are **Content** (the emitter proved no
+/// item can be a `Value::Label`), so the sequence builds as
+/// `Vec<Content>` directly — no `Vec<Value>` intermediate, no per-item
+/// `into_value()` wrapping, no label scan, no engine parameter.
+#[macro_export]
+macro_rules! cseq {
+    ($cap:literal; $([$($item:tt)*]),* $(,)?) => {{
+        let mut __trust_cseq: ::std::vec::Vec<typst::foundations::Content> =
+            ::std::vec::Vec::with_capacity($cap);
+        $($crate::__cseq_item!(__trust_cseq; $($item)*);)*
+        __trust_cseq
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __cseq_item {
+    ($seq:ident; none $n:literal) => {
+        $seq.extend(::std::iter::repeat_n(
+            $crate::embed(typst::foundations::Value::None),
+            $n,
+        ));
+    };
+    ($seq:ident; none) => {
+        $seq.push($crate::embed(typst::foundations::Value::None));
+    };
+    ($seq:ident; space $n:literal) => {
+        $seq.extend(::std::iter::repeat_n($crate::space(), $n));
+    };
+    ($seq:ident; space) => {
+        $seq.push($crate::space());
+    };
+    ($seq:ident; par $n:literal) => {
+        $seq.extend(::std::iter::repeat_n($crate::parbreak(), $n));
+    };
+    ($seq:ident; par) => {
+        $seq.push($crate::parbreak());
+    };
+    ($seq:ident; $e:expr) => {
+        $seq.push($e);
+    };
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __markup_item {

@@ -51,7 +51,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
         rt::fill(&__st.V1_base, V1_base.clone())?; scope.define("base", V1_base.clone());
     }
     { let v = Value::Func(rt::native_closure(&D_V2_wrap, "(f, ..rest)", Vec::new(), None)); rt::fill(&__st.V2_wrap, v.clone())?; scope.define("wrap", v); }
-    Ok(Module::new("rich", scope).with_content({ let __items = rt::markup![3; [none 3]]; rt::attach_labels(engine, __items) }).with_file_id(file_span().id().expect("file span id")))
+    Ok(Module::new("rich", scope).with_content({ let __parts = rt::cseq![3; [none 3]]; rt::content_sequence(__parts) }).with_file_id(file_span().id().expect("file span id")))
 }
 
 /// One-line integration: drives module_init and returns the module (to inject into a host library use

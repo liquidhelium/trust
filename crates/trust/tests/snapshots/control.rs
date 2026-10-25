@@ -42,7 +42,7 @@ pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResu
     let __st = std::sync::Arc::new(__State::default());
     let _ = context;
     { let v = Value::Func(rt::native_closure(&D_V0_pick, "(items)", Vec::new(), None)); rt::fill(&__st.V0_pick, v.clone())?; scope.define("pick", v); }
-    Ok(Module::new("control", scope).with_content({ let __items = rt::markup![1; [none]]; rt::attach_labels(engine, __items) }).with_file_id(file_span().id().expect("file span id")))
+    Ok(Module::new("control", scope).with_content({ let __parts = rt::cseq![1; [none]]; rt::content_sequence(__parts) }).with_file_id(file_span().id().expect("file span id")))
 }
 
 /// One-line integration: drives module_init and returns the module (to inject into a host library use

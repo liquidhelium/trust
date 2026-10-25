@@ -406,7 +406,7 @@ fn assemble_package_world(
 ) -> Option<PkgWorld> {
     // Import cycle detection (typst likewise errors on circular module
     // evaluation).
-    if has_import_cycle(plans, entry) {
+    if has_import_cycle(plans, entry, &input.dep_entries) {
         cx.diags.push(Diag {
             span: typst_syntax::Span::detached(),
             message: "imports form a cycle within the package (typst's runtime likewise reports circular evaluation)".into(),
@@ -426,7 +426,7 @@ fn assemble_package_world(
     // Topological order (dependencies first): evaluation order. The export
     // lookup table expands in the same order, so downstream list/wildcard
     // imports can reach upstream import re-exports.
-    let order = topo_order(plans);
+    let order = topo_order(plans, &input.dep_entries);
     let export_table = build_export_table(plans, &order, &input.dep_entries);
         cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
@@ -1129,7 +1129,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // topological order + the file's own evaluation and assembly (a
         // fresh slot board; a single test assembles just that file — same
         // order of magnitude as the interpreter's single-file compile).
-        let closure = dep_closure(&plans, idx);
+        let closure = dep_closure(&plans, idx, &input.dep_entries);
         let mut pairs: Vec<(String, String)> = Vec::new();
         for &j in &closure {
             let tree = plans[j]
@@ -1516,10 +1516,15 @@ fn place_root(node: &typst_syntax::SyntaxNode) -> Option<String> {
 /// A file's dependency closure (including itself), dependencies first
 /// (consistent with topo_order's visit; include edges count as
 /// dependencies too).
-fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
+fn dep_closure(
+    plans: &[super::plan::FilePlan],
+    idx: usize,
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> Vec<usize> {
     fn visit(
         i: usize,
         plans: &[super::plan::FilePlan],
+        dep_entries: &std::collections::BTreeMap<String, String>,
         order: &mut Vec<usize>,
         state: &mut Vec<u8>,
     ) {
@@ -1528,8 +1533,11 @@ fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
         }
         state[i] = 1;
         for edge in &plans[i].imports {
-            if let Some(j) = plans.iter().position(|p| p.path == edge.target) {
-                visit(j, plans, order, state);
+            if let Some(target) =
+                super::plan::edge_effective_target(edge, dep_entries)
+                && let Some(j) = plans.iter().position(|p| p.path == target)
+            {
+                visit(j, plans, dep_entries, order, state);
             }
         }
         state[i] = 2;
@@ -1537,7 +1545,7 @@ fn dep_closure(plans: &[super::plan::FilePlan], idx: usize) -> Vec<usize> {
     }
     let mut order = Vec::new();
     let mut state = vec![0u8; plans.len()];
-    visit(idx, plans, &mut order, &mut state);
+    visit(idx, plans, dep_entries, &mut order, &mut state);
     order
 }
 
@@ -1704,12 +1712,19 @@ fn import_edge_via_glue(
         format!("vec![{}]", caps.join(", "))
     };
     let mut slot_fills = String::new();
+    // Glue-minted slots are chain-discriminated (module_list_slot): a
+    // module-value List (`import cetz: draw, util`) can bind the same
+    // name as a later static import (`import "util.typ"`) — typst's
+    // last-binding-wins needs two distinct slots (the shared formula made
+    // both edges fill one cell; the fill guard caught it as a refill).
+    // env/module define order keeps the last binding effective; the
+    // export table uses the same formula verbatim.
+    let (root, fields) = edge
+        .module_access
+        .clone()
+        .unwrap_or_else(|| (String::new(), Vec::new()));
     for (i, name) in expected.iter().enumerate() {
-        let slot = format!(
-            "IMPORT_{}_{}",
-            sanitize_key(&plan.mod_name),
-            sanitize_key(name)
-        );
+        let slot = super::plan::module_list_slot(&plan.mod_name, &root, &fields, name);
         state_fields.push((plan.path.clone(), slot.clone()));
         let _ = writeln!(
             slot_fills,
@@ -2252,7 +2267,7 @@ impl Ctx {
             // a file already on the route (import.rs:231-233); an edge that
             // closes a cycle bails at its own import statement — whichever
             // file of the cycle evaluates first reports it.
-            if super::plan::import_reaches(plans, &edge.target, &plan.path) {
+            if super::plan::import_reaches(plans, &edge.target, &plan.path, &input.dep_entries) {
                 let message = "cyclic import".to_string();
                 cx.diag(edge.span, message.clone());
                 let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
@@ -2333,20 +2348,57 @@ impl Ctx {
                         escape(mname)
                     );
                     for (name, rename) in list {
-                        let as_name = rename.clone().unwrap_or_else(|| name.clone());
+                        // Dotted item (`as base: ok, util.resolve-number`):
+                        // the first segment resolves through the module
+                        // value, the remaining chain walks fields — the
+                        // same split as the plain List arm (a dotted name
+                        // used as a single field would never match).
+                        let (first, rest): (&str, &[&str]) =
+                            match name.split_once('.') {
+                                Some((f, r)) => {
+                                    (f, r.split('.').collect::<Vec<_>>().leak())
+                                }
+                                None => (name.as_str(), &[]),
+                            };
+                        let as_name =
+                            rename.clone().unwrap_or_else(|| name.clone());
+                        // `Ref::ModuleField` semantics: `expr` is the module
+                        // value, `name` the field to access (ref_value adds
+                        // that one hop) — so the chain covers all segments
+                        // except the last, which is the name.
+                        let segments: Vec<&str> =
+                            std::iter::once(first).chain(rest.iter().copied()).collect();
+                        let (field_name, chain) = (
+                            segments.last().copied().unwrap_or(first),
+                            {
+                                let mut c = format!("rt::read(&__st.{mslot})?");
+                                for seg in segments[..segments.len() - 1].iter() {
+                                    c = format!(
+                                        "rt::field(&({c}), \"{}\", engine, context, SPAN)?",
+                                        escape(seg)
+                                    );
+                                }
+                                c
+                            },
+                        );
                         env.module.push((
                             as_name.clone(),
                             Ref::ModuleField {
-                                expr: format!("rt::read(&__st.{mslot})?"),
-                                name: name.clone(),
-                                file: item_file(export_table, &cx.slot_files, &edge.target, name),
+                                expr: chain.clone(),
+                                name: field_name.to_string(),
+                                file: item_file(
+                                    export_table,
+                                    &cx.slot_files,
+                                    &edge.target,
+                                    field_name,
+                                ),
                             },
                         ));
                         let _ = writeln!(
                             file_defines,
-                            "    scope.define(\"{}\", rt::field(&(rt::read(&__st.{mslot})?), \"{}\", engine, context, SPAN)?);",
+                            "    scope.define(\"{}\", rt::field(&({chain}), \"{}\", engine, context, SPAN)?);",
                             escape(&as_name),
-                            escape(name)
+                            escape(field_name)
                         );
                     }
                 }

@@ -82,7 +82,11 @@ pub(super) fn nth_slot(plan: &FilePlan, name: &str, nth: usize) -> Option<String
 
 /// Import cycle detection (typst likewise errors on circular module
 /// evaluation).
-pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
+pub(super) fn has_import_cycle(
+    plans: &[FilePlan],
+    entry: &str,
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> bool {
     fn dfs(
         node: &str,
         edges: &std::collections::BTreeMap<String, Vec<String>>,
@@ -105,10 +109,11 @@ pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
     let mut edges: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for plan in plans {
-        edges
-            .entry(plan.path.clone())
-            .or_default()
-            .extend(plan.imports.iter().map(|edge| edge.target.clone()));
+        let targets = plan
+            .imports
+            .iter()
+            .filter_map(|edge| edge_effective_target(edge, dep_entries));
+        edges.entry(plan.path.clone()).or_default().extend(targets);
     }
     let mut stack = Vec::new();
     !dfs(entry, &edges, &mut stack)
@@ -116,15 +121,26 @@ pub(super) fn has_import_cycle(plans: &[FilePlan], entry: &str) -> bool {
 
 /// Topological order of file dependencies (dependents of nothing first,
 /// i.e. dependencies first).
-pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
-    fn visit(idx: usize, plans: &[FilePlan], order: &mut Vec<usize>, state: &mut Vec<u8>) {
+pub(super) fn topo_order(
+    plans: &[FilePlan],
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> Vec<usize> {
+    fn visit(
+        idx: usize,
+        plans: &[FilePlan],
+        dep_entries: &std::collections::BTreeMap<String, String>,
+        order: &mut Vec<usize>,
+        state: &mut Vec<u8>,
+    ) {
         if state[idx] != 0 {
             return;
         }
         state[idx] = 1;
         for edge in &plans[idx].imports {
-            if let Some(next) = plans.iter().position(|p| p.path == edge.target) {
-                visit(next, plans, order, state);
+            if let Some(target) = edge_effective_target(edge, dep_entries)
+                && let Some(next) = plans.iter().position(|p| p.path == target)
+            {
+                visit(next, plans, dep_entries, order, state);
             }
         }
         state[idx] = 2;
@@ -133,7 +149,7 @@ pub(super) fn topo_order(plans: &[FilePlan]) -> Vec<usize> {
     let mut order = Vec::new();
     let mut state = vec![0u8; plans.len()];
     for idx in 0..plans.len() {
-        visit(idx, plans, &mut order, &mut state);
+        visit(idx, plans, dep_entries, &mut order, &mut state);
     }
     order
 }
@@ -186,7 +202,10 @@ pub(super) fn build_export_table(
             }
             // Bindings of module-value imports (`import cetz: vector`) are
             // re-exported too: slot names match the generation rules in
-            // package.rs verbatim (filled at eval time).
+            // package.rs verbatim (filled at eval time). List bindings go
+            // through the glue, whose slots carry the module-chain
+            // discriminator (see module_list_slot) — a later same-named
+            // static import must not collide with the glue cell.
             if let Some((root, fields)) = &edge.module_access {
                 match &edge.items {
                     ImportItems::Bare | ImportItems::Rename(_) => {
@@ -223,10 +242,11 @@ pub(super) fn build_export_table(
                         for (item, rename) in list {
                             let as_name =
                                 rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize(&plan.mod_name),
-                                sanitize(&as_name)
+                            let slot = module_list_slot(
+                                &plan.mod_name,
+                                root,
+                                fields,
+                                &as_name,
                             );
                             exports.entry(as_name).or_insert(slot);
                         }
@@ -309,6 +329,38 @@ pub(super) fn build_export_table(
                             sanitize_key(&as_name)
                         );
                         exports.entry(as_name).or_insert(slot);
+                    }
+                }
+                // External package WILDCARD: a pure re-export shim
+                // (`#import "@preview/cetz:0.5.2": *` — its whole export
+                // surface is the dependency's). When the spec was merged
+                // into the translation (--with-deps), expand the merged
+                // entry file's exports here (topological order has the
+                // dependency settled first); downstream item imports from
+                // the shim then resolve statically. Unmerged specs keep
+                // the runtime wildcard layer.
+                if let ImportItems::Wildcard = &edge.items {
+                    let spec = spec_prefix(&edge.target);
+                    if std::env::var_os("TRUST_TRACE_WILD").is_some() {
+                        eprintln!(
+                            "[ext-wild] {} -> spec={spec:?} entry={:?} row_has={:?}",
+                            plan.path,
+                            dep_entries.get(&spec),
+                            table
+                                .get(dep_entries.get(&spec).map(String::as_str).unwrap_or(""))
+                                .map(|r| r.len())
+                        );
+                    }
+                    // dep_entries maps spec → the dependency entry's full
+                    // merge key ("@preview/cetz:0.5.2/src/lib.typ").
+                    if let Some(entry_path) = dep_entries.get(&spec) {
+                        if let Some(target_exports) = table.get(entry_path) {
+                            for (wname, wslot) in target_exports {
+                                exports
+                                    .entry(wname.clone())
+                                    .or_insert_with(|| wslot.clone());
+                            }
+                        }
                     }
                 }
                 continue;
@@ -423,6 +475,58 @@ pub(super) fn spec_prefix(target: &str) -> String {
         // "@preview/oxifmt:1.0.0").
         None => target.to_string(),
     }
+}
+
+/// The plan-path an import edge effectively points at: internal edges →
+/// their target; **merged** external edges (spec present in dep_entries)
+/// → the dependency's entry merge key; unmerged externals → None (no
+/// plan node — runtime layer). Feeding this through the graph walks
+/// (topo order, cycle detection, dependency closures) is what makes
+/// merged dependencies real graph citizens: their evaluation order, the
+/// export-table settlement order, and the per-file assembly closures all
+/// see them.
+pub(super) fn edge_effective_target(
+    edge: &ImportEdge,
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if !edge.external {
+        return Some(edge.target.clone());
+    }
+    let spec = spec_prefix(&edge.target);
+    match dep_entries.get(&spec) {
+        // The target may already be entry-qualified
+        // ("@ns/name:ver/lib.typ" — path-form imports into a merged
+        // package); use it as-is.
+        Some(_) if edge.target.len() > spec.len() => Some(edge.target.clone()),
+        // Bare spec: qualify with the dependency's entry merge key.
+        Some(entry) => Some(entry.clone()),
+        None => None,
+    }
+}
+
+/// Slot name for a module-value List binding (`import cetz: draw, util`):
+/// the module chain (`root.fields`) discriminates the cell from a
+/// same-named static-import binding in the same file (typst's
+/// last-binding-wins runs on two distinct slots; env/scope define order
+/// picks the winner). Shared verbatim by the export table and the glue
+/// generator.
+pub(super) fn module_list_slot(
+    plan_mod: &str,
+    root: &str,
+    fields: &[String],
+    bound: &str,
+) -> String {
+    let mut chain = String::new();
+    for f in fields {
+        chain.push('_');
+        chain.push_str(&sanitize_key(f));
+    }
+    format!(
+        "IMPORT_{}_{}_VIA_{}{chain}",
+        sanitize_key(plan_mod),
+        sanitize_key(bound),
+        sanitize_key(root)
+    )
 }
 
 pub(super) fn spec_name(spec: &str) -> String {
@@ -543,11 +647,23 @@ pub(super) fn resolve_import_slot_file(
 /// Whether `from` reaches `to` through internal import edges (a `to == from`
 /// hit only counts via a real edge chain; callers pass an edge's target and
 /// the edge's source file — a hit means the edge closes an import cycle).
-pub(super) fn import_reaches(plans: &[FilePlan], from: &str, to: &str) -> bool {
+pub(super) fn import_reaches(
+    plans: &[FilePlan],
+    from: &str,
+    to: &str,
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let owned: Vec<Option<String>> = plans
+        .iter()
+        .flat_map(|p| p.imports.iter().map(|e| edge_effective_target(e, dep_entries)))
+        .collect();
     let mut edges: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    let mut it = owned.iter();
     for plan in plans {
-        for edge in &plan.imports {
-            edges.entry(plan.path.as_str()).or_default().push(edge.target.as_str());
+        for _ in &plan.imports {
+            if let Some(Some(t)) = it.next() {
+                edges.entry(plan.path.as_str()).or_default().push(t.as_str());
+            }
         }
     }
     let mut visited: std::collections::BTreeSet<&str> = Default::default();

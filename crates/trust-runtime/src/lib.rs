@@ -624,6 +624,12 @@ fn fill_lock(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()
             if *existing == value {
                 Ok(())
             } else {
+                if std::env::var_os("TRUST_TRACE_REFILL").is_some() {
+                    eprintln!(
+                        "[refill] existing={existing:?}\n[value]   new={value:?}\n{}",
+                        std::backtrace::Backtrace::force_capture()
+                    );
+                }
                 Err(state_error("module slot refilled with a different value (generator bug)"))
             }
         }

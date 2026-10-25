@@ -1,0 +1,580 @@
+// Test configuring paragraph properties.
+
+--- par-basic paged pdftags pdfstandard(ua-1) ---
+#set page(width: 250pt, height: 120pt)
+
+But, soft! what light through yonder window breaks? It is the east, and Juliet
+is the sun. Arise, fair sun, and kill the envious moon, Who is already sick and
+pale with grief, That thou her maid art far more fair than she: Be not her maid,
+since she is envious; Her vestal livery is but sick and green And none but fools
+do wear it; cast it off. It is my lady, O, it is my love! O, that she knew she
+were! She speaks yet she says nothing: what of that? Her eye discourses; I will
+answer it.
+
+I am too bold, 'tis not to me she speaks: Two of the fairest stars in all the
+heaven, Having some business, do entreat her eyes To twinkle in their spheres
+till they return. What if her eyes were there, they in her head? The brightness
+of her cheek would shame those stars, As daylight doth a lamp; her eyes in
+heaven Would through the airy region stream so bright That birds would sing and
+think it were not night. See, how she leans her cheek upon her hand! O, that I
+were a glove upon that hand, That I might touch that cheek!
+
+--- par-semantic paged ---
+#show par: highlight
+
+I'm a paragraph.
+
+#align(center, table(
+  columns: 3,
+
+  // No paragraphs.
+  [A],
+  block[B],
+  block[C *D*],
+
+  // Paragraphs.
+  par[E],
+  [
+
+    F
+  ],
+  [
+    G
+
+  ],
+
+  // Paragraphs.
+  parbreak() + [H],
+  [I] + parbreak(),
+  parbreak() +  [J] + parbreak(),
+
+  // Paragraphs.
+  [K #v(10pt)],
+  [#v(10pt) L],
+  [#place[] M],
+
+  // Paragraphs.
+  [
+    N
+
+    O
+  ],
+  [#par[P]#par[Q]],
+  // No paragraphs.
+  [#block[R]#block[S]],
+))
+
+--- par-semantic-html html ---
+= Heading is no paragraph
+
+I'm a paragraph.
+
+#html.elem("div")[I'm not.]
+
+#html.elem("div")[
+  We are two.
+
+  So we are paragraphs.
+]
+
+--- par-semantic-html-fully-inline html ---
+// No paragraphs because everything contained in the divs is fully inline.
+
+#html.div(html.span[A])
+#html.div({
+  [A ]
+  html.span[B]
+})
+#html.div({
+  html.span[A]
+  [ B]
+})
+#html.div({
+  html.span[A]
+  html.mark[B]
+})
+
+#html.div({
+  html.label[Text:]
+  [ ]
+  html.input(type: "text")
+})
+
+#html.div[Hello *there*]
+
+--- par-semantic-html-mixed html ---
+// Still no paragraphs because the divs contain a mix of inline and neutral
+// elements.
+
+#html.div({
+  [A]
+  html.div[B]
+})
+#html.div({
+  html.span[A]
+  html.div[B]
+})
+
+#html.div({
+  html.div[B]
+  [C]
+})
+#html.div({
+  html.div[B]
+  html.span[C]
+})
+
+#html.div({
+  [A]
+  html.div[B]
+  [C]
+})
+#html.div({
+  html.span[A]
+  html.div[B]
+  html.span[C]
+})
+
+#html.div[
+  #html.h2[Heading]
+  A
+]
+
+--- par-semantic-html-mixed-tags html ---
+#html.div({
+  html.span()
+  html.div()
+  // Inline segment starts with a tag.
+  metadata(none)
+  html.span()
+  parbreak()
+})
+
+#html.div({
+  heading[A]
+  // Inline segment ends with a tag.
+  html.span()
+  metadata(none)
+  html.div()
+  html.div()
+})
+
+#html.div({
+  parbreak()
+  html.span()
+  html.div()
+  // Segment consists only of tags.
+  metadata(none)
+  html.div()
+  html.span()
+})
+
+--- par-semantic-html-parbreak html ---
+// Test that parbreaks force inline elements into paragraphs.
+
+#html.div({
+  [Hello ]
+  html.strong[there]
+  parbreak()
+})
+
+#html.div({
+  parbreak()
+  [A]
+})
+
+#html.div[
+  Hello *there*
+
+]
+
+#html.div[
+  #html.h2[Heading]
+  A
+
+  B
+]
+
+#html.div({
+  parbreak()
+  html.span[A]
+  html.div[B]
+  html.span[C]
+  html.div[D]
+  html.span[E]
+})
+
+#html.div({
+  html.span[A]
+  html.div[B]
+  html.span[C]
+  html.div[D]
+  html.span[E]
+  parbreak()
+})
+
+--- par-semantic-html-blocky html ---
+// Test that elements with blocky show rules force neighbour inline elements
+// into paragraphs.
+
+#html.div({
+  heading[Heading]
+  [A]
+})
+
+#html.div[
+  = Heading
+  #html.span[A]
+]
+
+#html.div[
+  A
+  #figure[B]
+]
+
+#html.div[
+  A
+  #quote(block: true)[B]
+  C
+]
+
+#html.div({
+  html.span[A]
+  html.div[B]
+  html.span[C]
+  html.div[D]
+  html.span[E]
+  block[F]
+})
+
+#html.div({
+  block[A]
+  html.span[B]
+  html.div[C]
+  html.span[D]
+  html.div[E]
+  html.span[F]
+})
+
+--- par-semantic-html-top-level html ---
+A few _top-level_ *elements*.
+
+--- par-semantic-html-top-level-typed html ---
+A few
+#html.em[top-level]
+#html.strong[elements].
+
+--- par-semantic-metadata-elements html ---
+#html.script("...")
+#html.link(rel: "stylesheet", href: "...")
+
+--- par-semantic-tag paged ---
+#show par: highlight
+#block[
+  #metadata(none) <hi1>
+  A
+  #metadata(none) <hi2>
+]
+
+#block(width: 100%, metadata(none) + align(center)[A])
+#block(width: 100%, align(center)[A] + metadata(none))
+
+--- par-semantic-align paged ---
+#show par: highlight
+#show bibliography: none
+#set block(width: 100%, stroke: 1pt, inset: 5pt)
+
+#bibliography("/assets/bib/works.bib")
+
+#block[
+  #set align(right)
+  Hello
+]
+
+#block[
+  #set align(right)
+  Hello
+  @netwok
+]
+
+#block[
+  Hello
+  #align(right)[World]
+  You
+]
+
+#block[
+  Hello
+  #align(right)[@netwok]
+  You
+]
+
+--- par-leading-and-spacing paged ---
+// Test changing leading and spacing.
+#set par(spacing: 1em, leading: 2pt)
+But, soft! what light through yonder window breaks?
+
+It is the east, and Juliet is the sun.
+
+--- par-spacing-context paged empty ---
+#set par(spacing: 10pt)
+#context test(par.spacing, 10pt)
+
+--- par-first-line-indent paged ---
+#set par(first-line-indent: 12pt, spacing: 5pt, leading: 5pt)
+#show heading: set text(size: 10pt)
+
+The first paragraph has no indent.
+
+But the second one does.
+
+#box(image("/assets/images/tiger.jpg", height: 6pt))
+starts a paragraph, also with indent.
+
+#align(center, image("/assets/images/rhino.png", width: 1cm))
+
+= Headings
+- And lists.
+- Have no indent.
+
+  Except if you have another paragraph in them.
+
+#set text(8pt, lang: "ar", font: ("Noto Sans Arabic", "Libertinus Serif"))
+#set par(leading: 8pt)
+
+= Arabic
+دع النص يمطر عليك
+
+ثم يصبح النص رطبًا وقابل للطرق ويبدو المستند رائعًا.
+
+--- par-first-line-indent-folding paged empty ---
+#let check(expected) = context assert.eq(par.first-line-indent, expected)
+
+// To be intuitive, values from context should never contain `none`.
+#check((amount: 0pt, all: false))
+
+#set par(first-line-indent: 2em)
+#check((amount: 2em, all: false))
+
+#set par(first-line-indent: (all: true))
+#check((amount: 2em, all: true))
+
+/// The following two ways should be the same.
+#set par(first-line-indent: 7em)
+#check((amount: 7em, all: true))
+#set par(first-line-indent: (amount: 1em))
+#check((amount: 1em, all: true))
+
+#set par(first-line-indent: (all: false))
+#check((amount: 1em, all: false))
+
+#set par(first-line-indent: (amount: 8em, all: true))
+#check((amount: 8em, all: true))
+
+--- par-first-line-indent-forbid-all-none eval ---
+// Error: 29-53 expected boolean, found none
+#set par(first-line-indent: (amount: 2em, all: none))
+
+--- par-first-line-indent-forbid-amount-none eval ---
+// Error: 29-54 expected length, found none
+#set par(first-line-indent: (amount: none, all: true))
+
+--- par-first-line-indent-columns paged ---
+#set par(first-line-indent: (amount: 1em, all: false))
+
+A \ B
+
+C \ D
+
+#colbreak()
+
+// No first line indent after column break
+E \ F
+
+G \ H
+
+--- par-first-line-indent-all paged ---
+#set par(
+  first-line-indent: (amount: 12pt, all: true),
+  spacing: 5pt,
+  leading: 5pt,
+)
+#set block(spacing: 1.2em)
+#show heading: set text(size: 10pt)
+
+= Heading
+All paragraphs are indented.
+
+Even the first.
+
+--- par-first-line-indent-all-list paged ---
+#show list.where(tight: false): set list(spacing: 1.2em)
+#set par(
+  first-line-indent: (amount: 12pt, all: true),
+  spacing: 5pt,
+  leading: 5pt,
+)
+
+- A #parbreak() B #line(length: 100%) C
+
+- D
+
+--- par-first-line-indent-all-enum paged ---
+#show enum.where(tight: false): set enum(spacing: 1.2em)
+#set par(
+  first-line-indent: (amount: 12pt, all: true),
+  spacing: 5pt,
+  leading: 5pt,
+)
+
++ A #parbreak() B #line(length: 100%) C
+
++ D
+
+--- par-first-line-indent-all-terms paged pdftags pdfstandard(ua-1) ---
+#show terms.where(tight: false): set terms(spacing: 1.2em)
+#set terms(hanging-indent: 10pt)
+#set par(
+  first-line-indent: (amount: 12pt, all: true),
+  spacing: 5pt,
+  leading: 5pt,
+)
+
+/ Term A: B \ C #parbreak() D #line(length: 100%) E
+
+/ Term F: G
+
+--- par-spacing-and-first-line-indent paged ---
+// This is madness.
+#set par(first-line-indent: 12pt)
+Why would anybody ever ...
+
+... want spacing and indent?
+
+--- par-hanging-indent paged ---
+// Test hanging indent.
+#set par(hanging-indent: 15pt, justify: true)
+#lorem(10)
+
+--- par-hanging-indent-semantic paged ---
+#set par(hanging-indent: 15pt)
+= I am not affected
+
+I am affected by hanging indent.
+
+--- par-hanging-indent-manual-linebreak paged ---
+#set par(hanging-indent: 1em)
+Welcome \ here. Does this work well?
+
+--- par-hanging-indent-rtl paged ---
+#set par(hanging-indent: 2em)
+#set text(dir: rtl, font: ("Libertinus Serif", "Noto Sans Arabic"))
+لآن وقد أظلم الليل وبدأت النجوم
+تنضخ وجه الطبيعة التي أعْيَتْ من طول ما انبعثت في النهار
+
+--- par-trailing-whitespace paged ---
+// Ensure that trailing whitespace layouts as intended.
+#box(fill: aqua, " ")
+
+--- par-contains-parbreak paged ---
+#par[
+  Hello
+  // Warning: 4-14 parbreak may not occur inside of a paragraph and was ignored
+  #parbreak()
+  World
+]
+
+--- par-contains-block paged ---
+#par[
+  Hello
+  // Warning: 4-11 block may not occur inside of a paragraph and was ignored
+  #block[]
+  World
+]
+
+--- par-empty-metadata paged empty ---
+// Check that metadata still works in a zero length paragraph.
+#block(height: 0pt)[#""#metadata(false)<hi>]
+#context test(query(<hi>).first().value, false)
+
+--- par-metadata-after-trimmed-space paged ---
+// Ensure that metadata doesn't prevent trailing spaces from being trimmed.
+#set par(justify: true, linebreaks: "simple")
+#set text(hyphenate: false)
+Lorem ipsum dolor #metadata(none) nonumy eirmod tempor.
+
+--- par-show-children paged ---
+// Variant 1: Prevent recursion by checking the children.
+#let p = counter("p")
+#let step = p.step()
+#let nr = context p.display()
+#show par: it => {
+  if it.body.at("children", default: ()).at(0, default: none) == step {
+    return it
+  }
+  par(step + [§#nr ] + it.body)
+}
+
+= A
+
+B
+
+C #parbreak() D
+
+#block[E]
+
+#block[F #parbreak() G]
+
+--- par-show-styles paged ---
+// Variant 2: Prevent recursion by observing a style.
+#let revoke = metadata("revoke")
+#show par: it => {
+  if bibliography.title == revoke { return it }
+  set bibliography(title: revoke)
+  let p = counter("p")
+  par[#p.step()§#context p.display() #it.body]
+}
+
+= A
+
+B
+
+C
+
+--- par-explicit-trim-space paged ---
+A
+
+#par[ B ]
+
+--- issue-4278-par-trim-before-equation paged ---
+#set par(justify: true)
+#lorem(6) aa $a = c + b$
+
+--- issue-4938-par-bad-ratio paged ---
+#set par(justify: true)
+#box($k in NN_0$)
+
+--- issue-4770-par-tag-at-start paged empty ---
+#h(0pt) #box[] <a>
+
+#context test(query(<a>).len(), 1)
+
+--- issue-5831-par-constructor-args paged ---
+// Make sure that all arguments are also respected in the constructor.
+A
+#par(
+  leading: 2pt,
+  spacing: 20pt,
+  justify: true,
+  linebreaks: "simple",
+  first-line-indent: (amount: 1em, all: true),
+  hanging-indent: 5pt,
+)[
+  The par function has a constructor and justification.
+]
+
+--- show-par-set-block-hint paged empty ---
+// Warning: 2-36 `show par: set block(spacing: ..)` has no effect anymore
+// Hint: 2-36 this is specific to paragraphs as they are not considered blocks anymore
+// Hint: 2-36 write `set par(spacing: ..)` instead
+#show par: set block(spacing: 12pt)

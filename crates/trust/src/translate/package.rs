@@ -324,6 +324,7 @@ fn plan_files(
                         stmt_text: Some(expr.to_untyped().full_text().to_string()),
                         raw: raw.clone(),
                         is_include: false,
+                        in_body: false,
                     });
                 }
                 ast::Expr::ModuleInclude(include) => {
@@ -352,6 +353,7 @@ fn plan_files(
                         stmt_text: None,
                         raw: String::new(),
                         is_include: true,
+                        in_body: false,
                     });
                 }
                 ast::Expr::LetBinding(lets) => {
@@ -372,6 +374,50 @@ fn plan_files(
                 // module body content, collected and folded by pass two;
                 // nothing to do here.
                 _ => {}
+            }
+        }
+        // In-body imports (inside function/closure bodies): dependency-graph
+        // markers only — a Str source resolving into the file set becomes an
+        // edge so per-file assembly initializes the target's state before the
+        // body's `Value::Module(m::module(&__st))` runs (block.rs owns the
+        // emission; see ImportEdge::in_body).
+        {
+            let mut skip: Vec<*const typst_syntax::SyntaxNode> = markup
+                .exprs()
+                .filter(|e| {
+                    matches!(e, ast::Expr::ModuleImport(_) | ast::Expr::ModuleInclude(_))
+                })
+                .map(|e| e.to_untyped() as *const _)
+                .collect();
+            let mut stack = vec![root.clone()];
+            while let Some(node) = stack.pop() {
+                if let Some(import) = node.clone().cast::<ast::ModuleImport>()
+                    && !skip.iter().any(|p| *p == (&node as &typst_syntax::SyntaxNode as *const _))
+                    && let ast::Expr::Str(path_expr) = import.source()
+                {
+                    let raw = path_expr.get().to_string();
+                    if !raw.starts_with('@') {
+                        let target = normalize_import(path, &raw);
+                        if input.files.contains_key(&target)
+                            && !imports.iter().any(|e| e.target == target)
+                        {
+                            imports.push(ImportEdge {
+                                span: import.span(),
+                                target,
+                                items: ImportItems::Bare,
+                                external: false,
+                                module_access: None,
+                                source_node: None,
+                                stmt_text: None,
+                                raw,
+                                is_include: false,
+                                in_body: true,
+                            });
+                        }
+                    }
+                }
+                stack.extend(node.children().map(|c| c.clone()));
+                let _ = &mut skip;
             }
         }
         plans.push(FilePlan {
@@ -1789,7 +1835,7 @@ impl Ctx {
         import_slots: &mut std::collections::HashMap<String, String>,
         binding_code: &mut String,
     ) {
-        if edge.is_include {
+        if edge.is_include || edge.in_body {
             return;
         }
         let mut io = ImportEdgeIo {

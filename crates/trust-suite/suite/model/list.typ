@@ -1,0 +1,633 @@
+// Test bullet lists.
+
+--- list-basic paged ---
+_Shopping list_
+#list[Apples][Potatoes][Juice]
+
+--- list-nested paged ---
+- First level.
+
+  - Second level.
+    There are multiple paragraphs.
+
+    - Third level.
+
+    Still the same bullet point.
+
+  - Still level 2.
+
+- At the top.
+
+--- list-content-block paged ---
+- Level 1
+  - Level #[
+2 through content block
+]
+
+--- list-top-level-indent paged ---
+  - Top-level indent
+- is fine.
+
+--- list-indent-specifics paged pdftags pdfstandard(ua-1) ---
+ - A
+     - B
+   - C
+- D
+
+--- list-indent-trivia-nesting eval ---
+// Test indent nesting behavior with odd trivia (comments and spaces). The
+// comments should _not_ affect the nesting. Only the final column matters.
+
+#let indented = [
+- a
+ /**/- b
+/**/ - c
+   /*spanning
+     multiple
+      lines */ - d
+    - e
+/**/       - f
+/**/  - g
+]
+
+#let item = list.item
+#let manual = {
+  [ ]
+  item({
+    [a]
+    [ ]
+    item[b]
+    [ ]; [ ]
+    item({
+      [c]
+      [ ]; [ ]
+      item[d]
+    })
+    [ ]
+    item({
+      [e]
+      [ ]; [ ]
+      item[f]
+      [ ]; [ ]
+      item[g]
+    })
+  })
+  [ ]
+}
+
+#test(indented, manual)
+
+--- list-indent-bracket-nesting eval ---
+// Test list indent nesting behavior when directly at a starting bracket.
+
+#let indented = {
+  [- indented
+  - less
+  ]
+  [- indented
+   - same
+  - then less
+   - then same
+  ]
+  [- indented
+    - more
+   - then same
+  - then less
+  ]
+}
+
+#let item = list.item
+#let manual = {
+    {
+      item[indented]; [ ]
+      item[less]; [ ]
+    }
+    {
+      item[indented]; [ ]
+      item[same]; [ ]
+      item[then less #{
+        item[then same]
+      }]; [ ]
+    }
+    {
+      item[indented #{
+        item[more]
+      }]; [ ]
+      item[then same]; [ ]
+      item[then less]; [ ]
+    }
+}
+
+#test(indented, manual)
+
+--- list-tabs paged ---
+// This works because tabs are used consistently.
+	- A with 1 tab
+		- B with 2 tabs
+
+--- list-mixed-tabs-and-spaces paged ---
+// This doesn't work because of mixed tabs and spaces.
+  - A with 2 spaces
+		- B with 2 tabs
+
+--- list-syntax-edge-cases paged ---
+// Edge cases.
+-
+Not in list
+-Nope
+
+--- list-marker-align-unaffected paged ---
+// Alignment shouldn't affect marker
+#set align(horizon)
+
+- ABCDEF\ GHIJKL\ MNOPQR
+
+--- list-marker-dash paged ---
+// Test en-dash.
+#set list(marker: [--])
+- A
+- B
+
+--- list-marker-cycle paged ---
+// Test that items are cycled.
+#set list(marker: ([--], [•]))
+- A
+  - B
+    - C
+
+--- list-marker-closure paged ---
+// Test function.
+#set list(marker: n => if n == 1 [--] else [•])
+- A
+- B
+  - C
+  - D
+    - E
+- F
+
+--- list-marker-bare-hyphen paged ---
+// Test that bare hyphen doesn't lead to cycles and crashes.
+#set list(marker: [-])
+- Bare hyphen is
+- a bad marker
+
+--- list-marker-array-empty eval ---
+// Error: 19-21 array must contain at least one marker
+#set list(marker: ())
+
+--- list-marker-align-horizontal paged ---
+#set list(marker: {
+  counter("list").update(n => calc.max(n * 10, 1))
+  context counter("list").display()
+})
+
+- Item
+- Item
+- Item
+
+#set list(marker-align: start)
+#counter("list").update(0)
+
+- Item
+- Item
+- Item
+
+--- list-marker-align-vertical paged ---
+- #box(fill: teal, inset: 10pt)[a]
+
+#set list(marker-align: top)
+- #box(fill: teal, inset: 10pt)[b]
+
+#set list(marker-align: horizon)
+- #box(fill: teal, inset: 10pt)[c]
+
+#set list(marker-align: bottom)
+- #box(fill: teal, inset: 10pt)[d]
+
+--- list-marker-align-unfolded paged ---
+// Marker align option should not be affected by the context.
+#[
+  #set align(top)
+  #set list(marker-align: horizon)
+
+  - #box(fill: teal, inset: 10pt )[]
+]
+
+#[
+  #set align(horizon)
+  - #box(fill: teal, inset: 10pt)[]
+]
+
+--- list-marker-align-unfolded-mixed paged ---
+// Verify whether overriding vertical alignment causes horizontal alignment to
+// be inherited from the context.
+#set align(center)
+#set list(
+  marker-align: top,
+  marker: {
+    // Artificially cause markers to have a different width.
+    counter("b").step()
+    context {
+      "1" * counter("b").get().first()
+    }
+  }
+)
+
+- abc
+- abc
+- abc
+
+--- list-marker-align-big-marker paged ---
+#set list(
+  marker: rect(fill: red, width: 10pt, height: 4em),
+  marker-align: bottom,
+)
+
+
+#list[]
+
+- abc
+
+- A\ B\ C\ D\ E\ F
+
+--- list-marker-align-values paged empty ---
+// Test valid marker align values (horizontal and vertical)
+#set enum(number-align: start)
+#set enum(number-align: end)
+#set enum(number-align: left)
+#set enum(number-align: center)
+#set enum(number-align: right)
+#set enum(number-align: top)
+#set enum(number-align: horizon)
+#set enum(number-align: bottom)
+#set enum(number-align: start + top)
+#set enum(number-align: left + horizon)
+#set enum(number-align: center + bottom)
+
+--- list-attached paged ---
+// Test basic attached list.
+Attached to:
+- the bottom
+- of the paragraph
+
+Next paragraph.
+
+--- list-attached-above-spacing paged ---
+// Test that attached list isn't affected by block spacing.
+#show list: set block(above: 100pt)
+Hello
+- A
+World
+- B
+
+--- list-non-attached-followed-by-attached paged ---
+// Test non-attached list followed by attached list,
+// separated by only word.
+Hello
+
+- A
+
+World
+- B
+
+--- list-tight-non-attached-tight paged ---
+// Test non-attached tight list.
+#set block(spacing: 15pt)
+Hello
+- A
+World
+
+- B
+- C
+
+More.
+
+--- list-wide-cannot-attach paged ---
+// Test that wide lists cannot be ...
+#set par(spacing: 15pt)
+Hello
+- A
+
+- B
+World
+
+--- list-wide-really-cannot-attach paged ---
+// ... even if forced to.
+Hello
+#list(tight: false)[A][B]
+World
+
+--- list-items-context paged ---
+#context [+ A]
+#context [+ B]
+#context [+ C]
+
+--- list-item-styling paged ---
+- Hello
+#text(red)[- World]
+#text(green)[- What up?]
+
+--- list-multi-page paged ---
+// Markers should only appear on the first page of each item, and further pages
+// should be indented.
+#set page(width: auto, height: 4em)
+
+- Abc
+  def
+
+  ghi
+  jkl
+
+  mno
+  pqr
+- Other
+  other
+
+  other
+  other
+
+--- list-colbreak paged ---
+- Abc
+  def
+  #colbreak()
+  ghi
+  jkl
+  #colbreak()
+  mno
+  pqr
+
+--- list-baseline-table paged ---
+- #table(
+    inset: 10pt,
+    columns: 2,
+    [a], [b],
+    [c], [d]
+  )
+
+- #table(
+    inset: 10pt,
+    columns: 2,
+    stroke: none,
+    [a], [b],
+    [c], [d]
+  )
+
+--- list-baseline-grid paged ---
+- #grid(
+    inset: 10pt,
+    columns: 2,
+    [a], [b],
+    [c], [d]
+  )
+
+--- list-baseline-curve paged ---
+#let dy = 15pt
+- #curve(
+    stroke: 5pt,
+    curve.move((0pt,  30pt + dy)),
+    curve.line((30pt, 30pt + dy)),
+    curve.line((15pt, dy)),
+    curve.close()
+  )
+
+--- list-baseline-pars paged ---
+
+- #lorem(8)
+
+  #lorem(8)
+
+--- list-baseline-transform paged ---
+#set rotate(reflow: true)
+#set scale(reflow: true)
+#set skew(reflow: true)
+
+- Abc
+- #rotate(90deg)[Abc]
+- #rotate(180deg)[Abc]
+- #scale(30%)[Abc]
+- #skew(ax: 30deg)[Abc]
+- #skew(ay: 30deg)[Abc]
+
+--- list-baseline-text-with-math paged ---
+#set page(width: auto, height: auto)
+- Text
+  - Text $ "O1" = (7 "O1" + 3 (display((sum_(i = 1)^4 L_i)/4)))/10 $
+  - $ "O1" = (7 "O1" + 3 (display((sum_(i = 1)^4 L_i)/4)))/10 $
+
+--- list-baseline-math-fraction paged ---
+- $ (7 "O1" + 3 (display((sum_(i = 5)^8 L_i)/4)))/10 $
+
+--- list-baseline-multiline-math paged ---
+- $
+    sum_(i = 1)^n (x_i)^5 &= 0 \
+    y_1 + y_2 &= 10 \
+    (a b c)/x^2 &= 5
+  $
+
+
+--- list-baseline-big-marker paged ---
+#set list(
+  marker: rect(fill: red, width: 10pt, height: 4em),
+)
+
+
+#list[]
+
+- abc
+
+- A\ B\ C\ D\ E\ F
+
+--- list-par paged html ---
+// Check whether the contents of list items become paragraphs.
+#show par: it => if target() != "html" { highlight(it) } else { it }
+
+#block[
+  // No paragraphs.
+  - Hello
+  - World
+]
+
+#block[
+  - Hello // Paragraphs
+
+    From
+  - World // No paragraph because it's a tight list.
+]
+
+#block[
+  - Hello // Paragraphs either way
+
+    From
+
+    The
+
+  - World // Paragraph because it's a wide list.
+]
+
+--- list-expand-block paged ---
+// Lists should shrink to fit their own items inside `auto`-width blocks,
+// or expand to the full width of fixed-width containers (/page).
+#block[
+  - #align(center)[a]
+  - bbbb
+  - #rect(width: 4em, height: 1em, fill: red)
+]
+
+#block(width: 6em)[
+  - #align(center)[a]
+  - bbbb
+  - #rect(width: 4em, height: 1em, fill: red)
+]
+
+- #align(center)[a]
+- bbbb
+- #rect(width: 4em, height: 1em, fill: red)
+
+--- list-expand-auto paged ---
+// Lists should shrink to fit their own contents inside auto-width pages.
+#set page(width: auto)
+- #align(center)[a]
+- #rect(width: 4em, height: 1em, fill: red)
+
+longlonglonglonglonglonglong
+
+--- list-big-marker-full-width paged ---
+#set page(width: 200pt)
+#[
+  #set list(indent: 100pt)
+  - #lorem(12)
+]
+#[
+  #set list(marker: [AAAAAAAAAAAAAAAAAAAAA])
+  - #lorem(12)
+]
+
+--- list-big-marker-block paged ---
+#set page(width: 200pt)
+#block[
+  #set list(indent: 100pt)
+  - #lorem(12)
+]
+#block[
+  #set list(marker: [AAAAAAAAAAAAAAAAAAAAA])
+  - #lorem(12)
+]
+
+--- list-negative-indent-full-width paged ---
+#set page(width: 200pt)
+#[
+  #set list(indent: -50pt)
+  - #lorem(12)
+]
+#[
+  #set list(marker: box(width: 100%, height: 1em, fill: red))
+  - abc
+  #set list(indent: -50pt)
+  - abc
+]
+
+--- list-negative-indent-block paged ---
+#set page(width: 200pt)
+#block[
+  #set list(indent: -50pt)
+  - #lorem(12)
+]
+#block[
+  #set list(marker: box(width: 100%, height: 1em, fill: red))
+  - abc
+  #set list(indent: -50pt)
+  - abc
+]
+
+--- list-negative-indent-auto paged ---
+#set page(width: auto)
+#[
+  #set list(indent: -50pt)
+  - #lorem(20)
+]
+
+--- list-vertical-alignment-in-item paged ---
+#set page(height: auto)
+- a
+- #align(bottom)[b]
+- c
+
+d
+
+#set page(height: 10em)
+- a
+- #align(bottom)[b]
+- c
+
+d
+
+--- issue-2530-list-item-panic paged ---
+// List item (pre-emptive)
+#list.item[Hello]
+
+--- issue-1850-list-attach-spacing paged ---
+// List attachment should only work with paragraphs, not other blocks.
+#set page(width: auto)
+#let part = box.with(stroke: 1pt, inset: 3pt)
+#{
+  part[
+    $ x $
+    - A
+  ]
+  part($ x $ + list[A])
+  part($ x $ + list[ A ])
+  part[
+    $ x $
+
+    - A
+  ]
+  part($ x $ + parbreak() + list[A])
+  part($ x $ + parbreak() + parbreak() + list[A])
+}
+
+--- issue-5503-list-in-align paged ---
+// `align` is block-level and should interrupt a list.
+#show list: [List]
+- a
+- b
+#align(right)[- i]
+- j
+
+--- issue-5719-list-nested paged ---
+// Lists can be immediately nested.
+- A
+- - B
+  - C
+- = D
+  E
+
+--- issue-6242-tight-list-attach-spacing paged ---
+// Nested tight lists should be uniformly spaced when list spacing is set.
+#set list(spacing: 1.2em)
+- A
+  - B
+  - C
+- C
+
+--- issue-529-list-center-alignment paged ---
+#set page(width: 2cm)
+- A
+- #align(center)[B]
+- $ C $
+
+--- issue-1204-list-baseline-alignment paged ---
+- A
+- $ sum_(i = 1)^n overbrace(x^6, y) $
+- #box(baseline: 1cm)[C]
+- #v(1cm) D
+- #text(48pt)[E]
+- #block(inset: 10pt, stroke: red)[Hello world!]
+- #rect[Hello world!]
+
+--- issue-8648-enum-gap paged ---
+#set page(height: 150pt)
+#set enum(number-align: top)
+
++ #lines(3)
++ #lines(8)
++ #lines(2)

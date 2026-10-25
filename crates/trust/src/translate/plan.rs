@@ -57,6 +57,13 @@ pub(super) struct ImportEdge {
     /// `#include` edge: participates in the dependency graph, binds no
     /// names.
     pub(super) is_include: bool,
+    /// In-body import (inside a function/closure body): a dependency-graph
+    /// marker only — its emission happens in block.rs (statement position),
+    /// and it must not re-export or mint top-level slots. Without the edge,
+    /// per-file assembly (module_by_path) left the target module's state
+    /// uninitialized: the in-body import's `Value::Module(m::module(&__st))`
+    /// read empty slots ("evaluation-order error").
+    pub(super) in_body: bool,
 }
 
 pub(super) enum ImportItems {
@@ -197,7 +204,7 @@ pub(super) fn build_export_table(
         let mut import_slots: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &plan.imports {
-            if edge.is_include {
+            if edge.is_include || edge.in_body {
                 continue;
             }
             // Bindings of module-value imports (`import cetz: vector`) are

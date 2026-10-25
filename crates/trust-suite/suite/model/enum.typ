@@ -1,0 +1,290 @@
+// Test enumerations.
+
+--- enum-function-call paged ---
+#enum[Embrace][Extend][Extinguish]
+
+--- enum-number-override-nested paged pdftags pdfstandard(ua-1) ---
+0. Before first!
+1. First.
+   2. Indented
+
++ Second
+
+--- enum-built-in-loop paged ---
+// Test automatic numbering in summed content.
+#for i in range(5) {
+   [+ #numbering("I", 1 + i)]
+}
+
+--- list-mix paged ---
+// Mix of different lists
+- Bullet List
++ Numbered List
+/ Term: List
+
+--- enum-syntax-at-start paged ---
+// In the line.
+1.2 \
+This is 0. \
+See 0.3. \
+
+--- enum-syntax-edge-cases paged ---
+// Edge cases.
++
+Empty \
++Nope \
+a + 0.
+
+--- enum-syntax-number-length paged ---
+// Ensure that indentation works from the beginning of a number, not the end.
+
+10. a
+   11. b
+ 12. c // same level as b
+  13. d // indented past c
+14. e
+
+--- enum-in-align-in-block paged ---
+// The marker doesn't move as the list body expands and aligns itself.
+// However, with `block`, the list body does not expand, so the marker is also
+// aligned.
++ a
++ b
+#align(right)[+ c]
+#align(right, block[+ d])
+
+--- enum-in-align-centering paged ---
++ $ x $
+#align(right)[+ $ y $]
+#align(right, block[+ $ z $])
+
+--- enum-number-override paged ---
+// Test item number overriding.
+1. first
++ second
+5. fifth
+
+#enum(
+   enum.item(1)[First],
+   [Second],
+   enum.item(5)[Fifth]
+)
+
+--- enum-item-number-optional paged ---
+#enum.item[First]
+#enum.item[Second]
+
+--- enum-numbering-pattern paged ---
+// Test numbering pattern.
+#set enum(numbering: "(1.a.*)")
++ First
++ Second
+  2. Nested
+     + Deep
++ Normal
+
+--- enum-numbering-full paged ---
+// Test full numbering.
+#set enum(numbering: "1.a.", full: true)
++ First
+  + Nested
+
+--- enum-numbering-reversed paged ---
+// Test reverse numbering.
+#set enum(reversed: true)
++ Coffee
++ Tea
++ Milk
+
+--- enum-numbering-reversed-overridden paged ---
+// Test reverse numbering with overridden numbers.
+#set enum(reversed: true)
++ A
++ B
++ C
+9. D
++ E
++ F
+
+--- enum-numbering-closure paged ---
+// Test numbering with closure.
+#enum(
+  start: 3,
+  spacing: 0.65em - 3pt,
+  tight: false,
+  numbering: n => text(
+    fill: (red, green, blue).at(calc.rem(n, 3)),
+    numbering("A", n),
+  ),
+  [Red], [Green], [Blue], [Red],
+)
+
+--- enum-start html ---
+#enum(
+  start: 3,
+  [Skipping],
+  [Ahead],
+)
+
+--- enum-numbering-closure-nested paged ---
+// Test numbering with closure and nested lists.
+#set enum(numbering: n => super[#n])
++ A
+  + B
++ C
+
+--- enum-numbering-closure-nested-complex paged ---
+// Test numbering with closure and nested lists.
+#set text(font: "New Computer Modern")
+#set enum(numbering: (..args) => math.mat(args.pos()), full: true)
++ A
+  + B
+  + C
+    + D
++ E
++ F
+
+--- enum-numbering-pattern-empty eval ---
+// Error: 22-24 invalid numbering pattern
+#set enum(numbering: "")
+
+--- enum-numbering-pattern-invalid eval ---
+// Error: 22-28 invalid numbering pattern
+#set enum(numbering: "(())")
+
+--- enum-numbering-huge paged ---
+// Test values greater than 32-bits
+100000000001. A
++             B
+
+--- enum-number-align-unaffected paged ---
+// Alignment shouldn't affect number
+#set align(horizon)
+
++ ABCDEF\ GHIJKL\ MNOPQR
+   + INNER\ INNER\ INNER
++ BACK\ HERE
+
+--- enum-number-align-default paged ---
+// Enum number alignment should be 'end' by default
+1. a
+10. b
+100. c
+
+--- enum-number-align-specified paged ---
+#set enum(number-align: start)
+1.  a
+8.  b
+16. c
+
+--- enum-number-align-2d paged ---
+#set enum(number-align: center + horizon)
+1.  #box(fill: teal, inset: 10pt )[a]
+8.  #box(fill: teal, inset: 10pt )[b]
+16. #box(fill: teal,inset: 10pt )[c]
+
+--- enum-number-align-unfolded paged ---
+// Number align option should not be affected by the context.
+#set align(center)
+#set enum(number-align: start)
+
+4.  c
+8.  d
+16. e\ f
+   2.  f\ g
+   32. g
+   64. h
+
+--- enum-number-align-unfolded-mixed paged ---
+// Verify whether overriding vertical alignment causes horizontal alignment to
+// be inherited from the context.
+#set align(center)
+#set enum(
+  number-align: top,
+  numbering: n => "1" * n,
+)
+
++ abc
++ abc
++ abc
+
+--- enum-number-align-values paged empty ---
+// Test valid number align values (horizontal and vertical)
+#set enum(number-align: start)
+#set enum(number-align: end)
+#set enum(number-align: left)
+#set enum(number-align: center)
+#set enum(number-align: right)
+#set enum(number-align: top)
+#set enum(number-align: horizon)
+#set enum(number-align: bottom)
+
+--- enum-par paged html ---
+// Check whether the contents of enum items become paragraphs.
+#show par: it => if target() != "html" { highlight(it) } else { it }
+
+// No paragraphs.
+#block[
+  + Hello
+  + World
+]
+
+#block[
+  + Hello // Paragraphs
+
+    From
+  + World // No paragraph because it's a tight enum
+]
+
+#block[
+  + Hello // Paragraphs
+
+    From
+
+    The
+
+  + World // Paragraph because it's a wide enum
+]
+
+--- enum-array-deprecated paged ---
+// Warning: 7-19 implicit conversion from array to `enum.item` is deprecated
+// Hint: 7-19 use `enum.item(number)[body]` instead
+// Hint: 7-19 this conversion was never documented and is being phased out
+#enum((1, [First]))
+
+--- issue-2530-enum-item-panic paged ---
+// Enum item (pre-emptive)
+#enum.item(auto)[Hello]
+#enum.item(17)[Hello]
+
+--- issue-5503-enum-in-align paged ---
+// `align` is block-level and should interrupt an enum.
++ a
++ b
+#align(right)[+ c]
++ d
+
+--- issue-5719-enum-nested paged ---
+// Enums can be immediately nested.
+1. A
+2. 1. B
+   2. C
++ + D
+  + E
++ = F
+  G
+
+--- issue-529-enum-center-alignment paged ---
+#set page(width: 2cm)
++ A
++ #align(center)[B]
++ $ C $
+
+--- issue-1204-enum-baseline-alignment paged ---
++ A
++ $ sum_(i = 1)^n overbrace(x^6, y) $
++ #box(baseline: 1cm)[C]
++ #v(1cm) D
++ #text(48pt)[E]
++ #block(inset: 10pt, stroke: red)[Hello world!]
++ #rect[Hello world!]

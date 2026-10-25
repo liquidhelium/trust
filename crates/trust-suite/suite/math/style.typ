@@ -1,0 +1,84 @@
+// Test text styling in math.
+
+--- math-style-italic-default paged html ---
+// Test italic defaults.
+$a, A, delta, ϵ, partial, Delta, ϴ$
+
+--- math-style paged html ---
+// Test forcing a specific style.
+$A, italic(A), upright(A), bold(A), bold(upright(A)), \
+ serif(A), sans(A), cal(A), frak(A), mono(A), bb(A), \
+ italic(partial), upright(partial), \
+ bb("hello") + bold(cal("world")), \
+ mono("SQRT")(x) wreath mono(123 + 456)$
+
+--- math-style-fallback paged html ---
+// Test how math styles fallback.
+$upright(frak(bold(alpha))) = upright(bold(alpha)) \
+bold(mono(ϝ)) = bold(ϝ) \
+sans(Theta) = bold(sans(Theta)) \
+bold(upright(planck)) != planck \
+bb(e) != italic(bb(e)) \
+serif(sans(A)) != serif(A)$
+
+--- math-style-dotless paged html ---
+// Test styling dotless i and j.
+$ dotless.i dotless.j,
+  upright(dotless.i) upright(dotless.j),
+  sans(dotless.i) sans(dotless.j),
+  bold(dotless.i) bold(dotless.j),
+  bb(dotless.i) bb(dotless.j),
+  cal(dotless.i) cal(dotless.j),
+  frak(dotless.i) frak(dotless.j),
+  mono(dotless.i) mono(dotless.j),
+  bold(frak(dotless.i)) upright(sans(dotless.j)),
+  italic(bb(dotless.i)) frak(sans(dotless.j)) $
+
+--- math-style-font-no-dotless paged html ---
+// Test dotless i and j codepoints work without the dtls feature. In
+// particular, make sure that the variation selector is not present with scr
+// and cal.
+#show math.equation: set text(font: "Libertinus Math")
+$ dotless.i dotless.j, upright(dotless.i dotless.j),
+  scr(dotless.i dotless.j), cal(dotless.i dotless.j),
+  frak(dotless.i dotless.j), mono(dotless.i dotless.j),
+  upright(bold(dotless.i dotless.j)), bold(upright(sans(dotless.i dotless.j))) $
+
+--- math-style-exceptions paged html ---
+// Test a few style exceptions.
+$h, bb(N), cal(R), Theta, italic(Theta), sans(Theta), sans(italic(Theta)) \
+ bb(d), bb(italic(d)), italic(bb(d)), bb(e), bb(italic(e)), italic(bb(e)) \
+ bb(i), bb(italic(i)), italic(bb(i)), bb(j), bb(italic(j)), italic(bb(j)) \
+ bb(D), bb(italic(D)), italic(bb(D))$
+
+--- math-style-greek-exceptions paged html ---
+// Test a few greek exceptions.
+$bb(Gamma) , bb(gamma), bb(Pi), bb(pi), bb(sum)$
+
+--- math-style-hebrew-exceptions paged html ---
+// Test hebrew exceptions.
+$aleph, beth, gimel, daleth$ \
+$upright(aleph), upright(beth), upright(gimel), upright(daleth)$
+
+--- math-style-script paged html ---
+// Test variation selectors for scr and cal.
+$cal(A) scr(A) bold(cal(O)) scr(bold(O))$
+
+#show math.equation: set text(font: "Noto Sans Math")
+$scr(E) cal(E) bold(scr(Y)) cal(bold(Y))$
+
+--- math-style-cluster paged html ---
+// Test styling a grapheme cluster.
+#let cluster = symbol("U\u{fe00}")
+$cluster bb(cluster) bold(sans(upright(cluster))) scr(cluster) bold(cal(cluster))$
+
+--- issue-3650-italic-equation paged ---
+_abc $sin(x) "abc"$_ \
+$italic(sin(x) "abc" #box[abc])$ \
+*abc $sin(x) "abc"$* \
+$bold(sin(x) "abc" #box[abc])$ \
+
+--- issue-8520-script-stylistic-set paged ---
+$ cal(B) cal(L) cal(P) cal(R) $
+#show math.equation: set text(weight: 400)
+$ cal(B) cal(L) cal(P) cal(R) $

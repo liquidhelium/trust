@@ -1,0 +1,843 @@
+// Test raw blocks.
+
+--- raw-empty paged ---
+// Empty raw block.
+Empty raw block:``.
+
+--- raw-consecutive-single-backticks paged ---
+// No extra space.
+`A``B`
+
+--- raw-typst-lang paged ---
+// Typst syntax inside.
+```typ #let x = 1``` \
+```typ #f(1)```
+
+--- raw-block-no-parbreaks paged ---
+// Multiline block splits paragraphs.
+
+Text
+```rust
+fn code() {}
+```
+Text
+
+--- raw-more-backticks paged ---
+// Lots of backticks inside.
+````
+```backticks```
+````
+
+--- raw-trimming paged ---
+// Trimming.
+
+// Space between "rust" and "let" is trimmed.
+The keyword ```rust let```.
+
+// Trimming depends on number backticks.
+(``) \
+(` untrimmed `) \
+(``` trimmed` ```) \
+(``` trimmed ```) \
+(``` trimmed```) \
+
+--- raw-single-backtick-lang paged ---
+// Single ticks should not have a language.
+`rust let`
+
+--- raw-dedent-first-line paged ---
+// First line is not dedented and leading space is still possible.
+     ```   A
+        B
+       C
+     ```
+
+--- raw-dedent-empty-line paged ---
+// Do not take empty lines into account when computing dedent.
+```
+        A
+
+        B
+```
+
+--- raw-dedent-last-line paged ---
+// Take last line into account when computing dedent.
+```
+        A
+
+        B
+    ```
+
+--- raw-empty-inline eval ---
+#let raw = ``
+#test(raw.text, "")
+#test(raw.block, false)
+
+--- raw-empty-spaces eval ---
+#let raw = ```   ```
+#test(raw.text, "")
+#test(raw.block, false)
+
+--- raw-empty-newlines eval ---
+#let raw = ```
+
+
+```
+#test(raw.text, "\n")
+#test(raw.block, true)
+
+--- raw-newlines-backtick eval ---
+#let raw = ```
+
+`
+
+```
+#test(raw.text, "\n`\n")
+#test(raw.block, true)
+
+--- raw-backtick eval ---
+#let raw = ``` ` ```
+#test(raw.text, "`")
+#test(raw.block, false)
+
+--- raw-lang-backtick eval ---
+#let raw = ```lang ` ```
+#test(raw.lang, "lang")
+#test(raw.text, "`")
+#test(raw.block, false)
+
+--- raw-lang-backtick-no-space eval ---
+// The language tag stops at a backtick even without whitespace.
+// TODO: Do we want this behavior? It was not discussed in #7337.
+#let raw = ```lang`test ` ```
+#test(raw.lang, "lang")
+#test(raw.text, "`test `")
+#test(raw.block, false)
+
+--- raw-lang-space eval ---
+// The language tag stops at a space.
+#let raw = ```lang test ```
+#test(raw.lang, "lang")
+#test(raw.text, "test ")
+#test(raw.block, false)
+
+--- raw-lang--multi-space eval ---
+// The language tag only discards one space.
+#let raw = ```lang  test```
+#test(raw.lang, "lang")
+#test(raw.text, " test")
+#test(raw.block, false)
+
+--- raw-lang-newline eval ---
+// The language tag stops at a newline.
+#let raw = ```lang
+test
+```
+#test(raw.lang, "lang")
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-lang-no-text eval ---
+// Warning: 12-22 empty raw text
+// Hint: 12-22 Typst is treating `lang` as the language tag
+// Hint: 15-19 to treat this as text, add a space after the initial backticks
+#let raw = ```lang```
+#test(raw.lang, "lang")
+#test(raw.text, "")
+#test(raw.block, false)
+
+--- raw-lang-non-ident eval ---
+// The language tag does not have to be a valid identifier.
+// Warning: 15-25 no whitespace between language tag and raw text
+// Hint: 15-19 if the current behavior is correct, please add a space after `lang`
+// Hint: 15-19 otherwise, add a space or newline after the initial backticks
+// Hint: 15-25 currently, Typst is treating `lang` as the language tag
+// Hint: 15-25 in the next version of Typst, this will change and we will treat all text until the first whitespace as the language tag
+#let raw = ```lang.tag++ test```
+#test(raw.lang, "lang")
+#test(raw.text, ".tag++ test")
+#test(raw.block, false)
+
+--- raw-lang-starts-non-ident eval ---
+// Test the language tag starting with non-identifier characters.
+// Warning: 15-31 no whitespace before raw text
+// Hint: 15-31 in the next version of Typst, this text will be treated as the language tag for this element
+// Hint: 15-31 to avoid this, add a space after the initial backticks
+#let raw = ```!@#$%^&*()_+lang test```
+#test(raw.text, "!@#$%^&*()_+lang test")
+// Error: 11-15 field "lang" in raw is not known at this point
+#test(raw.lang, none)
+#test(raw.block, false)
+
+--- raw-blocky eval ---
+// The first line and the last line are ignored.
+#let raw = {
+```
+test
+```
+}
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-blocky-dedent eval ---
+// A blocky raw should handle dedents.
+#let raw = {
+```
+test
+```
+}
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-firstline eval ---
+// When there is content in the first line, we discard a single whitespace char.
+#let raw = ``` test
+  ```
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-firstline2 eval ---
+// When there is content in the first line, we discard a single whitespace char.
+#let raw = ``` test
+```
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-firstline3 eval ---
+// The first line is not affected by dedent, and the middle lines don't consider
+// the whitespace prefix of the first line.
+#let raw = ``` test
+     test2
+  ```
+#test(raw.text, "test\n   test2")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-firstline4 eval ---
+// The first line is not affected by dedent, and the middle lines don't consider
+// the whitespace prefix of the first line.
+#let raw = ```     test
+  test2
+  ```
+#test(raw.text, "    test\ntest2")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-lastline eval ---
+#let raw = ```
+  test
+ ```
+#test(raw.text, " test")
+#test(raw.block, true)
+
+--- raw-blocky-dedent-lastline2 eval ---
+#let raw = ```
+  test
+  ```
+#test(raw.text, "test")
+#test(raw.block, true)
+
+--- raw-blocky-tab eval ---
+#let raw = {
+```
+	test
+```
+}
+#test(raw.text, "\ttest")
+#test(raw.block, true)
+
+--- raw-blocky-tab-dedent eval ---
+// This one is a bit problematic because there is a trailing tab below "test"
+// which the editor constantly wants to remove.
+#let raw = eval("```\n\ttest\n  \n ```")
+#test(raw.text, "test\n ")
+#test(raw.block, true)
+
+--- raw-extra-first-line-ws eval ---
+#let raw = eval("```   \n```")
+#test(raw.text, "")
+#test(raw.block, true)
+
+--- raw-tab-size paged ---
+#set raw(tab-size: 8)
+
+```tsv
+Year	Month	Day
+2000	2	3
+2001	2	1
+2002	3	10
+```
+
+--- raw-syntaxes paged ---
+#set page(width: 180pt)
+#set text(6pt)
+#set raw(syntaxes: "/assets/syntaxes/SExpressions.sublime-syntax")
+
+```sexp
+(defun factorial (x)
+  (if (zerop x)
+    ; with a comment
+    1
+    (* x (factorial (- x 1)))))
+```
+
+--- raw-syntaxes-invalid-sublime-syntax eval ---
+// Prevent test parser from failing on "^---" line.
+#let sublime-syntax = ```yaml
+%YAML 1.2
+```.text + "\n---\n" + ```yaml
+name: lang
+file_extensions:
+  - a
+scope: source
+contexts:
+  main:
+    - match: '\'
+```.text
+
+// Error: 35-56 failed to parse syntax (Error while compiling regex '\': Parsing error at position 0: Backslash without following character)
+#raw("text", lang: "a", syntaxes: bytes(sublime-syntax))
+
+--- raw-syntaxes-types paged empty ---
+#let sublime-syntax = ```yaml
+%YAML 1.2
+```.text + "\n---\n" + ```yaml
+name: lang
+file_extensions:
+  - a
+scope: source
+contexts:
+  main:
+    - match: ''
+```.text
+
+#set raw(syntaxes: "/assets/syntaxes/SExpressions.sublime-syntax")
+#set raw(syntaxes: path("/assets/syntaxes/SExpressions.sublime-syntax"))
+#set raw(syntaxes: (
+  path("/assets/syntaxes/SExpressions.sublime-syntax"),
+  bytes(sublime-syntax),
+))
+
+--- raw-theme paged ---
+// Test code highlighting with custom theme.
+#set page(width: 180pt)
+#set text(6pt)
+#set raw(theme: "/assets/themes/halcyon.tmTheme")
+#show raw: it => {
+  set text(fill: rgb("a2aabc"))
+  rect(
+    width: 100%,
+    inset: (x: 4pt, y: 5pt),
+    radius: 4pt,
+    fill: rgb("1d2433"),
+    place(right, text(luma(240), it.lang)) + it,
+  )
+}
+
+```typ
+= Chapter 1
+#lorem(100)
+
+#let hi = "Hello World"
+#show heading: emph
+```
+
+--- raw-show-set paged ---
+// Text show rule
+#show raw: set text(font: "Roboto")
+`Roboto`
+
+--- raw-align-default paged ---
+// Text inside raw block should be unaffected by outer alignment by default.
+#set align(center)
+#set page(width: 180pt)
+#set text(6pt)
+
+```py
+def something(x):
+  return x
+
+a = 342395823859823958329
+b = 324923
+```
+
+--- raw-align-specified paged ---
+// Text inside raw block should follow the specified alignment.
+#set page(width: 180pt)
+#set text(6pt)
+
+#align(center, raw(
+  lang: "typ",
+  block: true,
+  align: right,
+  "#let f(x) = x\n#align(center, line(length: 1em))",
+))
+
+--- raw-align-invalid eval ---
+// Error: 17-20 expected `start`, `left`, `center`, `right`, or `end`, found top
+#set raw(align: top)
+
+--- raw-inline-multiline paged ---
+#set page(width: 180pt)
+#set text(6pt)
+#set raw(lang:"python")
+
+Inline raws, multiline e.g. `for i in range(10):
+  # Only this line is a comment.
+  print(i)` or otherwise e.g. `print(j)`, are colored properly.
+
+Inline raws, multiline e.g. `
+# Appears blocky due to linebreaks at the boundary.
+for i in range(10):
+  print(i)
+` or otherwise e.g. `print(j)`, are colored properly.
+
+--- raw-highlight-typ paged ---
+// Highlighting for Typst markup
+#set page(width: auto)
+```typ
+#set heading(numbering: "1.")
+= Chapter 1 <chap:1>
+#lorem(100)
+
+#let hi = "Hello World"
+#show heading: emph
+/ Chap: @chap:1[Chapter #hi]
+- *Chap:* ch--ap
++ _*Chap:*_ ch~ap
+1. _Chap:_ ch---ap
+```
+
+--- raw-highlight-typc paged ---
+// Highlighting for Typst code
+#set page(width: auto)
+```typ
+#set hello()
+#set hello()
+#set hello.world()
+#set hello.my.world()
+#let foo(x) = x * 2
+#show heading: func
+#show module.func: func
+#show module.func: it => {}
+#foo(ident: ident)
+#hello
+#hello()
+#box[]
+#hello.world
+#hello.world()
+#hello().world()
+#hello.my.world
+#hello.my.world()
+#hello.my().world
+#hello.my().world()
+#{ hello }
+#{ hello() }
+#{ hello.world() }
+#if foo []
+```
+
+--- raw-highlight-typm paged ---
+// Highlighting for Typst math
+#set page(width: auto)
+```typm
+1 + 2/3
+sum_(i=1)^n i = (n(n+1))/2
+binom(n, k) = n!/(k!(n - k)!)
+2 / √(2pi) = sqrt(2) / √pi
+3 * (1 - 2) <= #(3 * (1 + 2))
+((a+b))/((c)^(d')_(e')_(f)'/(g)'/(h)!)
+[\(a+b\)]/{\(c\)^[d']_{e'}_[|f|]'/[g]'/[\|h\|]!}
+f_zeta(x), f_zeta(x)/1, f_zeta (x)
+pi.alt + pi^arrow.l.long.double - π = ???
+"string" - + * ::= & \
+|=> & [|define(x-y_z: #1, x::= y; xyz; 0)|]
+std.text(op("Red"), fill: red)
+#std.text(math.op("Red"), fill: red)
+```
+
+--- raw-highlight-typm-idents paged ---
+// Highlighting identifiers, field accesses and function calls in math
+#set page(width: auto)
+```typm
+hello
+hello-world
+hello()
+box[]
+hello.world
+hello.world()
+hello-world()
+hello_world()
+hello.my.world()
+emph(hello.my.world())
+emph(hello.my().world)
+emph(hello.my().world())
+emph (hello.my().world())
+#hello
+#hello()
+#hello.world
+#hello.world()
+#box[]
+```
+
+--- raw-highlight-rust paged ---
+#set page(width: auto)
+
+```rust
+/// A state machine.
+#[derive(Debug)]
+enum State<'a> { A(u8), B(&'a str) }
+
+fn advance(state: State<'_>) -> State<'_> {
+    unimplemented!("state machine")
+}
+```
+
+--- raw-highlight-py paged ---
+#set page(width: auto)
+
+```py
+import this
+
+def hi():
+  print("Hi!")
+```
+
+--- raw-highlight-cpp paged ---
+#set page(width: auto)
+
+```cpp
+#include <iostream>
+
+int main() {
+  std::cout << "Hello, world!";
+}
+```
+
+--- raw-highlight-html paged ---
+#set page(width: auto)
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+  </head>
+  <body>
+    <h1>Topic</h1>
+    <p>The Hypertext Markup Language.</p>
+    <script>
+      function foo(a, b) {
+        return a + b + "string";
+      }
+    </script>
+  </body>
+</html>
+```
+
+--- raw-highlight-html-jinja2 paged ---
+#set page(width: auto)
+// FUTURE: Convert to raw syntax when we re-enable non-identifier language tags
+
+#raw(block: true, lang: "html.j2", ```
+<tbody>
+  {% for row in data.rows %}
+  <tr>
+      {% for column in row %}
+      <td>{{ column }}</td>
+      {% endfor %}
+  </tr>
+  {% endfor %}
+</tbody>
+```.text)
+
+--- raw-html html ---
+This is ```typ *inline*```.
+```typ
+#[
+  #set text(blue)
+  *Hello* _world_!
+]
+```
+
+--- raw-html-inline-spaces html ---
+This has `double  spaces  inside`, which should be kept.
+
+--- raw-line paged ---
+#set page(width: 200pt)
+
+```rs
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+#show raw.line: it => {
+  box(stack(
+    dir: ltr,
+    box(width: 15pt)[#it.number],
+    it.body,
+  ))
+  linebreak()
+}
+
+```rs
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+--- raw-line-alternating-fill paged ---
+#set page(width: 200pt)
+#show raw: it => stack(dir: ttb, ..it.lines)
+#show raw.line: it => {
+  box(
+    width: 100%,
+    height: 1.75em,
+    inset: 0.25em,
+    fill: if calc.rem(it.number, 2) == 0 {
+      luma(90%)
+    } else {
+      white
+    },
+    align(horizon, stack(
+      dir: ltr,
+      box(width: 15pt)[#it.number],
+      it.body,
+    ))
+  )
+}
+
+```typ
+#show raw.line: block.with(
+  fill: luma(60%)
+);
+
+Hello, world!
+
+= A heading for good measure
+```
+
+--- raw-line-text-fill paged ---
+#set page(width: 200pt)
+#show raw.line: set text(fill: red)
+
+```py
+import numpy as np
+
+def f(x):
+    return x**2
+
+x = np.linspace(0, 10, 100)
+y = f(x)
+
+print(x)
+print(y)
+```
+
+--- raw-line-scripting paged empty ---
+
+// Test line extraction works.
+
+#show raw: code => {
+  for i in code.lines {
+    test(i.count, 10)
+  }
+
+  test(code.lines.at(0).text, "import numpy as np")
+  test(code.lines.at(1).text, "")
+  test(code.lines.at(2).text, "def f(x):")
+  test(code.lines.at(3).text, "    return x**2")
+  test(code.lines.at(4).text, "")
+  test(code.lines.at(5).text, "x = np.linspace(0, 10, 100)")
+  test(code.lines.at(6).text, "y = f(x)")
+  test(code.lines.at(7).text, "")
+  test(code.lines.at(8).text, "print(x)")
+  test(code.lines.at(9).text, "print(y)")
+  test(code.lines.at(10, default: none), none)
+}
+
+```py
+import numpy as np
+
+def f(x):
+    return x**2
+
+x = np.linspace(0, 10, 100)
+y = f(x)
+
+print(x)
+print(y)
+```
+
+--- issue-3601-empty-raw paged ---
+// Test that empty raw block with `typ` language doesn't cause a crash.
+```typ
+```
+
+--- raw-empty-lines paged ---
+// Test raw with multiple empty lines.
+
+#show raw: block.with(width: 100%, fill: gray)
+
+```
+
+
+
+
+```
+
+--- issue-3841-tabs-in-raw-type-code paged ---
+// Tab chars were not rendered in raw blocks with lang: "typ(c)"
+#raw("#if true {\n\tf()\t// typ\n}", lang: "typ")
+
+#raw("if true {\n\tf()\t// typc\n}", lang: "typc")
+
+```typ
+#if true {
+	// tabs around f()
+	f()	// typ
+}
+```
+
+```typc
+if true {
+	// tabs around f()
+	f()	// typc
+}
+```
+
+--- issue-6961-tab-crlf-raw-indent paged ---
+#let snippet = (
+  ```
+  A
+    BC
+    D
+  ```
+)
+
+#raw(
+  snippet.text.replace("  ", "\t").replace("\n", "\r\n"),
+  block: true,
+)
+
+--- issue-4662-math-mode-language-for-raw paged ---
+// Test lang: "typm" syntax highlighting without enclosing dollar signs
+#raw("pi^2", lang: "typm")
+
+--- issue-2259-raw-color-overwrite paged ---
+// Test that the color of a raw block is not overwritten
+#show raw: set text(fill: blue)
+
+`Hello, World!`
+
+```rs
+fn main() {
+    println!("Hello, World!");
+}
+```
+
+--- issue-3191-raw-justify paged ---
+// Raw blocks should not be justified by default.
+```
+a b c --------------------
+```
+
+#show raw: set par(justify: true)
+```
+a b c --------------------
+```
+
+--- issue-3191-raw-normal-paragraphs-still-shrink paged ---
+// In normal paragraphs, spaces should still be shrunk.
+// The first line here serves as a reference, while the second
+// uses non-breaking spaces to create an overflowing line
+// (which should shrink).
+~~~~No shrinking here
+
+~~~~The~spaces~on~this~line~shrink
+
+--- issue-3820-raw-space-when-end-with-backtick paged ---
+```typ
+`code`
+```
+
+  ```typ
+  `code`
+  ```
+
+--- issue-5760-disable-cjk-latin-spacing-in-raw paged ---
+
+```typ
+#let hi = "你好world"
+```
+
+#show raw: set text(cjk-latin-spacing: auto)
+```typ
+#let hi = "你好world"
+```
+
+--- issue-6559-equality-between-raws eval ---
+
+#test(`foo`, `foo`)
+#assert.ne(`foo`, `bar`)
+
+--- raw-theme-types paged ---
+```typ
+#let hi = "Hello World"
+```
+
+#set raw(theme: path("/assets/themes/halcyon.tmTheme"))
+```typ
+#let hi = "Hello World"
+```
+
+#set raw(theme: auto)
+```typ
+#let hi = "Hello World"
+```
+
+--- raw-theme-set-to-none paged ---
+#set raw(theme: none)
+```typ
+#let foo = "bar"
+```
+
+--- raw-default-json-theme paged ---
+```json
+{
+  "foo": "bar",
+  "test": [
+    "test",
+    true,
+    42,
+    5.0,
+    null
+  ],
+  "hi": {
+    "this": "is a test!",
+    "What is this?": "This is incredible text!"
+  }
+}
+```
+
+--- raw-default-yaml-theme paged ---
+```yaml
+foo: bar
+test:
+- test
+- true
+- 42
+- 5
+-
+hi:
+  this: is a test!
+  What is this?: This is incredible text!
+```
+
+--- raw-unclosed eval ---
+// Test unterminated raw text.
+//
+// Note: This test should be the final one in the file because it messes up
+// syntax highlighting.
+//
+// Error: 1:1-2:1 unclosed raw text
+`endless

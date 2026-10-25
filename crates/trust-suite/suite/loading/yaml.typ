@@ -1,0 +1,49 @@
+--- yaml eval ---
+// Test reading YAML data
+#let data = yaml("/assets/data/yaml-types.yaml")
+#test(data.len(), 9)
+#test(data.null_key, (none, none))
+#test(data.string, "text")
+#test(data.integer, 5)
+#test(data.float, 1.12)
+#test(data.mapping, ("1": "one", "2": "two"))
+#test(data.seq, (1,2,3,4))
+#test(data.bool, false)
+#test(data.keys().contains("true"), true)
+#test(data.at("1"), "ok")
+
+// Test reading through path type.
+#let data-from-path = yaml(path("/assets/data/yaml-types.yaml"))
+#test(data-from-path, data)
+
+--- yaml-invalid eval ---
+// Error: "/assets/data/bad.yaml" 2:1 failed to parse YAML (did not find expected ',' or ']' at line 2 column 1, while parsing a flow sequence at line 1 column 18)
+#yaml("/assets/data/bad.yaml")
+
+--- yaml-decode-number eval ---
+#import "edge-case.typ": large-integer, representable-integer
+
+#for (name, source) in representable-integer {
+  assert.eq(
+    type(yaml(bytes(source))),
+    int,
+    message: "failed to decode " + name,
+  )
+}
+
+#for (name, source) in large-integer {
+  assert.eq(
+    type(yaml(bytes(source))),
+    float,
+    message: "failed to approximately decode " + name,
+  )
+}
+
+--- yaml-encode-any eval ---
+#import "edge-case.typ": special-types-for-human
+#for value in special-types-for-human {
+  test(
+    yaml.encode(value),
+    yaml.encode(repr(value)),
+  )
+}

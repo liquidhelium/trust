@@ -692,7 +692,11 @@ impl Ctx {
             })
             .collect();
         caps.extend(modules.iter().map(|(n, r)| {
-            format!("\"{}\", {}", super::naming::escape(n), self.ref_value(r))
+            format!(
+                "(\"{}\", {})",
+                super::naming::escape(n),
+                self.ref_value(r)
+            )
         }));
         let at = self.span_of(stmt.span());
         let caps_lit = if caps.is_empty() {

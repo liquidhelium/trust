@@ -1,0 +1,336 @@
+// Test configuring font properties.
+
+--- text-font-properties paged ---
+// Set same font size in three different ways.
+#text(20pt)[A]
+#text(2em)[A]
+#text(size: 15pt + 0.5em)[A]
+
+// Do nothing.
+#text()[Normal]
+
+// Set style (is available).
+#text(style: "italic")[Italic]
+
+// Set weight (is available).
+#text(weight: "bold")[Bold]
+
+// Set stretch (not available, matching closest).
+#text(stretch: 50%)[Condensed]
+
+// Set font family.
+#text(font: "IBM Plex Serif")[Serif]
+
+// Emoji.
+Emoji: 🐪, 🌋, 🏞
+
+// Colors.
+#[
+  #set text(fill: eastern)
+  This is #text(rgb("FA644B"))[way more] colorful.
+]
+
+// Transparency.
+#block(fill: green)[
+  #set text(fill: rgb("FF000080"))
+  This text is transparent.
+]
+
+// Disable font fallback beyond the user-specified list.
+// Without disabling, New Computer Modern Math would come to the rescue.
+#set text(font: ("PT Sans", "Twitter Color Emoji"), fallback: false)
+2π = 𝛼 + 𝛽. ✅
+
+--- text-call-body paged ---
+// Test string body.
+#text("Text") \
+#text(red, "Text") \
+#text(font: "Ubuntu", blue, "Text") \
+#text([Text], teal, font: "IBM Plex Serif") \
+#text(forest, font: "New Computer Modern", [Text]) \
+
+--- text-bad-argument eval ---
+// Error: 11-16 unexpected argument
+#set text(false)
+
+--- text-style-bad eval ---
+// Error: 18-24 expected "normal", "italic", or "oblique"
+#set text(style: "bold", weight: "thin")
+
+--- text-bad-extra-argument eval ---
+// Error: 23-27 unexpected argument
+#set text(size: 10pt, 12pt)
+
+--- text-bad-named-argument eval ---
+// Error: 11-31 unexpected argument: something
+#set text(something: "invalid")
+
+--- text-unknown-font-family-warning paged ---
+#text(font: "libertinus serif")[I exist,]
+// Warning: 13-26 unknown font family: nonexistent
+#text(font: "nonexistent")[but]
+// Warning: 17-35 unknown font family: also-nonexistent
+#set text(font: "also-nonexistent")
+I
+// Warning: 23-55 unknown font family: list-of
+// Warning: 23-55 unknown font family: nonexistent-fonts
+#let var = text(font: ("list-of", "nonexistent-fonts"))[don't]
+#var
+
+--- issue-5499-text-fill-in-clip-block paged ---
+
+#let t = tiling(
+  size: (30pt, 30pt),
+  relative: "parent",
+  square(
+    size: 30pt,
+    fill: gradient
+      .conic(..color.map.rainbow),
+  )
+)
+
+#block(clip: false, height: 2em, {
+  text(fill: blue, "Hello")
+  [ ]
+  text(fill: blue.darken(20%).transparentize(50%), "Hello")
+  [ ]
+  text(fill: gradient.linear(..color.map.rainbow), "Hello")
+  [ ]
+  text(fill: t, "Hello")
+})
+#block(clip: true, height: 2em, {
+  text(fill: blue, "Hello")
+  [ ]
+  text(fill: blue.darken(20%).transparentize(50%), "Hello")
+  [ ]
+  text(fill: gradient.linear(..color.map.rainbow), "Hello")
+  [ ]
+  text(fill: t, "Hello")
+})
+
+--- text-font-types paged empty ---
+#let ubuntu = (name: "Ubuntu", covers: regex("[\u{20}-\u{FFFF}]"))
+#set text(font: ubuntu)
+#set text(font: (ubuntu, "Ubuntu"))
+
+--- text-font-covers-chinese paged ---
+// Without ranges, the quotation mark is using the Latin font.
+#set text(font: ("Ubuntu", "Noto Serif CJK SC"))
+分别设置“中文”和English字体
+
+// With ranges, the quotation mark is using the Chinese font.
+#set text(font: ((name: "Noto Serif CJK SC", covers: regex("[\u{00B7}-\u{3134F}]")), "Ubuntu"))
+分别设置“中文”和English字体
+
+// With "latin-in-cjk", the quotation mark is also using the Chinese font.
+#set text(font: ((name: "Ubuntu", covers: "latin-in-cjk"), "Noto Serif CJK SC"))
+分别设置“中文”和English字体
+
+--- text-font-covers-numbers paged ---
+// Change font only for numbers.
+#set text(font: (
+  (name: "PT Sans", covers: regex("[0-9]")),
+  "Libertinus Serif"
+))
+
+The number 123.
+
+--- text-font-covers-repeat paged ---
+// Repeatedly use the same font.
+#set text(font: (
+  (name: "Libertinus Serif", covers: regex("[0-9]")),
+  "Libertinus Serif"
+))
+
+The number 123.
+
+--- text-font-covers-riffle paged ---
+// Repeatedly use two fonts alternately.
+#set text(font: (
+  (name: "Noto Color Emoji", covers: regex("[🔗⛓‍💥]")),
+  (name: "Twitter Color Emoji", covers: regex("[^🖥️]")),
+  "Noto Color Emoji",
+))
+
+🔗⛓‍💥🖥️🔑
+
+// The above should be the same as:
+#{
+  text(font: "Noto Color Emoji", "🔗⛓‍💥🖥️")
+  text(font: "Twitter Color Emoji", "🔑")
+}
+
+// but not:
+#text(font: "Twitter Color Emoji", "🔗⛓‍💥🖥️🔑")
+
+--- text-colr-svg-glyphs-different-size paged ---
+#set text(size: 11pt)
+#text(font: "Noto Color Emoji", "🔗⛓‍💥🖥️🔑") \
+#text(font: "Twitter Color Emoji", "🔗⛓‍💥🖥️🔑") \
+
+#set text(size: 22pt)
+#text(font: "Noto Color Emoji", "🔗⛓‍💥🖥️🔑") \
+#text(font: "Twitter Color Emoji", "🔗⛓‍💥🖥️🔑") \
+
+--- text-font-covers-bad-1 eval ---
+// Error: 17-59 coverage regex may only use dot, letters, and character classes
+// Hint: 17-59 the regex is applied to each letter individually
+#set text(font: (name: "Ubuntu", covers: regex("20-FFFF")))
+
+--- text-font-covers-bad-2 eval ---
+// Error: 17-65 coverage regex may only use dot, letters, and character classes
+// Hint: 17-65 the regex is applied to each letter individually
+#set text(font: (name: "Ubuntu", covers: regex("\u{20}-\u{10}")))
+
+--- text-font-covers-reflection paged empty ---
+// reflect "latin-in-cjk" covers
+#set text(font: (name: "Ubuntu", covers: "latin-in-cjk"))
+#context test(text.font, (name: "ubuntu", covers: "latin-in-cjk"))
+
+// reflect regex covers
+#set text(font: (name: "Ubuntu", covers: regex("\d")))
+#context test(text.font, (name: "ubuntu", covers: regex("\d")))
+
+// reflect font list with covers
+#set text(font: ((name: "Ubuntu", covers: regex("\d")), "IBM Plex Serif"))
+#context test(text.font, ((name: "ubuntu", covers: regex("\d")), "ibm plex serif"))
+
+--- issue-5262-text-negative-size paged ---
+#set text(-1pt)
+
+a
+
+--- issue-5940-text-negative-size-panic paged ---
+#set align(center)
+#set text(-10pt)
+Hello
+
+--- empty-text-font-array eval ---
+// Error: 17-19 font fallback list must not be empty
+#set text(font: ())
+
+--- text-font-variable-ital paged ---
+#set text(font: "Mona Sans")
+Hello _Hello_
+
+#text(variations: (ital: 0))[Hello]
+#text(variations: (ital: 1))[Hello]
+
+--- text-font-variable-slnt paged ---
+#set page(width: auto)
+#set text(font: "Roboto Flex")
+
+Hello, _Hello_
+
+#text(style: "italic")[Hello],
+#text(style: "oblique")[Hello]
+
+#for slnt in range(0, -10, step: -2, inclusive: true) [
+  #text(variations: (slnt: slnt))[Hello.]
+]
+
+--- text-font-variable-wght paged ---
+#set page(width: auto)
+#for (font, tech) in (("Fraunces", "TTF"), ("Cantarell", "CFF2")) [
+  #set text(font: "Fraunces")
+  = #tech
+
+  Hello, *Hello*
+
+  #for weight in range(200, 900, step: 100, inclusive: true) [
+    #text(weight: weight)[Hello.]
+  ]
+
+  #for weight in range(200, 900, step: 100, inclusive: true) [
+    #text(variations: (wght: weight))[Hello.]
+  ]
+]
+
+--- text-font-variable-wdth paged ---
+#set page(width: auto)
+#set text(font: "Roboto Flex")
+
+Hello
+
+#for stretch in range(50, 150, step: 10) [
+  #text(stretch: stretch * 1%)[Hello.]
+]
+
+#for stretch in range(50, 150, step: 10) [
+  #text(variations: (wdth: stretch))[Hello.]
+]
+
+--- text-font-variable-opsz paged ---
+#set page(width: auto)
+#set text(font: "Fraunces")
+
+#for base in (10pt, 20pt) {
+  for s in range(1, 5, inclusive: true) [
+    #let scaled = s * base
+    #scale(100% / s, reflow: true, text(size: scaled)[Hello])
+  ]
+}
+
+--- text-font-variable-custom-wonk paged ---
+#set page(width: auto)
+#set text(font: "Fraunces", size: 25pt)
+
+// WONK only kicks in at point sizes > 18pt.
+#text(variations: (WONK: 0))[minimum] \
+minimum \
+#text(variations: (WONK: 1))[minimum]
+
+--- text-font-variable-custom-grad paged ---
+#set page(width: auto)
+#set text(font: "Roboto Flex")
+
+#text(variations: (GRAD: -200))[Grade] axis \
+Grade axis \
+#text(variations: (GRAD: 150))[Grade] axis
+
+--- text-font-variable-custom-soft paged ---
+// Soft axis becomes more visible at large font size, so we increase it and then
+// scale down to avoid a huge test image.
+#set text(font: "Fraunces", size: 100pt)
+#scale(20%, reflow: true)[
+  #set text(variations: (SOFT: 0))
+  Soft?
+  #set text(variations: (SOFT: 100))
+  Soft!
+]
+
+--- text-font-variable-and-static paged ---
+// This font exists both in its static and variable version.
+#set text(font: "Source Serif 4")
+Hello _world_ *with* #text(weight: 550)[_Source Serif._]
+
+--- text-font-variable-multiple paged ---
+// Multiple fonts with multiple different axis combinations in one test.
+#text(font: "Roboto Flex")[
+  Roboto _Flex_
+  #text(variations: (GRAD: 150))[
+    with #text(stretch: 150%)[*Grade* axis] enabled
+  ]
+] \
+#text(font: "Source Serif 4")[
+  Source _Serif_ 4 *Variable*
+]
+
+--- text-font-variations-win paged ---
+// Test that custom variations win over built-in settings.
+#set text(font: "Mona Sans")
+#text(style: "italic")[
+  Italic \
+  #text(variations: (ital: 0))[Not italic]
+]
+
+--- text-font-variations-fold paged empty ---
+#set text(variations: (ital: 1, GRAD: 10))
+#set text(variations: (GRAD: 15))
+#context test(text.variations, (ital: 1, GRAD: 15))
+
+--- text-font-variations-invalid eval ---
+// Error: 23-34 tag must be one to four characters in length
+// Hint: 23-34 found 5 characters
+// Hint: 23-34 occurred in tag at index 0 (`"grade"`)
+#set text(variations: (grade: 10))

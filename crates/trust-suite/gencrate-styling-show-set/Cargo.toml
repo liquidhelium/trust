@@ -1,0 +1,15 @@
+[package]
+name = "tcat-styling-show-set"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+trust-runtime = { path = "../../../crates/trust-runtime" }
+ecow = "0.2"
+comemo = "0.5.1"

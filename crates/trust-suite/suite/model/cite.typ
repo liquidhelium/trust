@@ -1,0 +1,346 @@
+--- cite-footnote paged ---
+Hello @netwok
+And again: @netwok
+
+#pagebreak()
+#bibliography("/assets/bib/works.bib", style: "chicago-shortened-notes")
+
+--- cite-form paged html ---
+#show: it => context { set page(width: 200pt) if target() == "paged"; it }
+
+Nothing: #cite(<arrgh>, form: none)
+
+#cite(<netwok>, form: "prose") say stuff.
+
+#bibliography("/assets/bib/works.bib", style: "apa")
+
+--- cite-group paged html ---
+A#[@netwok@arrgh]B \
+A@netwok@arrgh B \
+A@netwok @arrgh B \
+A@netwok @arrgh. B \
+
+A @netwok#[@arrgh]B \
+A @netwok@arrgh, B \
+A @netwok @arrgh, B \
+A @netwok @arrgh. B \
+
+A#[@netwok @arrgh @quark]B. \
+A @netwok @arrgh @quark B. \
+A @netwok @arrgh @quark, B.
+
+#show bibliography: it => if target() == "html" { it }
+#bibliography("/assets/bib/works.bib", style: "american-physics-society")
+
+--- cite-grouping-and-ordering paged ---
+@mcintosh_anxiety
+@psychology25
+@netwok
+@issue201
+@arrgh
+@quark
+@distress,
+@glacier-melt
+@issue201
+@tolkien54
+@sharing
+@restful
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib", style: "american-physics-society")
+
+--- issue-785-cite-locate paged ---
+// Test citation in other introspection.
+#set page(width: 180pt)
+#set heading(numbering: "1.")
+
+#outline(
+  title: [Figures],
+  target: figure.where(kind: image),
+)
+
+#pagebreak()
+
+= Introduction <intro>
+#figure(
+  rect(height: 10pt),
+  caption: [A pirate @arrgh in @intro],
+)
+
+#context [Citation @distress on page #here().page()]
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib", style: "chicago-shortened-notes")
+
+--- issue-1597-cite-footnote paged ---
+// Tests that when a citation footnote is pushed to next page, things still
+// work as expected.
+#set page(height: 60pt)
+A
+
+#footnote[@netwok]
+#show bibliography: none
+#bibliography("/assets/bib/works.bib")
+
+--- issue-2531-cite-show-set paged ---
+// Test show set rules on citations.
+#show cite: set text(red)
+A @netwok @arrgh.
+B #cite(<netwok>) #cite(<arrgh>).
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib")
+
+--- issue-3481-cite-location paged ---
+// The locator was cloned in the wrong location, leading to inconsistent
+// citation group locations in the second footnote attempt.
+#set page(height: 60pt)
+
+// First page shouldn't be empty because otherwise we won't skip the first
+// region which causes the bug in the first place.
+#v(10pt)
+
+// Everything moves to the second page because we want to keep the line and
+// its footnotes together.
+#footnote[@netwok \ A]
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib")
+
+--- issue-3699-cite-twice-et-al paged ---
+// Citing a second time showed all authors instead of "et al".
+@mcintosh_anxiety \
+@mcintosh_anxiety
+#show bibliography: none
+#bibliography("/assets/bib/works.bib", style: "chicago-author-date")
+
+--- issue-5503-cite-in-align paged ---
+// The two aligned elements should be displayed in separate lines.
+#align(right)[@netwok]
+#align(right)[b]
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib")
+
+--- issue-5503-cite-group-interrupted-by-par-align paged ---
+// `par` and `align` are block-level and should interrupt a cite group
+@netwok
+@arrgh
+#par(leading: 5em)[@netwok]
+#par[@arrgh]
+@netwok
+@arrgh
+#align(right)[@netwok]
+@arrgh
+
+#show bibliography: none
+#bibliography("/assets/bib/works.bib")
+
+--- cite-type-error-hint eval ---
+// Test hint for cast error from str to label
+// Error: 7-15 expected label, found string
+// Hint: 7-15 use `<netwok>` or `label("netwok")` to create a label
+#cite("netwok")
+
+--- cite-type-error-hint-invalid-literal eval ---
+// Test hint for cast error from str to label
+// Error: 7-17 expected label, found string
+// Hint: 7-17 use `label("%@&#*!\\")` to create a label
+#cite("%@&#*!\\")
+
+--- issue-5775-cite-order-rtl paged ---
+// Test citation order in RTL text.
+#set page(width: 300pt)
+#set text(font: ("Libertinus Serif", "Noto Sans Arabic"))
+@netwok
+aaa
+این است
+@tolkien54
+و این یکی هست
+@arrgh
+
+#bibliography("/assets/bib/works.bib")
+
+--- cite-chicago-fullnotes-warning paged ---
+// Test warning for deprecated alias.
+// Warning: 24-43 style `"chicago-fullnotes"` has been deprecated in favor of `"chicago-notes"`
+#cite(<netwok>, style: "chicago-fullnotes")
+#bibliography("/assets/bib/works.bib")
+
+--- cite-chicago-fullnotes-set-rule-warning paged empty ---
+// Test warning for deprecated alias.
+// Warning: 18-37 style `"chicago-fullnotes"` has been deprecated in favor of `"chicago-notes"`
+#set cite(style: "chicago-fullnotes")
+
+--- cite-supplements-and-ibid paged ---
+#set page(width: 300pt)
+
+Par 1 @arrgh
+
+Par 2 @arrgh[p. 5-8]
+
+Par 3 @arrgh[p. 5-8]
+
+Par 4 @arrgh[p. 9-10]
+
+Par 5 @arrgh[*p. 9-10*]
+
+Par 6 @arrgh[*p. 9-10*]
+
+#let style = bytes(
+  ```xml
+  <?xml version="1.0" encoding="utf-8"?>
+  <style xmlns="http://purl.org/net/xbiblio/csl" version="1.0" class="note" default-locale="pl-PL">
+    <info>
+      <title>Example citation style</title>
+      <id>http://www.example.com/</id>
+    </info>
+    <macro name="locator">
+      <group delimiter=" ">
+        <label variable="locator" form="short"/>
+        <text variable="locator"/>
+      </group>
+    </macro>
+
+    <citation>
+      <sort>
+        <key variable="title"/>
+      </sort>
+      <layout>
+        <choose>
+          <if position="first">
+            <group delimiter=", ">
+              <text variable="title"/>
+              <text macro="locator"/>
+            </group>
+          </if>
+          <else-if position="ibid-with-locator">
+            <group delimiter=", ">
+              <text term="ibid"/>
+              <text macro="locator"/>
+            </group>
+          </else-if>
+          <else-if position="ibid">
+            <text term="ibid"/>
+          </else-if>
+          <else-if position="subsequent">
+            <group delimiter=", ">
+              <text variable="title"/>
+              <text macro="locator"/>
+            </group>
+          </else-if>
+        </choose>
+      </layout>
+    </citation>
+
+    <bibliography>
+      <sort>
+        <key variable="title"/>
+      </sort>
+      <layout>
+        <text variable="title"/>
+      </layout>
+    </bibliography>
+  </style>
+  ```.text
+)
+
+#bibliography("/assets/bib/works.bib", style: style)
+
+--- cite-no-bib paged ---
+// Error: 2-19 the document does not contain a bibliography
+#cite(<something>)
+
+--- cite-unknown paged ---
+// Error: 2-19 citation key `something` is not present in the bibliography
+#cite(<something>)
+#bibliography("/assets/bib/works.bib")
+
+--- cite-unknown-multi-bib paged ---
+// Error: 2-19 citation key `something` is not present in any bibliography
+#cite(<something>)
+#bibliography("/assets/bib/works.bib")
+#bibliography("/assets/bib/works_too.bib")
+
+--- cite-uncovered paged ---
+// Error: 1-8 citation is not covered by any bibliography
+@netwok
+// Hint: 1:10-4:2 a bibliography containing the key `netwok` exists, but its `target` excludes this citation
+#context bibliography(
+  "/assets/bib/works.bib",
+  target: selector(cite).after(here()),
+)
+
+--- cite-nonexistent paged ---
+// Error: 2-14 key `baum` does not exist in the bibliography
+#cite(<baum>)
+// Hint: 2-72 the citation was assigned to this bibliography
+#bibliography("/assets/bib/works.bib", target: cite.where(key: <baum>))
+
+--- cite-assignment-by-chapter html ---
+#show bibliography: set heading(offset: 1)
+
+= Pirates
+@netwok @arrgh
+#bibliography("/assets/bib/works.bib")
+
+= Glaciers
+@glacier-melt
+#bibliography("/assets/bib/works.bib")
+
+--- cite-assignment-auto html ---
+#show bibliography: set heading(numbering: "(A)")
+@netwok // bib (C)
+#bibliography("/assets/bib/works_too.bib")
+#bibliography("/assets/bib/works.bib", target: cite.where(key: <never>))
+#bibliography("/assets/bib/works.bib")
+@keshav2007read // bib (A)
+@arrgh // bib (D)
+#bibliography("/assets/bib/works.bib")
+
+--- cite-assignment-target html ---
+#bibliography(
+  "/assets/bib/works.bib",
+  title: [The middle],
+  target: selector(cite).after(<b>).before(<c>),
+  style: "mla",
+)
+
+= A <a>
+@netwok @arrgh
+
+= B <b>
+@netwok
+@arrgh
+
+= C <c>
+@distress
+
+#bibliography(
+  "/assets/bib/works.bib",
+  title: [The rest],
+)
+
+--- cite-assignment-mixed-group html ---
+// There's a space between [2] and (Keshav), but none between (Keshav) and [3].
+// Should be the same in the output.
+See @netwok @arrgh @keshav2007read#cite(<quark>) @distress @tolkien54 @sharing
+
+#show bibliography: set heading(offset: 1)
+= Bibliographies
+#bibliography(
+  "/assets/bib/works.bib",
+  title: [IEEE],
+  style: "ieee",
+)
+#bibliography(
+  "/assets/bib/works_too.bib",
+  title: [MLA],
+  style: "mla",
+)
+#bibliography(
+  "/assets/bib/works.bib",
+  title: [Chicago],
+  style: "chicago-author-date",
+  target: selector.or(cite.where(key: <tolkien54>), cite.where(key: <sharing>)),
+)

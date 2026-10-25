@@ -534,6 +534,39 @@ fn fmt_macro_site(text: &str) -> Option<String> {
     if group.delimiter() != Delimiter::Parenthesis {
         return None;
     }
+    // rt::markup! is bracket-delimited: a capacity literal, then
+    // comma-separated bracket groups (a vec with run-length entries) —
+    // one item per line.
+    if group.delimiter() == Delimiter::Bracket {
+        let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+        // Leading capacity literal (before the first bracket group).
+        let cap = inner
+            .iter()
+            .find(|t| matches!(t, TokenTree::Literal(_)))
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let segs: Vec<String> = inner
+            .iter()
+            .filter_map(|t| match t {
+                TokenTree::Group(g) if g.delimiter() == Delimiter::Bracket => {
+                    let tts: Vec<TokenTree> = g.stream().into_iter().collect();
+                    Some(head_text(&tts))
+                }
+                _ => None,
+            })
+            .collect();
+        let one_line = format!("rt::{name}![{cap}; {}]", segs.join(", "));
+        if one_line.chars().count() <= WIDTH {
+            return Some(one_line);
+        }
+        let mut out = format!("rt::{name}![{cap};");
+        for seg in &segs {
+            out.push('\n');
+            out.push_str(&shift_all_lines(seg, 4));
+        }
+        out.push_str("\n]");
+        return Some(out);
+    }
     // Interior: receiver expressions, then ';', then segments.
     let inner: Vec<TokenTree> = group.stream().into_iter().collect();
     let semi = inner

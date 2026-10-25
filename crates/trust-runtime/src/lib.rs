@@ -140,6 +140,72 @@ macro_rules! args {
     }};
 }
 
+/// The `Value` of an expression statement (`#let`/`#import` evaluate to
+/// None; `eval_markup` displays it to empty content, so the sequence item
+/// is empty content — not a `Value::None`).
+pub fn mi_none() -> Value {
+    embed(Value::None).into_value()
+}
+
+/// A whitespace sequence item (`SpaceElem`, the interpreter's
+/// inter-statement whitespace node).
+pub fn mi_space() -> Value {
+    space().into_value()
+}
+
+/// A paragraph-break sequence item (a blank line in markup).
+pub fn mi_par() -> Value {
+    parbreak().into_value()
+}
+
+/// A markup sequence with run-length shorthand — "a vec that supports
+/// run-length encoding". Syntax: a capacity literal first (the emitter's
+/// exact item count — the vec gets one precise allocation, matching the
+/// item-by-item literal's shape), then comma-separated bracket groups:
+/// - `[none]` / `[none n]` — expression-statement Nones, n-fold
+/// - `[space]` / `[space n]` — whitespace items, n-fold
+/// - `[par]` / `[par n]` — paragraph breaks, n-fold
+/// - `[<expr>]` — any other item, already in `Value` form
+/// Expands to push/extend on a pre-sized vec: the same items in the same
+/// order as the item-by-item form, with runs staying as runtime loops
+/// (fewer post-expansion tokens than unrolling). One expansion level, no
+/// recursion — sequence lengths are unbounded.
+#[macro_export]
+macro_rules! markup {
+    ($cap:literal; $([$($item:tt)*]),* $(,)?) => {{
+        let mut __trust_seq: ::std::vec::Vec<typst::foundations::Value> =
+            ::std::vec::Vec::with_capacity($cap);
+        $($crate::__markup_item!(__trust_seq; $($item)*);)*
+        __trust_seq
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __markup_item {
+    ($seq:ident; none $n:literal) => {
+        $seq.extend(::std::iter::repeat_n($crate::mi_none(), $n));
+    };
+    ($seq:ident; none) => {
+        $seq.push($crate::mi_none());
+    };
+    ($seq:ident; space $n:literal) => {
+        $seq.extend(::std::iter::repeat_n($crate::mi_space(), $n));
+    };
+    ($seq:ident; space) => {
+        $seq.push($crate::mi_space());
+    };
+    ($seq:ident; par $n:literal) => {
+        $seq.extend(::std::iter::repeat_n($crate::mi_par(), $n));
+    };
+    ($seq:ident; par) => {
+        $seq.push($crate::mi_par());
+    };
+    ($seq:ident; $e:expr) => {
+        $seq.push($e);
+    };
+}
+
 /// Per-file scaffolding: the `file_span` anchor plus signature wrappers
 /// for the `eval`/`module` pair every generated file module carries.
 /// The bodies are pasted **from the call site with their own parameter

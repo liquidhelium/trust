@@ -1385,10 +1385,45 @@ impl Ctx {
             // element (attach_labels); other values display into the
             // sequence (the lookup semantics exercised by glossary-style
             // code).
-            let items = parts
-                .iter()
-                .map(|p| {
-                    if p.contains("/* never */") {
+            // Run-length vec (`rt::markup!`): consecutive identical
+            // static items — the interpreter's inter-statement whitespace
+            // and expression-statement Nones — collapse to one `[kind n]`
+            // entry, and the leading literal is the exact item count (one
+            // precise allocation). The closed string set comes from this
+            // emitter's own static arms, so a dynamic expression can
+            // never misclassify.
+            let mut items: Vec<String> = Vec::new();
+            let mut total: usize = 0;
+            let mut run: Option<(&'static str, u32)> = None;
+            let mut flush = |run: &mut Option<(&'static str, u32)>,
+                             items: &mut Vec<String>,
+                             total: &mut usize| {
+                if let Some((kind, n)) = run.take() {
+                    *total += n as usize;
+                    items.push(if n == 1 {
+                        format!("[{kind}]")
+                    } else {
+                        format!("[{kind} {n}]")
+                    });
+                }
+            };
+            for p in parts {
+                let kind = match p.as_str() {
+                    "rt::embed(Value::None)" => Some("none"),
+                    "rt::space()" => Some("space"),
+                    "rt::parbreak()" => Some("par"),
+                    _ => None,
+                };
+                match kind {
+                    Some(k) => match &mut run {
+                        Some((rk, n)) if *rk == k => *n += 1,
+                        _ => {
+                            flush(&mut run, &mut items, &mut total);
+                            run = Some((k, 1));
+                        }
+                    },
+                    None => {
+                        flush(&mut run, &mut items, &mut total);
                         // Never-typed items (`#return`, the divergence
                         // check of always-true while): a trailing
                         // never-typed expression makes the bare block
@@ -1396,14 +1431,21 @@ impl Ctx {
                         // `.into_value()` cannot apply to never. The
                         // emitter marks them with ` /* never */`
                         // (scripting-return/while driven).
-                        format!("{{ {p} }}")
-                    } else {
-                        format!("({p}).into_value()")
+                        let item = if p.contains("/* never */") {
+                            format!("{{ {p} }}")
+                        } else {
+                            format!("({p}).into_value()")
+                        };
+                        total += 1;
+                        items.push(format!("[{item}]"));
                     }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{ let __items = vec![{items}]; rt::attach_labels(engine, __items) }}")
+                }
+            }
+            flush(&mut run, &mut items, &mut total);
+            format!(
+                "{{ let __items = rt::markup![{total}; {}]; rt::attach_labels(engine, __items) }}",
+                items.join(", ")
+            )
         }
     }
 

@@ -119,6 +119,7 @@ pub(super) fn has_import_cycle(
         let targets = plan
             .imports
             .iter()
+            .filter(|edge| !edge.in_body)
             .filter_map(|edge| edge_effective_target(edge, dep_entries));
         edges.entry(plan.path.clone()).or_default().extend(targets);
     }
@@ -652,27 +653,31 @@ pub(super) fn import_reaches(
     to: &str,
     dep_entries: &std::collections::BTreeMap<String, String>,
 ) -> bool {
-    let owned: Vec<Option<String>> = plans
-        .iter()
-        .flat_map(|p| p.imports.iter().map(|e| edge_effective_target(e, dep_entries)))
-        .collect();
-    let mut edges: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
-    let mut it = owned.iter();
+    // 体内导入边不参与环判定(typst 里体内导入的环是运行期语义,调用
+    // 才触发;meander 的 tiling↔contour 互引即此形态)。
+    let mut edges: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for plan in plans {
-        for _ in &plan.imports {
-            if let Some(Some(t)) = it.next() {
-                edges.entry(plan.path.as_str()).or_default().push(t.as_str());
+        for edge in &plan.imports {
+            if edge.in_body {
+                continue;
+            }
+            if let Some(target) = edge_effective_target(edge, dep_entries) {
+                edges.entry(plan.path.clone()).or_default().push(target);
             }
         }
     }
+    let edges_ref: std::collections::BTreeMap<&str, Vec<&str>> = edges
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.iter().map(|s| s.as_str()).collect()))
+        .collect();
     let mut visited: std::collections::BTreeSet<&str> = Default::default();
-    let mut stack: Vec<&str> = edges.get(from).cloned().unwrap_or_default();
+    let mut stack: Vec<&str> = edges_ref.get(from).cloned().unwrap_or_default();
     while let Some(node) = stack.pop() {
         if node == to {
             return true;
         }
         if visited.insert(node)
-            && let Some(nexts) = edges.get(node) {
+            && let Some(nexts) = edges_ref.get(node) {
                 stack.extend(nexts.iter().copied());
             }
     }

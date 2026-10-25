@@ -1765,6 +1765,12 @@ impl Ctx {
 /// literal / the last segment of a module chain or the root name); pass
 /// None for a dynamic-source bare (the original reports the dynamic error
 /// at runtime).
+    /// One top-level import edge: env injection + slot/define emission,
+    /// dispatched by edge kind (external package / arbitrary-expression
+    /// source / module-value chain / internal file target). `continue` in
+    /// the former single-pass body means "skip this edge" — each processor
+    /// returns instead.
+    #[allow(clippy::too_many_arguments)]
     fn process_import_edge(
         &mut self,
         edge: &super::plan::ImportEdge,
@@ -1783,702 +1789,798 @@ impl Ctx {
         import_slots: &mut std::collections::HashMap<String, String>,
         binding_code: &mut String,
     ) {
-        let cx = self;
-        // Single-iteration shell: a bare `continue` in the method body
-        // means "skip this edge" (formerly the edge loop's body; inner
-        // loops' continues are unaffected).
-        for _ in std::iter::once(()) {
+        if edge.is_include {
+            return;
+        }
+        let mut io = ImportEdgeIo {
+            env,
+            own,
+            state_fields,
+            import_fills,
+            file_defines,
+            import_slots,
+            binding_code,
+        };
+        if edge.external {
+            self.import_edge_external(edge, plan, input, plans, export_table, &mut io);
+        } else if edge.source_node.is_some() {
+            self.import_edge_source_expr(edge, plan, &mut io);
+        } else if edge.module_access.is_some() {
+            self.import_edge_module_value(edge, plan, plans, export_table, &mut io);
+        } else {
+            self.import_edge_internal(edge, plan, input, plans, export_table, &mut io);
+        }
+    }
 
-            if edge.is_include {
-                continue;
+    /// External package import (incl. merged dependencies): slot + fill
+    /// via static assembly or `import_external`, bindings by item shape.
+    #[allow(clippy::too_many_arguments)]
+    fn import_edge_external(
+        &mut self,
+        edge: &super::plan::ImportEdge,
+        plan: &super::plan::FilePlan,
+        input: &PackageInput,
+        plans: &[super::plan::FilePlan],
+        export_table: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
+        io: &mut ImportEdgeIo<'_>,
+    ) {
+        let ImportEdgeIo {
+            env,
+            own: _,
+            state_fields,
+            import_fills,
+            file_defines,
+            import_slots: _,
+            binding_code: _,
+        } = io;
+        if edge.external {
+            // A merged dependency: the spec prefixes the target (the
+            // entry merge key; the spec itself contains `/`, taken up
+            // to the first `/` after the colon); at evaluation time
+            // the generated module is assembled statically, without
+            // import_external.
+            let spec = spec_prefix(&edge.target);
+            let name = match &edge.items {
+                ImportItems::Rename(name) => name.clone(),
+                _ => spec_name(&spec),
+            };
+            let slot = format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&name));
+            state_fields.push((plan.path.clone(), slot.clone()));
+            let ext_at = self.span_of(edge.span);
+            if input.dep_entries.contains_key(&spec) {
+                let target_mod = &plans
+                    .iter()
+                    .find(|p| p.path == edge.target)
+                    .expect("dep entry plan")
+                    .mod_name;
+                let _ = writeln!(
+                    import_fills,
+                    "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                );
+            } else {
+                let _ = writeln!(
+                    import_fills,
+                    "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\", {ext_at})?))?;"
+                );
             }
-            // External package: slots + assembly-time runtime import
-            // (untranslated dependencies go through the interpreter).
-            if edge.external {
-                // A merged dependency: the spec prefixes the target (the
-                // entry merge key; the spec itself contains `/`, taken up
-                // to the first `/` after the colon); at evaluation time
-                // the generated module is assembled statically, without
-                // import_external.
-                let spec = spec_prefix(&edge.target);
-                let name = match &edge.items {
-                    ImportItems::Rename(name) => name.clone(),
-                    _ => spec_name(&spec),
-                };
-                let slot = format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&name));
-                state_fields.push((plan.path.clone(), slot.clone()));
-                let ext_at = cx.span_of(edge.span);
-                if input.dep_entries.contains_key(&spec) {
-                    let target_mod = &plans
-                        .iter()
-                        .find(|p| p.path == edge.target)
-                        .expect("dep entry plan")
-                        .mod_name;
+            match &edge.items {
+                ImportItems::Bare | ImportItems::Rename(_) => {
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
-                    );
-                } else {
-                    let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{slot}, Value::Module(rt::import_external(engine, \"{spec}\", {ext_at})?))?;"
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                        escape(&name)
                     );
                 }
-                match &edge.items {
-                    ImportItems::Bare | ImportItems::Rename(_) => {
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                // Module rename + member list: double binding.
+                ImportItems::RenameList(mname, list) => {
+                    env.module.push((mname.clone(), Ref::Slot(slot.clone())));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                        escape(mname)
+                    );
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        env.module.push((
+                            as_name.clone(),
+                            Ref::ModuleField {
+                                expr: format!("rt::read(&__st.{slot})?"),
+                                name: item.clone(),
+                                file: item_file(export_table, &self.slot_files, &edge.target, item),
+                            },
+                        ));
                         let _ = writeln!(
                             file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
+                            "    scope.define(\"{}\", {});",
+                            escape(&as_name),
+                            super::ctx::field_access_chain(
+                                &format!("rt::read(&__st.{slot})?"),
+                                item
+                            )
                         );
                     }
-                    // Module rename + member list: double binding.
-                    ImportItems::RenameList(mname, list) => {
-                        env.module.push((mname.clone(), Ref::Slot(slot.clone())));
+                }
+                ImportItems::List(list) => {
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        env.module.push((
+                            as_name.clone(),
+                            Ref::ModuleField {
+                                expr: format!("rt::read(&__st.{slot})?"),
+                                name: item.clone(),
+                                file: item_file(export_table, &self.slot_files, &edge.target, item),
+                            },
+                        ));
                         let _ = writeln!(
                             file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(mname)
+                            "    scope.define(\"{}\", {});",
+                            escape(&as_name),
+                            super::ctx::field_access_chain(
+                                &format!("rt::read(&__st.{slot})?"),
+                                item
+                            )
                         );
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                    }
+                }
+                ImportItems::Wildcard => {
+                    if input.dep_entries.contains_key(&spec) {
+                        // Wildcard of a merged dependency: expanded via
+                        // the entry export table (same shape as LIST,
+                        // materializing field accesses).
+                        for wname in export_table[&edge.target].keys() {
+                            if env.module.iter().any(|(n, _)| n == wname) {
+                                continue;
+                            }
                             env.module.push((
-                                as_name.clone(),
+                                wname.clone(),
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{slot})?"),
-                                    name: item.clone(),
-                                    file: item_file(export_table, &cx.slot_files, &edge.target, item),
+                                    name: wname.clone(),
+                                    file: item_file(export_table, &self.slot_files, &edge.target, wname),
                                 },
                             ));
                             let _ = writeln!(
                                 file_defines,
                                 "    scope.define(\"{}\", {});",
-                                escape(&as_name),
+                                escape(wname),
                                 super::ctx::field_access_chain(
                                     &format!("rt::read(&__st.{slot})?"),
-                                    item
+                                    wname
                                 )
                             );
                         }
-                    }
-                    ImportItems::List(list) => {
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            env.module.push((
-                                as_name.clone(),
-                                Ref::ModuleField {
-                                    expr: format!("rt::read(&__st.{slot})?"),
-                                    name: item.clone(),
-                                    file: item_file(export_table, &cx.slot_files, &edge.target, item),
-                                },
-                            ));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", {});",
-                                escape(&as_name),
-                                super::ctx::field_access_chain(
-                                    &format!("rt::read(&__st.{slot})?"),
-                                    item
-                                )
-                            );
-                        }
-                    }
-                    ImportItems::Wildcard => {
-                        if input.dep_entries.contains_key(&spec) {
-                            // Wildcard of a merged dependency: expanded via
-                            // the entry export table (same shape as LIST,
-                            // materializing field accesses).
-                            for wname in export_table[&edge.target].keys() {
-                                if env.module.iter().any(|(n, _)| n == wname) {
-                                    continue;
-                                }
-                                env.module.push((
-                                    wname.clone(),
-                                    Ref::ModuleField {
-                                        expr: format!("rt::read(&__st.{slot})?"),
-                                        name: wname.clone(),
-                                        file: item_file(export_table, &cx.slot_files, &edge.target, wname),
-                                    },
-                                ));
-                                let _ = writeln!(
-                                    file_defines,
-                                    "    scope.define(\"{}\", {});",
-                                    escape(wname),
-                                    super::ctx::field_access_chain(
-                                        &format!("rt::read(&__st.{slot})?"),
-                                        wname
-                                    )
-                                );
-                            }
-                        } else {
-                            cx.diag(edge.span, "wildcard import from an external package is not supported (the package must be translated)".into());
-                        }
+                    } else {
+                        self.diag(edge.span, "wildcard import from an external package is not supported (the package must be translated)".into());
                     }
                 }
-                continue;
             }
-            // Arbitrary-expression source (`import plugin("…") as hypher`):
-            // the source is translated and evaluated into a module value,
-            // and the bindings then follow the module-value import shape
-            // (mirrors typst-eval: an import source just has to evaluate to
-            // a module).
-            if edge.source_node.is_some() {
-                // Zone-1 glue: the arbitrary-expression source dispatched
-                // through the original Eval (module/Str/Path/validation/
-                // warnings all original), difference set filling slots;
-                // wildcards take the layer + export-surface enumeration.
-                if matches!(edge.items, ImportItems::Wildcard) {
-                    let expr_node = edge
-                        .source_node
-                        .as_ref()
-                        .and_then(|n| n.cast::<ast::Expr>())
-                        .expect("source_node casts");
-                    let mut env_m = env.clone();
-                    let value = cx.expr(expr_node, &mut env_m);
-                    let mslot = format!(
-                        "IMPORT_{}_WILD_SRC",
-                        sanitize_key(&plan.mod_name)
-                    );
-                    state_fields.push((plan.path.clone(), mslot.clone()));
-                    let at = cx.span_of(edge.span);
-                    let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
-                    let w = format!("__wild{}", cx.fresh_id());
-                    let _ = writeln!(
-                        import_fills,
-                        "    let {w} = rt::wild_import(&({value}), {at})?;"
-                    );
-                    env.wildcards.push(w);
-                    let _ = writeln!(
-                        file_defines,
-                        "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
-                    );
-                } else {
-                    import_edge_via_glue(
-                        cx,
-                        plan,
-                        edge,
-                        env,
-                        own,
-                        state_fields,
-                        binding_code,
-                        file_defines,
-                        None,
-                    );
-                }
-                continue;
-            }
-            // Module-value expression import (`import deps.oxifmt:
-            // strfmt`).
-            if let Some((root, fields)) = &edge.module_access {
-                // Non-wildcard shapes always go through glue (the value's
-                // type is only known at runtime: module/Str/Path/global
-                // type's scope; the original's dispatch + validation covers
-                // everything, including the no-effect warning for `import
-                // enum` and the dynamic error for `import p` where p is a
-                // string).
-                if !matches!(edge.items, ImportItems::Wildcard) {
-                    let bare =
-                        fields.last().cloned().unwrap_or_else(|| root.clone());
-                    import_edge_via_glue(
-                        cx,
-                        plan,
-                        edge,
-                        env,
-                        own,
-                        state_fields,
-                        binding_code,
-                        file_defines,
-                        Some(&bare),
-                    );
-                    continue;
-                }
-                // Wildcard: expanded via the static resolution chain (the
-                // root must be visible); a root that is not (the scope of a
-                // global type/function, e.g. `import assert.with(true): *`)
-                // takes the runtime layer + runtime export-surface
-                // enumeration (mirroring the original wildcard branch's
-                // per-name `scope.iter()` bind).
-                let base = match env.module.iter().rev().find(|(n, _)| n == root) {
-                    Some((_, module_ref)) => cx.ref_value(module_ref),
-                    None => {
-                        let at = cx.span_of(edge.span);
-                        format!("rt::global(engine, \"{root}\", {at})?")
-                    }
-                };
-                let mut expr = base.clone();
-                for field in fields {
-                    expr = format!(
-                        "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
-                        escape(field)
-                    );
-                }
-                // Bindings go into **slots** (filled at eval time +
-                // re-exported through the module scope): the same shape as
-                // external package imports — a downstream `import
-                // "this-file": name` can reach them (mirroring the
-                // original: the module scope contains names introduced by
-                // imports). These used to be immediate expressions — usable
-                // within the file but not re-exportable, which hit the
-                // `#import cetz: vector` case (a sub-module value of an
-                // external module).
-                match &edge.items {
-                    ImportItems::Bare => {
-                        let name = fields.last().cloned().unwrap_or_else(|| root.clone());
-                        // module_list_slot verbatim (same formula as the
-                        // glue minter and the export table — see plan.rs).
-                        let slot = super::plan::module_list_slot(
-                            &plan.mod_name,
-                            &root,
-                            &fields,
-                            &name,
-                        );
-                        state_fields.push((plan.path.clone(), slot.clone()));
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {expr})?;"
-                        );
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(&name)
-                        );
-                    }
-                    ImportItems::Rename(name) => {
-                        let slot = super::plan::module_list_slot(
-                            &plan.mod_name,
-                            &root,
-                            &fields,
-                            name,
-                        );
-                        state_fields.push((plan.path.clone(), slot.clone()));
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {expr})?;"
-                        );
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(name)
-                        );
-                    }
-                    // Module rename + member list: double binding.
-                    ImportItems::RenameList(mname, list) => {
-                        let mslot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(mname)
-                        );
-                        state_fields.push((plan.path.clone(), mslot.clone()));
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{mslot}, {expr})?;"
-                        );
-                        env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
-                        let _ = writeln!(
-                            file_defines,
-                            "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
-                            escape(mname)
-                        );
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize(&plan.mod_name),
-                                sanitize(&as_name)
-                            );
-                            state_fields.push((plan.path.clone(), slot.clone()));
-                            let item_expr = format!(
-                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
-                                escape(item)
-                            );
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::fill(&__st.{slot}, {item_expr})?;"
-                            );
-                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                                escape(&as_name)
-                            );
-                        }
-                    }
-                    ImportItems::List(list) => {
-                        for (item, rename) in list {
-                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize(&plan.mod_name),
-                                sanitize(&as_name)
-                            );
-                            state_fields.push((plan.path.clone(), slot.clone()));
-                            let item_expr = format!(
-                                "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
-                                escape(item)
-                            );
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::fill(&__st.{slot}, {item_expr})?;"
-                            );
-                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                                escape(&as_name)
-                            );
-                        }
-                    }
-                    ImportItems::Wildcard => {
-                        // Wildcard of a module-value chain: after the
-                        // static resolution chain (root → file, then field
-                        // by field through the export table to the target
-                        // file), expand by that file's export table (e.g.
-                        // `import cetz.draw: *`).
-                        let mut cur: Option<String> = None;
-                        if let Some((_, r#ref)) =
-                            env.module.iter().rev().find(|(n, _)| n == root)
-                            && let super::ctx::Ref::Slot(slot) = r#ref {
-                                cur = slot_target_file(slot, plans);
-                                if std::env::var_os("TRUST_TRACE_WILD").is_some() {
-                                    eprintln!("[wild] root={root} slot={slot} → {cur:?}");
-                                }
-                            }
-                        for field in fields {
-                            let next = cur
-                                .as_ref()
-                                .and_then(|f| export_table.get(f.as_str()))
-                                .and_then(|exports| exports.get(field))
-                                .and_then(|slot| slot_target_file(slot, plans));
-                            match next {
-                                Some(f) => cur = Some(f),
-                                None => {
-                                    cur = None;
-                                    break;
-                                }
-                            }
-                        }
-                        if let Some(target) = cur
-                            && let Some(exports) = export_table.get(target.as_str())
-                        {
-                            for wname in exports.keys() {
-                                if env.module.iter().any(|(n, _)| n == wname) {
-                                    continue;
-                                }
-                                env.module.push((
-                                    wname.clone(),
-                                    Ref::ModuleField {
-                                        expr: base.clone(),
-                                        name: wname.clone(),
-                                        file: item_file(export_table, &cx.slot_files, &target, wname),
-                                    },
-                                ));
-                                let _ = writeln!(
-                                    file_defines,
-                                    "    scope.define(\"{}\", rt::field(&({base}), \"{}\", engine, context, SPAN)?);",
-                                    escape(wname),
-                                    escape(wname)
-                                );
-                            }
-                        } else {
-                            // Static chain unavailable: runtime layer
-                            // (in-body names resolve through the layer) +
-                            // runtime export-surface enumeration (per-name
-                            // scope bind, mirroring the original wildcard
-                            // branch).
-                            let mslot = format!(
-                                "IMPORT_{}_WILD_{}",
-                                sanitize_key(&plan.mod_name),
-                                sanitize_key(root)
-                            );
-                            state_fields.push((plan.path.clone(), mslot.clone()));
-                            let at = cx.span_of(edge.span);
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::fill(&__st.{mslot}, {expr})?;"
-                            );
-                            let w = format!("__wild{}", cx.fresh_id());
-                            let _ = writeln!(
-                                import_fills,
-                                "    let {w} = rt::wild_import(&({expr}), {at})?;"
-                            );
-                            env.wildcards.push(w);
-                            let _ = writeln!(
-                                file_defines,
-                                "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
-                            );
-                        }
-                    }
-                }
-                continue;
-            }
-            // The world may still resolve it at runtime (fixtures etc.):
-            // glue; the original file-not-found carries it (translate-time
-            // interception used to swallow the error).
-            let Some(target_plan) = plans.iter().find(|p| p.path == edge.target) else {
-                // Wildcard out of range: the module value is materialized
-                // via import_external (public import, including
-                // file-not-found); runtime layer + runtime export-surface
-                // enumeration.
-                if matches!(edge.items, ImportItems::Wildcard) && !edge.raw.is_empty() {
-                    let mslot = format!(
-                        "IMPORT_{}_WILD",
-                        sanitize_key(&plan.mod_name)
-                    );
-                    state_fields.push((plan.path.clone(), mslot.clone()));
-                    let at = cx.span_of(edge.span);
-                    let raw_escaped = escape(&edge.raw);
-                    let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{mslot}, Value::Module(rt::import_external(engine, \"{raw_escaped}\", {at})?))?;"
-                    );
-                    let w = format!("__wild{}", cx.fresh_id());
-                    let _ = writeln!(
-                        import_fills,
-                        "    let {w} = rt::wild_import(&rt::read(&__st.{mslot})?, {at})?;"
-                    );
-                    env.wildcards.push(w);
-                    let _ = writeln!(
-                        file_defines,
-                        "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
-                    );
-                    continue;
-                }
-                let stem = edge
-                    .target
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("m")
-                    .split('.')
-                    .next()
-                    .unwrap_or("m")
-                    .to_string();
+        }
+    }
+
+    /// Arbitrary-expression source (`import plugin("…") as hypher`): the
+    /// source is translated and evaluated into a module value, and the
+    /// bindings then follow the module-value import shape (mirrors
+    /// typst-eval: an import source just has to evaluate to a module).
+    fn import_edge_source_expr(
+        &mut self,
+        edge: &super::plan::ImportEdge,
+        plan: &super::plan::FilePlan,
+        io: &mut ImportEdgeIo<'_>,
+    ) {
+        let ImportEdgeIo {
+            env,
+            own,
+            state_fields,
+            import_fills,
+            file_defines,
+            import_slots: _,
+            binding_code,
+        } = io;
+        if edge.source_node.is_some() {
+            // Zone-1 glue: the arbitrary-expression source dispatched
+            // through the original Eval (module/Str/Path/validation/
+            // warnings all original), difference set filling slots;
+            // wildcards take the layer + export-surface enumeration.
+            if matches!(edge.items, ImportItems::Wildcard) {
+                let expr_node = edge
+                    .source_node
+                    .as_ref()
+                    .and_then(|n| n.cast::<ast::Expr>())
+                    .expect("source_node casts");
+                let mut env_m = env.clone();
+                let value = self.expr(expr_node, &mut env_m);
+                let mslot = format!(
+                    "IMPORT_{}_WILD_SRC",
+                    sanitize_key(&plan.mod_name)
+                );
+                state_fields.push((plan.path.clone(), mslot.clone()));
+                let at = self.span_of(edge.span);
+                let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
+                let w = format!("__wild{}", self.fresh_id());
+                let _ = writeln!(
+                    import_fills,
+                    "    let {w} = rt::wild_import(&({value}), {at})?;"
+                );
+                env.wildcards.push(w);
+                let _ = writeln!(
+                    file_defines,
+                    "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                );
+            } else {
                 import_edge_via_glue(
-                    cx,
+                    self,
                     plan,
                     edge,
                     env,
                     own,
                     state_fields,
-                    import_fills,
+                    binding_code,
                     file_defines,
-                    Some(&stem),
+                    None,
                 );
-                continue;
-            };
-            let target_mod = &target_plan.mod_name;
-            let exports = &export_table[edge.target.as_str()];
-            // Cyclic import: typst errors when module evaluation re-enters
-            // a file already on the route (import.rs:231-233); an edge that
-            // closes a cycle bails at its own import statement — whichever
-            // file of the cycle evaluates first reports it.
-            if super::plan::import_reaches(plans, &edge.target, &plan.path, &input.dep_entries) {
-                let message = "cyclic import".to_string();
-                cx.diag(edge.span, message.clone());
-                let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
-                continue;
             }
+        }
+    }
+
+    /// Module-value expression import (`import deps.oxifmt: strfmt`):
+    /// non-wildcard shapes go through the runtime glue; wildcards expand
+    /// via the static resolution chain with a runtime-layer fallback.
+    fn import_edge_module_value(
+        &mut self,
+        edge: &super::plan::ImportEdge,
+        plan: &super::plan::FilePlan,
+        plans: &[super::plan::FilePlan],
+        export_table: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
+        io: &mut ImportEdgeIo<'_>,
+    ) {
+        let ImportEdgeIo {
+            env,
+            own,
+            state_fields,
+            import_fills,
+            file_defines,
+            import_slots: _,
+            binding_code,
+        } = io;
+        if let Some((root, fields)) = &edge.module_access {
+            // Non-wildcard shapes always go through glue (the value's
+            // type is only known at runtime: module/Str/Path/global
+            // type's scope; the original's dispatch + validation covers
+            // everything, including the no-effect warning for `import
+            // enum` and the dynamic error for `import p` where p is a
+            // string).
+            if !matches!(edge.items, ImportItems::Wildcard) {
+                let bare =
+                    fields.last().cloned().unwrap_or_else(|| root.clone());
+                import_edge_via_glue(
+                    self,
+                    plan,
+                    edge,
+                    env,
+                    own,
+                    state_fields,
+                    binding_code,
+                    file_defines,
+                    Some(&bare),
+                );
+                return;
+            }
+            // Wildcard: expanded via the static resolution chain (the
+            // root must be visible); a root that is not (the scope of a
+            // global type/function, e.g. `import assert.with(true): *`)
+            // takes the runtime layer + runtime export-surface
+            // enumeration (mirroring the original wildcard branch's
+            // per-name `scope.iter()` bind).
+            let base = match env.module.iter().rev().find(|(n, _)| n == root) {
+                Some((_, module_ref)) => self.ref_value(module_ref),
+                None => {
+                    let at = self.span_of(edge.span);
+                    format!("rt::global(engine, \"{root}\", {at})?")
+                }
+            };
+            let mut expr = base.clone();
+            for field in fields {
+                expr = format!(
+                    "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                    escape(field)
+                );
+            }
+            // Bindings go into **slots** (filled at eval time +
+            // re-exported through the module scope): the same shape as
+            // external package imports — a downstream `import
+            // "this-file": name` can reach them (mirroring the
+            // original: the module scope contains names introduced by
+            // imports). These used to be immediate expressions — usable
+            // within the file but not re-exportable, which hit the
+            // `#import cetz: vector` case (a sub-module value of an
+            // external module).
             match &edge.items {
-                ImportItems::Bare | ImportItems::Rename(_) => {
-                    let bound = match &edge.items {
-                        ImportItems::Rename(name) => name.clone(),
-                        _ => edge
-                            .target
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or("m")
-                            .split('.')
-                            .next()
-                            .unwrap_or("m")
-                            .to_string(),
-                    };
-                    // A bare import's derived name must be a valid
-                    // identifier (upstream BareImportError::PathInvalid,
-                    // import.rs:99-101; `as` renames escape the check).
-                    if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound)
-                    {
-                        let message = "module name would not be a valid identifier".to_string();
-                        cx.diag(edge.span, message.clone());
-                        let _ =
-                            writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
-                        continue;
-                    }
-                    let slot = match import_slots.get(&edge.target) {
-                        Some(slot) => slot.clone(),
-                        None => format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&bound)),
-                    };
-                    let existed = import_slots
-                        .insert(edge.target.clone(), slot.clone())
-                        .is_some();
-                    if !existed {
-                        state_fields.push((plan.path.clone(), slot.clone()));
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
-                        );
-                    }
-                    env.module.push((bound.clone(), Ref::Slot(slot.clone())));
+                ImportItems::Bare => {
+                    let name = fields.last().cloned().unwrap_or_else(|| root.clone());
+                    // module_list_slot verbatim (same formula as the
+                    // glue minter and the export table — see plan.rs).
+                    let slot = super::plan::module_list_slot(
+                        &plan.mod_name,
+                        root,
+                        fields,
+                        &name,
+                    );
+                    state_fields.push((plan.path.clone(), slot.clone()));
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{slot}, {expr})?;"
+                    );
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(
                         file_defines,
                         "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                        escape(&bound)
+                        escape(&name)
                     );
                 }
-                // Module rename + member list: module slot binding + member
-                // field accesses one by one (`import "base.typ" as base:
-                // ok, err`).
+                ImportItems::Rename(name) => {
+                    let slot = super::plan::module_list_slot(
+                        &plan.mod_name,
+                        root,
+                        fields,
+                        name,
+                    );
+                    state_fields.push((plan.path.clone(), slot.clone()));
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{slot}, {expr})?;"
+                    );
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                        escape(name)
+                    );
+                }
+                // Module rename + member list: double binding.
                 ImportItems::RenameList(mname, list) => {
-                    let mslot = match import_slots.get(&edge.target) {
-                        Some(slot) => slot.clone(),
-                        None => format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(mname)
-                        ),
-                    };
-                    let existed = import_slots
-                        .insert(edge.target.clone(), mslot.clone())
-                        .is_some();
-                    if !existed {
-                        state_fields.push((plan.path.clone(), mslot.clone()));
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{mslot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
-                        );
-                    }
+                    let mslot = format!(
+                        "IMPORT_{}_{}",
+                        sanitize(&plan.mod_name),
+                        sanitize(mname)
+                    );
+                    state_fields.push((plan.path.clone(), mslot.clone()));
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{mslot}, {expr})?;"
+                    );
                     env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
                     let _ = writeln!(
                         file_defines,
                         "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
                         escape(mname)
                     );
-                    for (name, rename) in list {
-                        // Dotted item (`as base: ok, util.resolve-number`):
-                        // the first segment resolves through the module
-                        // value, the remaining chain walks fields — the
-                        // same split as the plain List arm (a dotted name
-                        // used as a single field would never match).
-                        let (first, rest): (&str, &[&str]) =
-                            match name.split_once('.') {
-                                Some((f, r)) => {
-                                    (f, r.split('.').collect::<Vec<_>>().leak())
-                                }
-                                None => (name.as_str(), &[]),
-                            };
-                        let as_name =
-                            rename.clone().unwrap_or_else(|| name.clone());
-                        // `Ref::ModuleField` semantics: `expr` is the module
-                        // value, `name` the field to access (ref_value adds
-                        // that one hop) — so the chain covers all segments
-                        // except the last, which is the name.
-                        let segments: Vec<&str> =
-                            std::iter::once(first).chain(rest.iter().copied()).collect();
-                        let (field_name, chain) = (
-                            segments.last().copied().unwrap_or(first),
-                            {
-                                let mut c = format!("rt::read(&__st.{mslot})?");
-                                for seg in segments[..segments.len() - 1].iter() {
-                                    c = format!(
-                                        "rt::field(&({c}), \"{}\", engine, context, SPAN)?",
-                                        escape(seg)
-                                    );
-                                }
-                                c
-                            },
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&as_name)
                         );
-                        env.module.push((
-                            as_name.clone(),
-                            Ref::ModuleField {
-                                expr: chain.clone(),
-                                name: field_name.to_string(),
-                                file: item_file(
-                                    export_table,
-                                    &cx.slot_files,
-                                    &edge.target,
-                                    field_name,
-                                ),
-                            },
-                        ));
+                        state_fields.push((plan.path.clone(), slot.clone()));
+                        let item_expr = format!(
+                            "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                            escape(item)
+                        );
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {item_expr})?;"
+                        );
+                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
                         let _ = writeln!(
                             file_defines,
-                            "    scope.define(\"{}\", rt::field(&({chain}), \"{}\", engine, context, SPAN)?);",
-                            escape(&as_name),
-                            escape(field_name)
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&as_name)
                         );
                     }
                 }
                 ImportItems::List(list) => {
-                    for (name, rename) in list {
-                        // Dotted item (`a.b as c`): the first segment
-                        // resolves via the export table, the remaining
-                        // field chain is materialized into an independent
-                        // IMPORT slot.
-                        let (first, rest): (&str, &[&str]) = match name.split_once('.') {
+                    for (item, rename) in list {
+                        let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                        let slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize(&plan.mod_name),
+                            sanitize(&as_name)
+                        );
+                        state_fields.push((plan.path.clone(), slot.clone()));
+                        let item_expr = format!(
+                            "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
+                            escape(item)
+                        );
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{slot}, {item_expr})?;"
+                        );
+                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                            escape(&as_name)
+                        );
+                    }
+                }
+                ImportItems::Wildcard => {
+                    // Wildcard of a module-value chain: after the
+                    // static resolution chain (root → file, then field
+                    // by field through the export table to the target
+                    // file), expand by that file's export table (e.g.
+                    // `import cetz.draw: *`).
+                    let mut cur: Option<String> = None;
+                    if let Some((_, r#ref)) =
+                        env.module.iter().rev().find(|(n, _)| n == root)
+                        && let super::ctx::Ref::Slot(slot) = r#ref {
+                            cur = slot_target_file(slot, plans);
+                            if std::env::var_os("TRUST_TRACE_WILD").is_some() {
+                                eprintln!("[wild] root={root} slot={slot} → {cur:?}");
+                            }
+                        }
+                    for field in fields {
+                        let next = cur
+                            .as_ref()
+                            .and_then(|f| export_table.get(f.as_str()))
+                            .and_then(|exports| exports.get(field))
+                            .and_then(|slot| slot_target_file(slot, plans));
+                        match next {
+                            Some(f) => cur = Some(f),
+                            None => {
+                                cur = None;
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(target) = cur
+                        && let Some(exports) = export_table.get(target.as_str())
+                    {
+                        for wname in exports.keys() {
+                            if env.module.iter().any(|(n, _)| n == wname) {
+                                continue;
+                            }
+                            env.module.push((
+                                wname.clone(),
+                                Ref::ModuleField {
+                                    expr: base.clone(),
+                                    name: wname.clone(),
+                                    file: item_file(export_table, &self.slot_files, &target, wname),
+                                },
+                            ));
+                            let _ = writeln!(
+                                file_defines,
+                                "    scope.define(\"{}\", rt::field(&({base}), \"{}\", engine, context, SPAN)?);",
+                                escape(wname),
+                                escape(wname)
+                            );
+                        }
+                    } else {
+                        // Static chain unavailable: runtime layer
+                        // (in-body names resolve through the layer) +
+                        // runtime export-surface enumeration (per-name
+                        // scope bind, mirroring the original wildcard
+                        // branch).
+                        let mslot = format!(
+                            "IMPORT_{}_WILD_{}",
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(root)
+                        );
+                        state_fields.push((plan.path.clone(), mslot.clone()));
+                        let at = self.span_of(edge.span);
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{mslot}, {expr})?;"
+                        );
+                        let w = format!("__wild{}", self.fresh_id());
+                        let _ = writeln!(
+                            import_fills,
+                            "    let {w} = rt::wild_import(&({expr}), {at})?;"
+                        );
+                        env.wildcards.push(w);
+                        let _ = writeln!(
+                            file_defines,
+                            "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Internal file-target import: unknown targets fall back to the
+    /// runtime glue (the world may still resolve them at runtime; the
+    /// original file-not-found carries through); known targets emit
+    /// slot/define pairs per item shape, behind the cyclic-import guard.
+    #[allow(clippy::too_many_arguments)]
+    fn import_edge_internal(
+        &mut self,
+        edge: &super::plan::ImportEdge,
+        plan: &super::plan::FilePlan,
+        input: &PackageInput,
+        plans: &[super::plan::FilePlan],
+        export_table: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
+        io: &mut ImportEdgeIo<'_>,
+    ) {
+        let ImportEdgeIo {
+            env,
+            own,
+            state_fields,
+            import_fills,
+            file_defines,
+            import_slots,
+            binding_code: _,
+        } = io;
+        let Some(target_plan) = plans.iter().find(|p| p.path == edge.target) else {
+            // Wildcard out of range: the module value is materialized
+            // via import_external (public import, including
+            // file-not-found); runtime layer + runtime export-surface
+            // enumeration.
+            if matches!(edge.items, ImportItems::Wildcard) && !edge.raw.is_empty() {
+                let mslot = format!(
+                    "IMPORT_{}_WILD",
+                    sanitize_key(&plan.mod_name)
+                );
+                state_fields.push((plan.path.clone(), mslot.clone()));
+                let at = self.span_of(edge.span);
+                let raw_escaped = escape(&edge.raw);
+                let _ = writeln!(
+                    import_fills,
+                    "    rt::fill(&__st.{mslot}, Value::Module(rt::import_external(engine, \"{raw_escaped}\", {at})?))?;"
+                );
+                let w = format!("__wild{}", self.fresh_id());
+                let _ = writeln!(
+                    import_fills,
+                    "    let {w} = rt::wild_import(&rt::read(&__st.{mslot})?, {at})?;"
+                );
+                env.wildcards.push(w);
+                let _ = writeln!(
+                    file_defines,
+                    "    if let Some(__sc) = rt::read(&__st.{mslot})?.scope() {{ for (__k, __b) in __sc.iter() {{ scope.bind(__k.clone(), __b.clone()); }} }}"
+                );
+                return;
+            }
+            let stem = edge
+                .target
+                .rsplit('/')
+                .next()
+                .unwrap_or("m")
+                .split('.')
+                .next()
+                .unwrap_or("m")
+                .to_string();
+            import_edge_via_glue(
+                self,
+                plan,
+                edge,
+                env,
+                own,
+                state_fields,
+                import_fills,
+                file_defines,
+                Some(&stem),
+            );
+            return;
+        };
+        let target_mod = &target_plan.mod_name;
+        let exports = &export_table[edge.target.as_str()];
+        // Cyclic import: typst errors when module evaluation re-enters
+        // a file already on the route (import.rs:231-233); an edge that
+        // closes a cycle bails at its own import statement — whichever
+        // file of the cycle evaluates first reports it.
+        if super::plan::import_reaches(plans, &edge.target, &plan.path, &input.dep_entries) {
+            let message = "cyclic import".to_string();
+            self.diag(edge.span, message.clone());
+            let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+            return;
+        }
+        match &edge.items {
+            ImportItems::Bare | ImportItems::Rename(_) => {
+                let bound = match &edge.items {
+                    ImportItems::Rename(name) => name.clone(),
+                    _ => edge
+                        .target
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("m")
+                        .split('.')
+                        .next()
+                        .unwrap_or("m")
+                        .to_string(),
+                };
+                // A bare import's derived name must be a valid
+                // identifier (upstream BareImportError::PathInvalid,
+                // import.rs:99-101; `as` renames escape the check).
+                if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound)
+                {
+                    let message = "module name would not be a valid identifier".to_string();
+                    self.diag(edge.span, message.clone());
+                    let _ =
+                        writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+                    return;
+                }
+                let slot = match import_slots.get(&edge.target) {
+                    Some(slot) => slot.clone(),
+                    None => format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&bound)),
+                };
+                let existed = import_slots
+                    .insert(edge.target.clone(), slot.clone())
+                    .is_some();
+                if !existed {
+                    state_fields.push((plan.path.clone(), slot.clone()));
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{slot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                    );
+                }
+                env.module.push((bound.clone(), Ref::Slot(slot.clone())));
+                let _ = writeln!(
+                    file_defines,
+                    "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                    escape(&bound)
+                );
+            }
+            // Module rename + member list: module slot binding + member
+            // field accesses one by one (`import "base.typ" as base:
+            // ok, err`).
+            ImportItems::RenameList(mname, list) => {
+                let mslot = match import_slots.get(&edge.target) {
+                    Some(slot) => slot.clone(),
+                    None => format!(
+                        "IMPORT_{}_{}",
+                        sanitize(&plan.mod_name),
+                        sanitize(mname)
+                    ),
+                };
+                let existed = import_slots
+                    .insert(edge.target.clone(), mslot.clone())
+                    .is_some();
+                if !existed {
+                    state_fields.push((plan.path.clone(), mslot.clone()));
+                    let _ = writeln!(
+                        import_fills,
+                        "    rt::fill(&__st.{mslot}, Value::Module({target_mod}::module(&__st, engine, context)?))?;"
+                    );
+                }
+                env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
+                let _ = writeln!(
+                    file_defines,
+                    "    scope.define(\"{}\", rt::read(&__st.{mslot})?);",
+                    escape(mname)
+                );
+                for (name, rename) in list {
+                    // Dotted item (`as base: ok, util.resolve-number`):
+                    // the first segment resolves through the module
+                    // value, the remaining chain walks fields — the
+                    // same split as the plain List arm (a dotted name
+                    // used as a single field would never match).
+                    let (first, rest): (&str, &[&str]) =
+                        match name.split_once('.') {
                             Some((f, r)) => {
                                 (f, r.split('.').collect::<Vec<_>>().leak())
                             }
                             None => (name.as_str(), &[]),
                         };
-                        let Some(slot) = exports.get(first) else {
-                            // Upstream reports the unresolved component as an
-                            // eval error (import.rs:121); the detailed note
-                            // stays in the translator's degradation log.
-                            cx.diag(edge.span, format!("`{}` does not export `{first}`", edge.target));
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::bail_value(engine, \"unresolved import\")?;"
-                            );
-                            continue;
-                        };
-                        let as_name = rename.clone().unwrap_or_else(|| name.clone());
-                        if rest.is_empty() {
-                            env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                                escape(&as_name)
-                            );
-                        } else {
-                            let dot_slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize_key(&plan.mod_name),
-                                sanitize_key(&as_name)
-                            );
-                            state_fields.push((plan.path.clone(), dot_slot.clone()));
-                            let mut chain = format!("rt::read(&__st.{slot})?");
-                            for field in rest {
-                                chain = format!(
-                                    "rt::field(&({chain}), \"{}\", engine, context, SPAN)?",
-                                    escape(field)
+                    let as_name =
+                        rename.clone().unwrap_or_else(|| name.clone());
+                    // `Ref::ModuleField` semantics: `expr` is the module
+                    // value, `name` the field to access (ref_value adds
+                    // that one hop) — so the chain covers all segments
+                    // except the last, which is the name.
+                    let segments: Vec<&str> =
+                        std::iter::once(first).chain(rest.iter().copied()).collect();
+                    let (field_name, chain) = (
+                        segments.last().copied().unwrap_or(first),
+                        {
+                            let mut c = format!("rt::read(&__st.{mslot})?");
+                            for seg in segments[..segments.len() - 1].iter() {
+                                c = format!(
+                                    "rt::field(&({c}), \"{}\", engine, context, SPAN)?",
+                                    escape(seg)
                                 );
                             }
-                            let _ = writeln!(
-                                import_fills,
-                                "    rt::fill(&__st.{dot_slot}, {chain})?;"
-                            );
-                            env.module.push((as_name.clone(), Ref::Slot(dot_slot.clone())));
-                            let _ = writeln!(
-                                file_defines,
-                                "    scope.define(\"{}\", rt::read(&__st.{dot_slot})?);",
-                                escape(&as_name)
-                            );
-                        }
-                    }
+                            c
+                        },
+                    );
+                    env.module.push((
+                        as_name.clone(),
+                        Ref::ModuleField {
+                            expr: chain.clone(),
+                            name: field_name.to_string(),
+                            file: item_file(
+                                export_table,
+                                &self.slot_files,
+                                &edge.target,
+                                field_name,
+                            ),
+                        },
+                    ));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::field(&({chain}), \"{}\", engine, context, SPAN)?);",
+                        escape(&as_name),
+                        escape(field_name)
+                    );
                 }
-                ImportItems::Wildcard => {
-                    for (name, slot) in exports {
-                        if env.module.iter().any(|(n, _)| n == name) {
-                            continue;
+            }
+            ImportItems::List(list) => {
+                for (name, rename) in list {
+                    // Dotted item (`a.b as c`): the first segment
+                    // resolves via the export table, the remaining
+                    // field chain is materialized into an independent
+                    // IMPORT slot.
+                    let (first, rest): (&str, &[&str]) = match name.split_once('.') {
+                        Some((f, r)) => {
+                            (f, r.split('.').collect::<Vec<_>>().leak())
                         }
-                        env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                        None => (name.as_str(), &[]),
+                    };
+                    let Some(slot) = exports.get(first) else {
+                        // Upstream reports the unresolved component as an
+                        // eval error (import.rs:121); the detailed note
+                        // stays in the translator's degradation log.
+                        self.diag(edge.span, format!("`{}` does not export `{first}`", edge.target));
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::bail_value(engine, \"unresolved import\")?;"
+                        );
+                        continue;
+                    };
+                    let as_name = rename.clone().unwrap_or_else(|| name.clone());
+                    if rest.is_empty() {
+                        env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
                         let _ = writeln!(
                             file_defines,
                             "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                            escape(name)
+                            escape(&as_name)
+                        );
+                    } else {
+                        let dot_slot = format!(
+                            "IMPORT_{}_{}",
+                            sanitize_key(&plan.mod_name),
+                            sanitize_key(&as_name)
+                        );
+                        state_fields.push((plan.path.clone(), dot_slot.clone()));
+                        let mut chain = format!("rt::read(&__st.{slot})?");
+                        for field in rest {
+                            chain = format!(
+                                "rt::field(&({chain}), \"{}\", engine, context, SPAN)?",
+                                escape(field)
+                            );
+                        }
+                        let _ = writeln!(
+                            import_fills,
+                            "    rt::fill(&__st.{dot_slot}, {chain})?;"
+                        );
+                        env.module.push((as_name.clone(), Ref::Slot(dot_slot.clone())));
+                        let _ = writeln!(
+                            file_defines,
+                            "    scope.define(\"{}\", rt::read(&__st.{dot_slot})?);",
+                            escape(&as_name)
                         );
                     }
+                }
+            }
+            ImportItems::Wildcard => {
+                for (name, slot) in exports {
+                    if env.module.iter().any(|(n, _)| n == name) {
+                        continue;
+                    }
+                    env.module.push((name.clone(), Ref::Slot(slot.clone())));
+                    let _ = writeln!(
+                        file_defines,
+                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                        escape(name)
+                    );
                 }
             }
         }
@@ -2577,3 +2679,15 @@ fn nest_state_access(text: &str, paths: &std::collections::HashMap<String, Strin
     out.push_str(&text[pos..]);
     out
 }
+/// Mutable emission targets shared by the import-edge processors
+/// (destructured into the original local names inside each processor).
+struct ImportEdgeIo<'a> {
+    env: &'a mut Env,
+    own: &'a [(String, String)],
+    state_fields: &'a mut Vec<(String, String)>,
+    import_fills: &'a mut String,
+    file_defines: &'a mut String,
+    import_slots: &'a mut std::collections::HashMap<String, String>,
+    binding_code: &'a mut String,
+}
+

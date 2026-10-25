@@ -305,11 +305,19 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     &mut g_bound,
                     &mut names,
                 );
+                // A body with `import x: *` may bind pending names itself at
+                // call time (typst leaves them uncaptured); skip the G_ slot
+                // so body refs resolve through the body's own layers.
+                let wild_body =
+                    super::captures::has_wildcard_import(closure.body().to_untyped());
                 for (gname, g_in_math) in names {
                     if !g_seen.insert(gname.clone()) {
                         continue;
                     }
                     if env.module.iter().any(|(n, _)| *n == gname) {
+                        continue;
+                    }
+                    if wild_body {
                         continue;
                     }
                     let gslot = format!("G_{slot}_{}", sanitize_key(&gname));

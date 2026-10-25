@@ -487,6 +487,17 @@ fn assemble_package_world(
     format!("IMPORT_{}_{}", p.mod_name, bound),
     edge.target.clone(),
     );
+    if let Some((root, fields)) = &edge.module_access {
+    let via_bound = match &edge.items {
+    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
+    ImportItems::Bare => fields.last().cloned().unwrap_or_else(|| root.clone()),
+    _ => bound.clone(),
+    };
+    idx.insert(
+    super::plan::module_list_slot(&p.mod_name, root, fields, &via_bound),
+    edge.target.clone(),
+    );
+    }
     }
     }
     // Backfill: LIST/RenameList item slots and cross-file chained
@@ -647,11 +658,19 @@ return;
                         &mut names,
                     );
                     let mut g_seen = std::collections::HashSet::new();
+                    // A body with `import x: *` may bind pending names itself
+                    // at call time (typst leaves them uncaptured); skip the
+                    // G_ slot so body refs resolve through the body's layers.
+                    let wild_body =
+                        super::captures::has_wildcard_import(closure.body().to_untyped());
                 for (gname, g_in_math) in names {
                         if !g_seen.insert(gname.clone()) {
                             continue;
                         }
                         if env2.module.iter().any(|(n, _)| *n == gname) {
+                            continue;
+                        }
+                        if wild_body {
                             continue;
                         }
                         let gslot = format!("G_{slot}_{}", sanitize_key(&gname));
@@ -1616,7 +1635,20 @@ fn slot_target_file(
                     _ => continue,
                 }
             };
-            if format!("IMPORT_{}_{}", plan.mod_name, bound) == *slot {
+            let via = edge.module_access.as_ref().map(|(root, fields)| {
+                let via_bound = match &edge.items {
+                    super::plan::ImportItems::Rename(name)
+                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
+                    super::plan::ImportItems::Bare => {
+                        fields.last().cloned().unwrap_or_else(|| root.clone())
+                    }
+                    _ => bound.clone(),
+                };
+                super::plan::module_list_slot(&plan.mod_name, root, fields, &via_bound)
+            });
+            if format!("IMPORT_{}_{}", plan.mod_name, bound) == *slot
+                || via.as_deref() == Some(slot)
+            {
                 return Some(edge.target.clone());
             }
         }
@@ -2022,10 +2054,13 @@ impl Ctx {
                 match &edge.items {
                     ImportItems::Bare => {
                         let name = fields.last().cloned().unwrap_or_else(|| root.clone());
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&name)
+                        // module_list_slot verbatim (same formula as the
+                        // glue minter and the export table — see plan.rs).
+                        let slot = super::plan::module_list_slot(
+                            &plan.mod_name,
+                            &root,
+                            &fields,
+                            &name,
                         );
                         state_fields.push((plan.path.clone(), slot.clone()));
                         let _ = writeln!(
@@ -2040,10 +2075,11 @@ impl Ctx {
                         );
                     }
                     ImportItems::Rename(name) => {
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(name)
+                        let slot = super::plan::module_list_slot(
+                            &plan.mod_name,
+                            &root,
+                            &fields,
+                            name,
                         );
                         state_fields.push((plan.path.clone(), slot.clone()));
                         let _ = writeln!(

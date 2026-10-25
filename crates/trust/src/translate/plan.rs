@@ -7,7 +7,7 @@
 
 use typst_syntax::ast;
 
-use super::naming::{sanitize, sanitize_key};
+use super::naming::sanitize_key;
 
 /// One source file's translation plan: mod name, top-level bindings
 /// (name → slot), and import edges.
@@ -213,28 +213,21 @@ pub(super) fn build_export_table(
                             ImportItems::Rename(name) => name.clone(),
                             _ => fields.last().cloned().unwrap_or_else(|| root.clone()),
                         };
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize_key(&plan.mod_name),
-                            sanitize_key(&bound)
-                        );
+                        // module_list_slot (chain-discriminated) verbatim:
+                        // the glue/static minters use the same formula — a
+                        // short-name entry here made downstream wildcard
+                        // expansions reference a slot nobody minted.
+                        let slot = module_list_slot(&plan.mod_name, root, fields, &bound);
                         exports.entry(bound).or_insert(slot);
                     }
                     ImportItems::RenameList(mname, list) => {
                         exports.entry(mname.clone()).or_insert_with(|| {
-                            format!(
-                                "IMPORT_{}_{}",
-                                sanitize_key(&plan.mod_name),
-                                sanitize_key(mname)
-                            )
+                            module_list_slot(&plan.mod_name, root, fields, mname)
                         });
                         for (item, rename) in list {
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = format!(
-                                "IMPORT_{}_{}",
-                                sanitize_key(&plan.mod_name),
-                                sanitize_key(&as_name)
-                            );
+                            let slot =
+                                module_list_slot(&plan.mod_name, root, fields, &as_name);
                             exports.entry(as_name).or_insert(slot);
                         }
                     }

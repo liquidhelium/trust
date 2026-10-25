@@ -278,16 +278,7 @@ impl Ctx {
                     None => {
                         let name = match import.new_name() {
                             Some(new_name) => new_name.as_str().to_string(),
-                            None => source
-                                .to_untyped()
-                                .full_text()
-                                .rsplit('.')
-                                .next()
-                                .unwrap_or("m")
-                                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                                .next()
-                                .unwrap_or("m")
-                                .to_string(),
+                            None => super::captures::bare_import_bound_name(source),
                         };
                         let rust = bind_local(&mut env, &name);
                         let _ = writeln!(out, "    let mut {rust} = {module_expr};");
@@ -471,9 +462,18 @@ impl Ctx {
         // Locality is decided before module bindings (captured names bind
         // into the closure environment as locals; mirrors typst's
         // inside-out lexical layers). Captured locals (mirroring the
-        // read-only `Binding::capture` marker) form their own class.
+        // read-only `Binding::capture` marker) form their own class —
+        // **only the current closure level's frame is consulted**: an inner
+        // param/let of the same name shadows an outer capture and is
+        // writable (mirrors `Scopes::get_mut` finding the innermost Normal
+        // binding; crossing frames made an inner param sharing an outer
+        // capture's name report a bogus read-only error).
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| *n == root) {
-            if self.captured_locals.iter().any(|f| f.contains(rust)) {
+            if self
+                .captured_locals
+                .last()
+                .is_some_and(|f| f.contains(rust))
+            {
                 return Place::Captured;
             }
             return Place::Local { root: rust.clone(), path: segs };

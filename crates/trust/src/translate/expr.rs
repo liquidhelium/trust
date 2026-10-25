@@ -1048,12 +1048,22 @@ impl Ctx {
         let mut names: Vec<(String, bool)> = Vec::new();
         collect_idents(closure.to_untyped(), &mut Vec::new(), &mut names);
         let (mut pairs, pending) = self.capture_pairs(&names, env);
-        for (name, in_math) in &pending {
-            let resolver = if *in_math { "capture_math_opt" } else { "capture_code_opt" };
-            pairs.push((
-                name.clone(),
-                format!("rt::{resolver}(engine, \"{}\")?", escape(name)),
-            ));
+        // Names invisible at creation time normally take the pending
+        // protocol (capture_code_opt; None reports unknown variable at call
+        // time). A body containing `import x: *` may bind them itself at
+        // call time — typst leaves such names uncaptured and resolves them
+        // through the body's own scope; dropping them routes body refs
+        // through the body's runtime wildcard layer (a full miss still
+        // reports unknown variable, same error and timing as typst).
+        let wild_body = super::captures::has_wildcard_import(closure.body().to_untyped());
+        if !wild_body {
+            for (name, in_math) in &pending {
+                let resolver = if *in_math { "capture_math_opt" } else { "capture_code_opt" };
+                pairs.push((
+                    name.clone(),
+                    format!("rt::{resolver}(engine, \"{}\")?", escape(name)),
+                ));
+            }
         }
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let cap_names: Vec<String> = pairs.iter().map(|(n, _)| n.clone()).collect();
@@ -1428,7 +1438,7 @@ impl Ctx {
             let mut items: Vec<String> = Vec::new();
             let mut total: usize = 0;
             let mut run: Option<(&'static str, u32)> = None;
-            let mut flush = |run: &mut Option<(&'static str, u32)>,
+            let flush = |run: &mut Option<(&'static str, u32)>,
                              items: &mut Vec<String>,
                              total: &mut usize| {
                 if let Some((kind, n)) = run.take() {

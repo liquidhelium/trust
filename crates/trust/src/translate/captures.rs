@@ -43,6 +43,49 @@
 
 use typst_syntax::ast::{self, AstNode};
 
+/// The name a bare `import <source>` binds (mirrors typst-eval import.rs's
+/// stem/package-name derivation, statically): a Str source that parses as a
+/// package spec binds the package name; any other Str source binds the file
+/// stem; a non-Str source (dotted path / call result) binds its last dotted
+/// segment.
+pub(super) fn bare_import_bound_name(source: ast::Expr) -> String {
+    if let ast::Expr::Str(s) = source {
+        let raw = s.get();
+        if let Some(rest) = raw.strip_prefix('@') {
+            // `@namespace/name:version` binds the package name.
+            if let Some(name) = rest.split('/').next_back().and_then(|n| n.split(':').next()) {
+                return name.to_string();
+            }
+        }
+        let file = raw.rsplit('/').next().unwrap_or(&raw);
+        return file.split('.').next().unwrap_or(file).to_string();
+    }
+    source
+        .to_untyped()
+        .full_text()
+        .rsplit('.')
+        .next()
+        .unwrap_or("m")
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("m")
+        .to_string()
+}
+
+/// Whether a subtree contains a wildcard module import (`import x: *`).
+/// Names such an import may bind are unknowable at translation time; capture
+/// routing must leave those names to the body's own runtime layers (mirrors
+/// typst: an unresolvable name is simply not captured, and the body's
+/// in-scope import binds it at call time).
+pub(super) fn has_wildcard_import(node: &typst_syntax::SyntaxNode) -> bool {
+    if let Some(import) = node.cast::<ast::ModuleImport>() {
+        if matches!(import.imports(), Some(ast::Imports::Wildcard)) {
+            return true;
+        }
+    }
+    node.children().any(has_wildcard_import)
+}
+
 pub(super) fn collect_idents(
     node: &typst_syntax::SyntaxNode,
     bound: &mut Vec<String>,
@@ -116,15 +159,46 @@ pub(super) fn collect_idents(
             // Mirrors call.rs:823-830: the source expression is traversed
             // as usual; names of list imports are internal bindings (bound
             // at call time by the in-body import itself; bare/rename get no
-            // treatment, same as the original).
+            // treatment, same as the original — the original cannot know a
+            // bare import's runtime name and so leaves its body references
+            // as free names, silently dropped when the creation-time lookup
+            // misses. We derive the bare name statically (Str sources carry
+            // the path), which matches the runtime derivation and keeps the
+            // body references non-free).
             let Some(import) = node.cast::<ast::ModuleImport>() else {
                 return;
             };
             collect_idents(import.source().to_untyped(), bound, out);
-            if let Some(ast::Imports::Items(items)) = import.imports() {
-                for item in items.iter() {
-                    bound.push(item.bound_name().as_str().to_string());
+            match import.imports() {
+                Some(ast::Imports::Items(items)) => {
+                    for item in items.iter() {
+                        bound.push(item.bound_name().as_str().to_string());
+                    }
                 }
+                None => {
+                    if let Some(new_name) = import.new_name() {
+                        bound.push(new_name.as_str().to_string());
+                    } else {
+                        bound.push(bare_import_bound_name(import.source()));
+                    }
+                }
+                Some(ast::Imports::Wildcard) => {}
+            }
+        }
+        K::DestructAssignment => {
+            // The pattern of `(a, b) = value` holds no references: dict keys
+            // are keys, not idents, and the sub-pattern identifiers are
+            // bindings. The original walks the pattern through its catch-all
+            // (keys become capture *attempts* that miss silently; a hit only
+            // creates an unused capture). We bind the pattern's names and
+            // skip the walk: observable behavior matches (an unused capture
+            // is invisible), and the keys never pollute the free set.
+            let Some(assignment) = node.cast::<ast::DestructAssignment>() else {
+                return;
+            };
+            collect_idents(assignment.value().to_untyped(), bound, out);
+            for ident in assignment.pattern().bindings() {
+                bound.push(ident.as_str().to_string());
             }
         }
         K::ForLoop => {
@@ -332,5 +406,52 @@ mod tests {
             "math field names must not be collected: {out:?}"
         );
         assert!(out.iter().any(|(n, _)| n == "arrow"), "target names must be collected: {out:?}");
+    }
+
+    #[test]
+    fn destruct_assignment_keys_not_collected() {
+        // cetz `draw.scope` shape: the dict key `bounds` in a destructuring
+        // assignment is a key, not a reference — collecting it made the
+        // closure carry a bogus pending capture that errored "unknown
+        // variable: bounds" at call time.
+        let src = "#let scope(body) = (ctx => { (ctx: group-ctx, drawables, bounds: _) = process.many(group-ctx, body) })";
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.iter().any(|(n, _)| n == "bounds"),
+            "destructuring-assignment dict keys must not be collected: {out:?}"
+        );
+        assert!(
+            out.iter().any(|(n, _)| n == "process") && out.iter().any(|(n, _)| n == "group-ctx"),
+            "value-side references must still be collected: {out:?}"
+        );
+    }
+
+    #[test]
+    fn bare_string_import_binds_file_stem() {
+        // cetz-plot `setup-axes` shape: an in-body `import "/src/axes.typ"`
+        // binds `axes` (file stem); previously the derivation took the
+        // extension and bound `typ`, leaving body references free.
+        let src = "#let f() = { import \"/src/axes.typ\"; axes.prepare-axis() }";
+        let root = typst_syntax::parse_code(src);
+        let mut out = Vec::new();
+        collect_idents(&root, &mut Vec::new(), &mut out);
+        assert!(
+            !out.iter().any(|(n, _)| n == "axes"),
+            "in-body bare import must bind its file stem: {out:?}"
+        );
+        let bare = typst_syntax::parse_code("\"/src/axes.typ\"")
+            .children()
+            .find_map(|c| c.cast::<typst_syntax::ast::Expr>())
+            .map(bare_import_bound_name)
+            .expect("expr");
+        assert_eq!(bare, "axes");
+        let pkg = typst_syntax::parse_code("\"@preview/cetz:0.5.2\"")
+            .children()
+            .find_map(|c| c.cast::<typst_syntax::ast::Expr>())
+            .map(bare_import_bound_name)
+            .expect("expr");
+        assert_eq!(pkg, "cetz");
     }
 }

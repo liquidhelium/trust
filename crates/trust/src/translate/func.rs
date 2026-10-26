@@ -136,6 +136,7 @@ impl Ctx {
             );
         }
         let _ = writeln!(body, "    rt::finish(__args, span)?;");
+        let _ = writeln!(body, "    let mut __flow: Option<rt::FlowEvent> = None;");
 
         // Bare-expression function body (let-expression hoisting shell;
         // block bodies re-scan themselves in block()).
@@ -147,7 +148,13 @@ impl Ctx {
         } else {
             format!("{{ {} {value} }}", hoist)
         };
-        let _ = writeln!(body, "    Ok({value})");
+        // Function end (mirrors typst-eval's call-boundary `match vm.flow`):
+        // Return(Some(v)) yields v, Return(None) the body partial, and the
+        // flag never crosses the frame.
+        let _ = writeln!(
+            body,
+            "    {{ let __outf = {{ {value} }}; match __flow.take() {{ Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) }} }}"
+        );
 
         // Prologue: state is unpacked from the first positional argument
         // (the stub always forwards it; mirrors the native-closure scheme
@@ -286,6 +293,7 @@ pub(super) fn gen_closure_fn(
         );
     }
     let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
+    let _ = writeln!(params_code, "    let mut __flow: Option<rt::FlowEvent> = None;");
 
     // Bare-expression body hoisting shell (same as gen_function; block
     // bodies re-scan themselves in block()).
@@ -297,7 +305,9 @@ pub(super) fn gen_closure_fn(
     } else {
         format!("{{ {} {value} }}", hoist)
     };
-    let body_code = format!("    Ok({value})\n");
+    let body_code = format!(
+        "    {{ let __outf = {{ {value} }}; match __flow.take() {{ Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) }} }}\n"
+    );
 
     // has_st decision (flags set during body/parameter code generation);
     // restore the outer counter and leave this closure's decision for the

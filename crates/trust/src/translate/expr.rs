@@ -296,13 +296,12 @@ impl Ctx {
                     None => "Value::None".into(),
                 };
                 let at = self.span_of(cond.span());
-                format!("if rt::boolean({condition}, {at})? {{ {then} }} else {{ {otherwise} }}")
+                format!(
+                    "{{ let __iv = if rt::boolean({condition}, {at})? {{ {then} }} else {{ {otherwise} }}; if let Some(__f) = &mut __flow {{ __f.mark_conditional(); }} __iv }}"
+                )
             }
             ast::Expr::WhileLoop(while_loop) => {
                 let condition = self.expr(while_loop.condition(), env);
-                self.in_loop += 1;
-                let body = self.expr(while_loop.body(), env);
-                self.in_loop -= 1;
                 let cond_at = self.span_of(while_loop.condition().span());
                 let join_at = self.span_of(while_loop.body().span());
                 let loop_at = self.span_of(while_loop.span());
@@ -323,15 +322,34 @@ impl Ctx {
                 // Iteration guard (mirrors the original MAX_ITERATIONS:
                 // exceeding it reports "loop seems to be infinite" instead
                 // of hanging).
+                //
+                // VM-flow model (mirrors typst-eval flow.rs WhileLoop): the
+                // loop saves+clears the flag on entry, joins each body
+                // value, and checks the flag per iteration — Break/
+                // Continue are consumed here, Return breaks with the flag
+                // left set for the function boundary.
+                let acc = format!("__loopout{}", self.fresh_id());
+                let saved = format!("__fsaved{}", self.fresh_id());
+                self.in_loop += 1;
+                let body = self.expr(while_loop.body(), env);
+                self.in_loop -= 1;
                 format!(
-                    "{{ let mut __out = Value::None; let mut __guard = 0usize;\n  \
+                    "{{ let {saved} = __flow.take(); let mut {acc} = Value::None; let mut __guard = 0usize;\n  \
                      while rt::boolean({condition}, {cond_at})? {{\n  \
                      \x20   if __guard >= rt::MAX_ITERATIONS {{ bail!({loop_at}, \"loop seems to be infinite\"); }}\n  \
                      \x20   __guard += 1usize;\n  \
                      \x20   let __v = {body};\n  \
-                     \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
+                     \x20   {acc} = rt::join({acc}, __v, {join_at})?;\n  \
+                     \x20   match &__flow {{\n  \
+                     \x20       Some(rt::FlowEvent::Break) => {{ __flow = None; break; }}\n  \
+                     \x20       Some(rt::FlowEvent::Continue) => __flow = None,\n  \
+                     \x20       Some(rt::FlowEvent::Return(..)) => break,\n  \
+                     \x20       None => {{}}\n  \
+                     \x20   }}\n  \
                      }}\n  \
-                     __out }}"
+                     if {saved}.is_some() {{ __flow = {saved}; }}\n  \
+                     if let Some(__f) = &mut __flow {{ __f.mark_conditional(); }}\n  \
+                     {acc} }}"
                 )
             }
             ast::Expr::FuncReturn(func_return) => {
@@ -348,11 +366,18 @@ impl Ctx {
                     self.diag(func_return.span(), message.clone());
                     return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
-                let value = match func_return.body() {
-                    Some(expr) => self.expr(expr, env),
-                    None => "Value::None".into(),
+                // `return` sets the flag (mirrors typst-eval FlowReturn):
+                // the statement completes, the boundary check stops the
+                // block, and the function end converts Return(Some(v)) to
+                // v / Return(None) to the body partial.
+                let at = self.span_of(func_return.span());
+                let payload = match func_return.body() {
+                    Some(expr) => format!("Some({})", self.expr(expr, env)),
+                    None => "None".to_string(),
                 };
-                format!("return Ok({value}) /* never */")
+                format!(
+                    "{{ __flow = Some(rt::FlowEvent::Return({payload}, {at}, false)); Value::None }}"
+                )
             }
             ast::Expr::LoopBreak(lb) => {
                 // break outside a loop (mirrors typst-eval's semantic
@@ -363,7 +388,11 @@ impl Ctx {
                     self.diag(lb.span(), message.clone());
                     return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
-                "{ break; Value::None }".into()
+                // Flag-set only (mirrors typst-eval FlowBreak): the
+                // enclosing statement completes, the next statement
+                // boundary stops the block, and the loop consumes the
+                // event at its iteration boundary.
+                "{ __flow = Some(rt::FlowEvent::Break); Value::None }".into()
             }
             ast::Expr::LoopContinue(lc) => {
                 if self.in_loop == 0 {
@@ -371,7 +400,7 @@ impl Ctx {
                     self.diag(lc.span(), message.clone());
                     return format!("{{ rt::bail_value(engine, {:?})? }}", message);
                 }
-                "{ continue; Value::None }".into()
+                "{ __flow = Some(rt::FlowEvent::Continue); Value::None }".into()
             }
             ast::Expr::ForLoop(for_loop) => {
                 let iterable = self.expr(for_loop.iterable(), env);
@@ -402,6 +431,8 @@ impl Ctx {
                     }
                 };
                 self.in_loop += 1;
+                let acc = format!("__loopout{}", self.fresh_id());
+                let saved = format!("__fsaved{}", self.fresh_id());
                 let body = self.expr(for_loop.body(), &mut body_env);
                 self.in_loop -= 1;
                 let iter_at = self.span_of(for_loop.iterable().span());
@@ -420,15 +451,23 @@ impl Ctx {
                     _ => String::new(),
                 };
                 format!(
-                    "{{ let mut __out = Value::None;\n  \
+                    "{{ let {saved} = __flow.take(); let mut {acc} = Value::None;\n  \
                      let {iter_tmp} = {iterable};\n  \
                      {destructure_check}\n  \
                      for {binder} in rt::iter_values(&{iter_tmp}, {iter_at})? {{\n  \
                      \x20   {pattern_code}\n  \
                      \x20   let __v = {body};\n  \
-                     \x20   __out = rt::join(__out, __v, {join_at})?;\n  \
+                     \x20   {acc} = rt::join({acc}, __v, {join_at})?;\n  \
+                     \x20   match &__flow {{\n  \
+                     \x20       Some(rt::FlowEvent::Break) => {{ __flow = None; break; }}\n  \
+                     \x20       Some(rt::FlowEvent::Continue) => __flow = None,\n  \
+                     \x20       Some(rt::FlowEvent::Return(..)) => break,\n  \
+                     \x20       None => {{}}\n  \
+                     \x20   }}\n  \
                      }}\n  \
-                     __out }}"
+                     if {saved}.is_some() {{ __flow = {saved}; }}\n  \
+                     if let Some(__f) = &mut __flow {{ __f.mark_conditional(); }}\n  \
+                     {acc} }}"
                 )
             }
             // math/Equation: large and essentially never a performance
@@ -635,7 +674,13 @@ impl Ctx {
             ast::LetBindingKind::Closure(name) => {
                 let (_, rust) = hoisted[0].clone();
                 env.locals.push((name.as_str().to_string(), rust.clone()));
-                format!("{{ {rust} = {init}; Value::None }}")
+                // A set flow flag skips the binding entirely (mirrors
+                // binding.rs's post-init `vm.flow.is_some()` early return:
+                // `let (a, b) = if c { .. } else { continue }` must not
+                // destructure the partial none).
+                format!(
+                    "{{ if __flow.is_some() {{ Value::None }} else {{ {rust} = {init}; Value::None }} }}"
+                )
             }
             ast::LetBindingKind::Normal(pattern) => {
                 // Pattern names first all point at the hoisted slots (the
@@ -645,7 +690,10 @@ impl Ctx {
                     env.locals.push((name.clone(), rust.clone()));
                 }
                 let stmts = self.destructure(pattern, init, env, true);
-                format!("{{ {} Value::None }}", stmts)
+                format!(
+                    "{{ if __flow.is_some() {{ Value::None }} else {{ {} Value::None }} }}",
+                    stmts
+                )
             }
         }
     }
@@ -1634,6 +1682,16 @@ fn pending_list(names: &[(String, bool)]) -> String {
 fn can_diverge(expr: &typst_syntax::SyntaxNode) -> bool {
     matches!(expr.kind(), SyntaxKind::Break | SyntaxKind::Return)
         || expr.children().any(can_diverge)
+}
+
+/// Whether a subtree contains any flow statement (break / continue /
+/// return) — blocks containing one must materialize their join accumulator
+/// for the flow-carry chain (see `Ctx::flow_blocks`).
+pub(super) fn has_flow_event(expr: &typst_syntax::SyntaxNode) -> bool {
+    matches!(
+        expr.kind(),
+        SyntaxKind::Break | SyntaxKind::Continue | SyntaxKind::Return
+    ) || expr.children().any(has_flow_event)
 }
 
 /// Scan the names bound by expression-position `let` (for hoisted-slot

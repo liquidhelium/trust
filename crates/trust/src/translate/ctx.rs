@@ -225,8 +225,6 @@ impl Ctx {
         format!("sp({idx})")
     }
 
-    /// Register a source span and use its constant name to fill the `{at}`
-    /// placeholder in a format string.
     pub(super) fn span_fmt(&mut self, span: typst_syntax::Span, fmt: String) -> String {
         let at = self.span_of(span);
         fmt.replace("{at}", &at)

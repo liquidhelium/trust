@@ -1111,7 +1111,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // scope/FileId/Module construction (ident passthrough keeps the
         // pasted bodies hygiene-compatible with their own locals).
         let eval_body_src = format!(
-            "let _ = (&*engine, context);\n{parse_guard_src}{import_fills}{binding_code}        Ok(())"
+            "let _ = (&*engine, context);\n    let mut __flow: Option<rt::FlowEvent> = None;\n    let _ = &__flow;\n{parse_guard_src}{import_fills}{binding_code}        Ok(())"
         );
         let body_slot_name = format!("BODY_{}", plan.mod_name);
         let module_body_src = format!(

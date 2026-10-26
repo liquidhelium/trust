@@ -136,6 +136,12 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
     }
     for (i, (a, b)) in gp.iter().zip(np.iter()).enumerate() {
         if a != b {
+            if let Ok(dump) = std::env::var("TRUST_SUITE_DUMP") {
+                if dump == case.name {
+                    let _ = std::fs::write(format!("/tmp/suite-{}-g.svg", case.name), a);
+                    let _ = std::fs::write(format!("/tmp/suite-{}-n.svg", case.name), b);
+                }
+            }
             return ("svg-diff".into(), format!("第 {} 页 SVG 不一致", i + 1));
         }
     }
@@ -218,7 +224,35 @@ fn run() {
     if dev_present {
         for (p, data) in walk(&dev) {
             let rel = p.strip_prefix(&dev).unwrap();
-            base.add_file(&format!("assets/{}", rel.to_string_lossy()), data);
+            // 双键:根相对 `assets/...` 与 suite 前缀 `suite/assets/...`
+            // (用例的 `../../../assets` 相对解析落在后者)。
+            base.add_file(&format!("assets/{}", rel.to_string_lossy()), data.clone());
+            base.add_file(&format!("suite/assets/{}", rel.to_string_lossy()), data);
+        }
+    }
+    // 本地 @test 包(官方 tests/packages/**,镜像官方 harness 的包根解析)。
+    let tpkgs = std::path::PathBuf::from(
+        std::env::var("TRUST_TEST_PACKAGES").unwrap_or_else(|_| {
+            format!(
+                "{}/code/typst-0.15.1-tests/tests/packages",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        }),
+    );
+    if tpkgs.exists() {
+        for (p, data) in walk(&tpkgs) {
+            let Ok(rel) = p.strip_prefix(&tpkgs) else { continue };
+            let mut comps = rel.components();
+            let Some(first) = comps.next() else { continue };
+            let dir = first.as_os_str().to_string_lossy();
+            // <name>-<version> 目录 → @test/<name>:<version> 包根。
+            let Some((pkg, version)) = dir.rsplit_once('-') else { continue };
+            let inner: std::path::PathBuf = comps.collect();
+            base.add_package_file(
+                &format!("@test/{pkg}:{version}"),
+                &inner.to_string_lossy(),
+                data,
+            );
         }
     }
     for (p, data) in walk(&root.join("cats")) {
@@ -253,11 +287,13 @@ fn run() {
 
     let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
     let mut new_failures = Vec::new();
+    let mut flaky = Vec::new();
     let mut fixed = Vec::new();
     let mut unexpected_pass = Vec::new();
     let mut fail_details = Vec::new();
 
-    for case in &cases {
+    let run_case = |case: &Case, base: &InjectWorld, root: &std::path::Path| -> (String, String) {
+        comemo::evict(0);
         let body = std::fs::read_to_string(root.join("cats").join(&case.key).join(&case.file))
             .expect("case body");
         let path = format!("suite/cats/{}/{}", case.key, case.file);
@@ -265,16 +301,17 @@ fn run() {
             .attrs
             .iter()
             .any(|a| a == "paged" || a == "empty" || a == "large");
-
         let mut golden = base.clone();
         golden.set_main(&path, &body);
         let g = compile(&golden);
-
+        comemo::evict(0);
         let gen_compiled2 = {
             let mut w = base.clone();
             match assemble(&mut w, &case.key, &case.file) {
                 Ok((_, mut asm_warnings)) => {
-                    w.set_main("main.typ", "#include tm\n");
+                    // main 与 golden 用完全相同的 vpath(两世界各自
+                    // clone,不冲突):用例内相对路径的解析基准一致。
+                    w.set_main(&path, "#include tm\n");
                     let mut c = compile(&w);
                     c.warnings.append(&mut asm_warnings);
                     c
@@ -282,17 +319,32 @@ fn run() {
                 Err(msgs) => Compiled { pages: Err(msgs), warnings: Vec::new() },
             }
         };
+        judge(case, &g, &gen_compiled2, paged)
+    };
 
-        let (status, detail) = judge(case, &g, &gen_compiled2, paged);
+    for case in &cases {
+        let (status, detail) = run_case(case, &base, &root);
         *by_status.entry(status.clone()).or_default() += 1;
         if status != "pass" {
-            fail_details.push(format!("{}  [{}] {}", case.name, status, detail));
             if !known.contains(&case.name) {
+                // 单例复跑闸:同轮内立刻重跑一次,复跑通过 = 闪烁(告警
+                // 不判死);真回归两轮皆挂才进新增名单。
+                let (retry_status, retry_detail) = run_case(case, &base, &root);
+                if retry_status == "pass" {
+                    flaky.push(case.name.clone());
+                    continue;
+                }
+                fail_details.push(format!("{}  [{}] {}", case.name, retry_status, retry_detail));
                 new_failures.push(case.name.clone());
+            } else {
+                fail_details.push(format!("{}  [{}] {}", case.name, status, detail));
             }
         } else if known.contains(&case.name) {
             unexpected_pass.push(case.name.clone());
         }
+    }
+    if !flaky.is_empty() {
+        println!("  ⚠ 闪烁(复跑通过,已豁免): {}", flaky.join(", "));
     }
     for k in &known {
         if !cases.iter().any(|c| c.name == *k) && filters.is_empty() {

@@ -70,7 +70,8 @@ fn f_v0_scale(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args)
         None => rt::read(&__st.DEF_V0_scale_k)?,
     };
     rt::finish(__args, span)?;
-    Ok(ops::mul(x.clone(), k.clone()).at(sp(0))?)
+    let mut __flow: Option<rt::FlowEvent> = None;
+    { let __outf = { ops::mul(x.clone(), k.clone()).at(sp(0))? }; match __flow.take() { Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) } }
 }
 
 #[allow(non_snake_case, dead_code)]
@@ -103,7 +104,8 @@ fn f_v2_wrap(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let mut rest = Value::Args(__args.take());
     if let Value::Args(__sink_inner) = &mut rest { __sink_inner.items.extend(__sink_pos_0.into_iter()); }
     rt::finish(__args, span)?;
-    Ok(rt::call!(engine, context, sp(2), rt::callee(f.clone(), sp(3))?;  s(sp(4), { rest.clone() })))
+    let mut __flow: Option<rt::FlowEvent> = None;
+    { let __outf = { rt::call!(engine, context, sp(2), rt::callee(f.clone(), sp(3))?;  s(sp(4), { rest.clone() })) }; match __flow.take() { Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) } }
 }
 
 #[allow(non_snake_case, dead_code)]

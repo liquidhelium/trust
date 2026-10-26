@@ -56,26 +56,36 @@ fn f_v0_pick(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) 
     let span = __args.span;
     let mut items = rt::param_pos(__args, "items", span)?;
     rt::finish(__args, span)?;
-    Ok({ let mut __out = Value::None;
-    let mut out = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
-        __out = rt::join(__out, { let mut __out = Value::None;
-  let __iter1 = items.clone();
+    let mut __flow: Option<rt::FlowEvent> = None;
+    { let __outf = { { let mut __out1 = Value::None;
+    let __dval4 = { let mut __a: Vec<Value> = Vec::new(); rt::array(__a).into_value() };
+    let mut out = __dval4;
+        __out1 = rt::join(__out1, { let __fsaved7 = __flow.take(); let mut __loopout6 = Value::None;
+  let __iter5 = items.clone();
   
-  for __it1 in rt::iter_values(&__iter1, sp(4))? {
-      let mut x = __it1;
+  for __it5 in rt::iter_values(&__iter5, sp(4))? {
+      let mut x = __it5;
 
       let __v = {
-    if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(sp(0))?, std::cmp::Ordering::Greater)), sp(3))? { {
+    { let __iv = if rt::boolean(Value::Bool(matches!(ops::compare(&(x.clone()), &(Value::Int(0))).at(sp(0))?, std::cmp::Ordering::Greater)), sp(3))? { {
     { rt::check_call_depth(engine, sp(1))?; let __mut_args = rt::args!(sp(1);  p(sp(2), { x.clone() })); let __place = rt::place_mut(&mut out, &[], sp(1))?; rt::method_mut_dispatch(engine, context, __place, "push", __mut_args, sp(1), "out.push")? }
-} } else { Value::None }
+} } else { Value::None }; if let Some(__f) = &mut __flow { __f.mark_conditional(); } __iv }
 };
-      __out = rt::join(__out, __v, sp(5))?;
+      __loopout6 = rt::join(__loopout6, __v, sp(5))?;
+      match &__flow {
+          Some(rt::FlowEvent::Break) => { __flow = None; break; }
+          Some(rt::FlowEvent::Continue) => __flow = None,
+          Some(rt::FlowEvent::Return(..)) => break,
+          None => {}
+      }
   }
-  __out }, sp(6))?;
-    __out = rt::join(__out, out.clone(), sp(7))?;
-    let _ = &__out;
-    __out
-})
+  if __fsaved7.is_some() { __flow = __fsaved7; }
+  if let Some(__f) = &mut __flow { __f.mark_conditional(); }
+  __loopout6 }, sp(6))?;
+    __out1 = rt::join(__out1, out.clone(), sp(7))?;
+    let _ = &__out1;
+    __out1
+} }; match __flow.take() { Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) } }
 }
 
 #[allow(non_snake_case, dead_code)]

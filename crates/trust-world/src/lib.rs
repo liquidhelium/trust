@@ -350,6 +350,20 @@ impl InjectWorld {
         self.files.insert(id, Bytes::new(data));
     }
 
+    /// Mounts a package-root data file under a `@ns/name:version` package
+    /// root (the official tests suite's `@test/...` packages mount here).
+    pub fn add_package_file(&mut self, spec: &str, rel: &str, data: Vec<u8>) {
+        let spec: PackageSpec = spec
+            .parse()
+            .unwrap_or_else(|err| panic!("invalid package spec {spec}: {err}"));
+        let id = RootedPath::new(
+            VirtualRoot::Package(spec),
+            VirtualPath::new(rel).expect("valid path"),
+        )
+        .intern();
+        self.files.insert(id, Bytes::new(data));
+    }
+
     /// Mounts fonts (for layout/rendering): `font()` and `book()` serve
     /// them from here on. Evaluation-only scenarios need not call this;
     /// mount `typst-assets` or system fonts for render comparisons.
@@ -448,6 +462,22 @@ impl World for InjectWorld {
         // into the cache (see the field comment).
         if let Some(cached) = self.package_sources.read().unwrap().get(&id) {
             return Ok(cached.clone());
+        }
+        // Mounted package files (add_package_file): .typ entries parse into
+        // sources so package imports resolve without the disk repository.
+        if matches!(id.root(), VirtualRoot::Package(_))
+            && id.vpath().get_with_slash().ends_with(".typ")
+        {
+            if let Some(bytes) = self.files.get(&id)
+                && let Ok(text) = String::from_utf8(bytes.to_vec())
+            {
+                let source = Source::new(id, text);
+                self.package_sources
+                    .write()
+                    .unwrap()
+                    .insert(id, source.clone());
+                return Ok(source);
+            }
         }
         if let Some(path) = self.package_path(id) {
             let text =

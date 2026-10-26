@@ -57,7 +57,8 @@ fn f_v0_add(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -
     let mut a = rt::param_pos(__args, "a", span)?;
     let mut b = rt::param_pos(__args, "b", span)?;
     rt::finish(__args, span)?;
-    Ok(ops::add(a.clone(), b.clone()).at(sp(0))?)
+    let mut __flow: Option<rt::FlowEvent> = None;
+    { let __outf = { ops::add(a.clone(), b.clone()).at(sp(0))? }; match __flow.take() { Some(rt::FlowEvent::Return(v, _, _)) => Ok(v.unwrap_or(__outf)), _ => Ok(__outf) } }
 }
 
 #[allow(non_snake_case, dead_code)]

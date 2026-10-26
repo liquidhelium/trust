@@ -46,15 +46,44 @@ impl Ctx {
         // expression's own span).
         let mut out = String::new();
         let mut last: Option<(String, String)> = None;
-        // Whether a value has been flushed into `__out` yet (a second
-        // expression statement arrived). When nothing has, the block is a
-        // single-tail block and collapses below.
+        // Whether a value has been flushed into the accumulator yet (a
+        // second expression statement arrived). When nothing has, the block
+        // is a single-tail block and collapses below — unless it contains a
+        // flow statement: the carry chain then needs this block's partial
+        // joins under a stable name (`__out{n}`, no shadowing), always
+        // materialized and pushed for the emission of nested statements.
+        let has_flow = stmt_vec
+            .iter()
+            .any(|s| super::expr::has_flow_event(s.to_untyped()));
+        let acc = format!("__out{}", self.fresh_id());
+        let saved = format!("__fsaved{}", self.fresh_id());
+        let blk = format!("'blk{}", self.fresh_id());
         let mut flushed = false;
         let mut iter = stmt_vec.into_iter();
         while let Some(stmt) = iter.next() {
             if let Some((prev, prev_at)) = last.take() {
                 flushed = true;
-                let _ = writeln!(out, "    __out = rt::join(__out, {prev}, {prev_at})?;");
+                if has_flow {
+                    // 先绑定再 join:语句表达式可能含边界早退(引用/克隆
+                    // 累加器),与 join 首参的移动同处一个调用表达式会
+                    // use-after-move。
+                    let pv = format!("__pv{}", self.fresh_id());
+                    let _ = writeln!(out, "    let {pv} = {prev};");
+                    let _ = writeln!(out, "    {acc} = rt::join({acc}, {pv}, {prev_at})?;");
+                } else {
+                    let _ = writeln!(out, "    {acc} = rt::join({acc}, {prev}, {prev_at})?;");
+                }
+                if has_flow {
+                    // Statement boundary (mirrors eval_code's post-join
+                    // flow check): warn for a discarded-content return,
+                    // then stop the block with the joins so far, restoring
+                    // the entry flag (the event itself stays set for the
+                    // enclosing boundary).
+                    let _ = writeln!(
+                        out,
+                        "    if __flow.is_some() {{ rt::warn_return_discard(engine, &__flow, {acc}.clone()); if {saved}.is_some() {{ __flow = {saved}; }} break {blk} {acc}; }}"
+                    );
+                }
             }
             // set/show rules inside a code block: the styles/recipe are
             // evaluated first, then **all remaining** statements are
@@ -63,14 +92,27 @@ impl Ctx {
             // of `eval_code` — the rule wraps the block tail).
             if let ast::Expr::SetRule(set) = stmt {
                 let rest: Vec<ast::Expr> = iter.collect();
-                let tail = self.block(rest.into_iter(), &mut env);
                 let rule_at = self.span_of(set.span());
                 let styles = self.set_styles_code(set, &mut env, &rule_at);
+                let tail = self.block(rest.into_iter(), &mut env);
                 let at = self.span_of(stmt.span());
-                last = Some((
-                    format!("Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"),
-                    at,
-                ));
+                // Flow check between the rule and its tail (mirrors
+                // eval_code's set special case: a flag set inside the
+                // rule's args skips the tail; the statement joins
+                // nothing).
+                if has_flow {
+                    last = Some((
+                        format!(
+                            "{{ let __styn = {styles}; if __flow.is_some() {{ if {saved}.is_some() {{ __flow = {saved}; }} break {blk} {acc}.clone(); }} rt::warn_return_discard(engine, &__flow, {acc}.clone()); let __tln = ({tail}).display(); Value::Content(rt::styled_with_map(__tln, __styn)) }}"
+                        ),
+                        at,
+                    ));
+                } else {
+                    last = Some((
+                        format!("Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"),
+                        at,
+                    ));
+                }
                 break;
             }
             if let ast::Expr::ShowRule(show) = stmt {
@@ -111,13 +153,32 @@ impl Ctx {
                     Some(init) => self.expr(init, &mut env),
                     None => "Value::None".into(),
                 };
+                // A set flow flag skips the binding (mirrors binding.rs's
+                // post-init `vm.flow.is_some()` early return: the init
+                // still evaluates; the destructure does not). The boundary
+                // check right after stops the block, so the placeholder
+                // value is never observed.
+                let check = if has_flow {
+                    format!(
+                        "    if __flow.is_some() {{ rt::warn_return_discard(engine, &__flow, {acc}.clone()); if {saved}.is_some() {{ __flow = {saved}; }} break {blk} {acc}; }}\n"
+                    )
+                } else {
+                    String::new()
+                };
                 match lets.kind() {
                     ast::LetBindingKind::Closure(name) => {
                         let rust = bind_local(&mut env, name.as_str());
-                        let _ = writeln!(out, "    let mut {rust} = {init};");
+                        let _ = writeln!(
+                            out,
+                            "    let mut {rust} = if __flow.is_some() {{ Value::None }} else {{ {init} }};"
+                        );
+                        out.push_str(&check);
                     }
                     ast::LetBindingKind::Normal(pattern) => {
-                        let stmts = self.destructure(pattern, init, &mut env, false);
+                        let tmp = format!("__dval{}", self.fresh_id());
+                        let _ = writeln!(out, "    let {tmp} = {init};");
+                        out.push_str(&check);
+                        let stmts = self.destructure(pattern, tmp, &mut env, false);
                         out.push_str("    ");
                         out.push_str(&stmts.replace('\n', "\n    "));
                     }
@@ -408,6 +469,12 @@ impl Ctx {
                 // mirrors `apply_assignment` + `Access`).
                 let code = self.assign_code(binary, &mut env);
                 let _ = writeln!(out, "    {code};");
+                if has_flow {
+                    let _ = writeln!(
+                        out,
+                        "    if __flow.is_some() {{ rt::warn_return_discard(engine, &__flow, {acc}.clone()); if {saved}.is_some() {{ __flow = {saved}; }} break {blk} {acc}; }}"
+                    );
+                }
                 continue;
             }
             let value = self.expr(stmt, &mut env);
@@ -422,20 +489,46 @@ impl Ctx {
         // cannot know the sequence statically; we can).
         self.close_let_hoists();
         match last {
-            Some((tail, _tail_at)) if !flushed => format!("{{\n{hoists}{out}    {tail}\n}}"),
+            Some((tail, _tail_at)) if !flushed && !has_flow => {
+                format!("{{\n{hoists}{out}    {tail}\n}}")
+            }
+            _ if has_flow => {
+                // Flow frame: save+clear the flag on entry, restore on
+                // every exit (early boundary breaks and the normal tail).
+                let mut full = format!(
+                    "{blk}: {{ let {saved} = __flow.take(); let mut {acc} = Value::None;\n"
+                );
+                full.push_str(&hoists);
+                full.push_str(&out);
+                if let Some((tail, tail_at)) = last {
+                    // 先绑定再 join(同 flush 段:尾表达式可含边界早退,
+                    // 引用累加器与 join 首参移动同表达式会 use-after-move)。
+                    let pv = format!("__pv{}", self.fresh_id());
+                    let _ = writeln!(full, "    let {pv} = {tail};");
+                    let _ = writeln!(full, "    {acc} = rt::join({acc}, {pv}, {tail_at})?;");
+                    let _ = writeln!(
+                        full,
+                        "    if __flow.is_some() {{ rt::warn_return_discard(engine, &__flow, {acc}.clone()); if {saved}.is_some() {{ __flow = {saved}; }} break {blk} {acc}; }}"
+                    );
+                }
+                let _ = writeln!(full, "    if {saved}.is_some() {{ __flow = {saved}; }}");
+                let _ = writeln!(full, "    {acc}");
+                full.push('}');
+                full
+            }
             _ => {
-                let mut full = String::from("{ let mut __out = Value::None;\n");
+                let mut full = format!("{{ let mut {acc} = Value::None;\n");
                 full.push_str(&hoists);
                 full.push_str(&out);
                 // Block value = join of all statement values (the tail
-                // statement is joined in before returning __out; with no
-                // expression statements, __out stays None, matching the
-                // empty-block value).
+                // statement is joined in before returning the accumulator;
+                // with no expression statements, it stays None, matching
+                // the empty-block value).
                 if let Some((tail, tail_at)) = last {
-                    let _ = writeln!(full, "    __out = rt::join(__out, {tail}, {tail_at})?;");
+                    let _ = writeln!(full, "    {acc} = rt::join({acc}, {tail}, {tail_at})?;");
                 }
-                let _ = writeln!(full, "    let _ = &__out;");
-                let _ = writeln!(full, "    __out");
+                let _ = writeln!(full, "    let _ = &{acc};");
+                let _ = writeln!(full, "    {acc}");
                 full.push('}');
                 full
             }

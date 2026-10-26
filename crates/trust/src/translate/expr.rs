@@ -1071,9 +1071,13 @@ impl Ctx {
             format!("&[{}]", captured.join(", "))
         };
         // Per-call-site static: parsed once; creation takes zero locks and
-        // zero lookups.
+        // zero lookups. The closure's own span is passed along —
+        // closure_node_at synthesizes it onto the parsed nodes so
+        // FileId-carrying spans survive (dynamic imports inside the body
+        // resolve relative to it).
         let node = self.closure_node_static(&src_text);
-        format!("Value::Func(rt::closure_node_at(&{node}, {defaults}, {captured}, {pending_lit}, engine))")
+        let at = self.span_of(closure.span());
+        format!("Value::Func(rt::closure_node_at(&{node}, {at}, {defaults}, {captured}, {pending_lit}, engine))")
     }
 
     /// C2: the native path for value-position closures.

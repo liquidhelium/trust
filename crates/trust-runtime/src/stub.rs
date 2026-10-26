@@ -392,12 +392,20 @@ fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::S
 /// is as in [`closure`]).
 pub fn closure_node_at(
     node: &(typst_syntax::SyntaxNode, usize),
+    span: Span,
     defaults: Vec<Value>,
     captured: &[(&'static str, Value)],
     pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
     let (node, num_pos_params) = node.clone();
+    // Synthesize the closure's source span onto every node: the bare-parse
+    // static has detached spans, and FileId-carrying spans are load-bearing
+    // for statements interpreted by typst-eval — a dynamic `import "…" `
+    // inside the body resolves its path relative to the span's file (a
+    // detached span makes the import fail with "file not found").
+    let mut node = node;
+    node.synthesize(span);
     let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
     resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();

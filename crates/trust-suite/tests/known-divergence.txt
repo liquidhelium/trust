@@ -1,5 +1,4 @@
 cite-uncovered
-closure-shadows-outer-var-import
 datetime-today-offset-invalid-1
 datetime-today-offset-invalid-2
 eval-path-resolve-relative

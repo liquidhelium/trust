@@ -21,6 +21,12 @@ pub(super) struct FilePlan<'a> {
     /// making parse-error tests falsely green; eval heads bail on the
     /// first error).
     pub(super) parse_diags: Vec<String>,
+    /// Parse-stage **warnings** (the second vector of
+    /// errors_and_warnings): typst-eval warns these into the sink before
+    /// eval and only bails on errors, so a source with warnings but no
+    /// errors still surfaces them (e.g. "no text within underscores",
+    /// "empty raw text").
+    pub(super) parse_warnings: Vec<String>,
     /// Root names of top-level bindings mutated in place (targets of
     /// mutating methods push/pop/insert/remove and of compound
     /// assignments): these bindings are emitted as mutable slots

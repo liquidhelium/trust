@@ -82,8 +82,6 @@ pub fn eval_import(
     }
     let mut scopes = Scopes::new(Some(engine.library));
     scopes.top = top;
-    let before: std::collections::HashSet<EcoString> =
-        scopes.top.iter().map(|(k, _)| k.clone()).collect();
     let engine2 = Engine {
         world: engine.world,
         library: engine.library,
@@ -96,11 +94,14 @@ pub fn eval_import(
     expr.eval(&mut vm)?;
     let mut out = Vec::with_capacity(expected.len());
     for name in expected {
+        // A captured (already visible) name is fine here: imports re-bind
+        // names they mention (`import x as x: item` re-defines `x`,
+        // `import mymod` re-binds the ident) — typst's `vm.define`/
+        // `scopes.top.bind` write the binding regardless of prior
+        // visibility, and the written value equals the read-back one.
         match vm.scopes.top.get(name) {
-            Some(binding) if !before.contains(*name) => {
-                out.push(binding.read().clone());
-            }
-            _ => {
+            Some(binding) => out.push(binding.read().clone()),
+            None => {
                 return Err(eco_vec![SourceDiagnostic::error(
                     span,
                     eco_format!("import diff is missing binding `{name}` (generator bug)"),

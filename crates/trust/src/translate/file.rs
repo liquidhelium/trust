@@ -78,7 +78,16 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 seq.push(Seq::Binding(tops.len() - 1));
                 // Mirrors eval_markup: an evaluated let likewise joins the
                 // output as a display slot (None.display() is empty
-                // content).
+                // content). The binding itself is emitted from `tops`
+                // (slots + init_code) — BoundElsewhere keeps the display
+                // slot without re-evaluating the init in the content
+                // frame.
+                seq.push(Seq::Content(super::expr::ContentItem::BoundElsewhere));
+            } else {
+                // No bindings (a `_`-only pattern): nothing for the
+                // top-level machinery to fill — the content frame's
+                // let_expr evaluates the init for its side effects and
+                // discards the value.
                 seq.push(Seq::Content(super::expr::ContentItem::Part(expr)));
             }
             continue;

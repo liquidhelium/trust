@@ -56,6 +56,13 @@ pub(super) enum ContentItem<'a> {
     Show(ast::ShowRule<'a>),
     /// Package mode: the target file's body slot name.
     Include(String),
+    /// A statement whose evaluation/binding already happened outside the
+    /// content pipeline (package-mode top-level `#let`: plan slot +
+    /// binding_code): contributes an empty display slot only — must stay
+    /// off the content frame (a rescan would re-evaluate the init and
+    /// reroute subsequent references to the empty frame slot instead of
+    /// the plan slot).
+    BoundElsewhere,
     /// Dynamic-source include (zone-1 glue): carries the emitted
     /// evaluation code (`rt::eval_include` drives the original Eval;
     /// file-not-found and friends are reported by the original).
@@ -857,7 +864,18 @@ impl Ctx {
             if matches!(field, "push" | "pop" | "insert" | "remove") {
                 // Mutating method (mirrors `maybe_resolve_mutating`:
                 // **arguments evaluate before the target**; the target
-                // resolves mutably via `Access`).
+                // resolves mutably via `Access`). gen_args runs BEFORE
+                // classify_place on purpose: an argument can rebind the
+                // target's name (`sp.push(let sp = false)`), and the
+                // translation order must mirror the runtime order so the
+                // target resolves against the rebound local. Only places
+                // that can be mutated take the mutating path; typst falls
+                // back to a plain field call for any non-Array/Dict target
+                // (method_mut_dispatch mirrors that fallback at runtime) —
+                // a Deferred target (runtime module reference, e.g.
+                // `module.push(2)` calling the module's exported `push`
+                // function) takes the generic method-call form, with the
+                // arguments already evaluated above.
                 let args = self.gen_args(call.args(), env);
                 let access_text = access.to_untyped().full_text().to_string();
                 match self.classify_place(access.target(), env) {
@@ -914,12 +932,20 @@ impl Ctx {
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let _ = {target}; rt::bail_temporary({at})? }}"
                         );
                     }
+                    // Deferred (runtime module reference): not a mutable
+                    // place — a plain field call on the module value (its
+                    // exported function), mirroring typst's
+                    // `Ok(Err((target, args)))` fallback; arguments are
+                    // already evaluated (in `args`), so the generic path
+                    // below (which regenerates them) must not run.
                     super::block::Place::Deferred => {
-                        self.diag(
-                            call.span(),
-                            "target of a mutating method is a runtime module reference (not yet supported)".into(),
+                        let target = self.expr(access.target(), env);
+                        let tgt_at = self.span_of(access.target().span());
+                        let field_at = self.span_of(access.field().span());
+                        return format!(
+                            "rt::mcall!(engine, context, {at}, {target}, \"{}\", {access_text:?}, {field_at}, {tgt_at}; {args})",
+                            escape(field)
                         );
-                        return "Value::None".into();
                     }
                 }
             }
@@ -1238,14 +1264,76 @@ impl Ctx {
 
     /// Top-level content folding: each item is generated with its own
     /// visible binding set (rules wrap subsequent items).
+    ///
+    /// Opens one hoist frame covering the **whole sequence**: lets inside
+    /// a content block bind into block-local slots (the block is a scope;
+    /// slots are declared at the top of the block's own expression and
+    /// dropped with it, mirroring typst's content-block scoping), and a
+    /// let's names become visible to the **subsequent** items only —
+    /// the item envs progress in source order, like top-level statements.
     pub(super) fn content_seq_top(&mut self, items: &[TopItem]) -> String {
+        let roots: Vec<&typst_syntax::SyntaxNode> = items
+            .iter()
+            .filter_map(|top| match &top.item {
+                ContentItem::Part(expr) => Some(expr.to_untyped()),
+                ContentItem::Set(set) => Some(set.to_untyped()),
+                ContentItem::Show(show) => Some(show.to_untyped()),
+                ContentItem::Include(_)
+                | ContentItem::DynamicInclude(_)
+                | ContentItem::BoundElsewhere => None,
+            })
+            .collect();
+        let decls = self.open_let_hoists(roots.into_iter());
+        let frame = self.let_hoists.last().cloned().unwrap_or_default();
+        let mut enriched: Vec<TopItem> = Vec::with_capacity(items.len());
+        // Frame locals accumulated so far (a let's names apply to the
+        // items after it). Layered ON TOP of each item's original env —
+        // package mode's items carry their own per-statement progression
+        // (content_env), which must not be overwritten by the first
+        // item's snapshot.
+        let mut frame_locals: Vec<(String, String)> = Vec::new();
+        for top in items {
+            let mut env = top.env.clone();
+            env.locals.extend(frame_locals.iter().cloned());
+            enriched.push(TopItem { item: top.item.clone(), env });
+            if let ContentItem::Part(ast::Expr::LetBinding(lets)) = &top.item {
+                let names: Vec<String> = match lets.kind() {
+                    ast::LetBindingKind::Closure(name) => vec![name.as_str().to_string()],
+                    ast::LetBindingKind::Normal(pattern) => pattern
+                        .bindings()
+                        .iter()
+                        .map(|i| i.as_str().to_string())
+                        .collect(),
+                };
+                for name in names {
+                    if let Some(rust) = frame.get(&name) {
+                        frame_locals.push((name, rust.clone()));
+                    }
+                }
+            }
+        }
+        let out = self.content_seq_top_scoped(&enriched);
+        self.close_let_hoists();
+        if decls.is_empty() {
+            out
+        } else {
+            format!("{{ {} {} }}", decls, out)
+        }
+    }
+
+    /// The folding pipeline proper (no hoist frame of its own — the
+    /// enclosing [`Self::content_seq_top`] opened the sequence-wide
+    /// frame; the tail recursions here must not shadow it with a
+    /// rescan, or a let defined before a set/show rule would lose its
+    /// slot to the tail's fresh frame).
+    fn content_seq_top_scoped(&mut self, items: &[TopItem]) -> String {
         for (i, top) in items.iter().enumerate() {
             let mut env = top.env.clone();
             match &top.item {
                 ContentItem::Set(set) => {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
-                    let tail = self.content_seq_top(&items[i + 1..]);
+                    let tail = self.content_seq_top_scoped(&items[i + 1..]);
                     // Styles evaluate before the tail content (mirrors
                     // eval_code/eval_markup: set.eval precedes the tail;
                     // Rust evaluates arguments left to right, so the styles
@@ -1258,7 +1346,7 @@ impl Ctx {
                 ContentItem::Show(show) => {
                     let mut parts: Vec<String> =
                         items[..i].iter().map(|e| self.content_part(e)).collect();
-                    let tail = self.content_seq_top(&items[i + 1..]);
+                    let tail = self.content_seq_top_scoped(&items[i + 1..]);
                     // Evaluation order mirrors `Eval for ast::ShowRule`:
                     // selector → transform (set or expression) → tail
                     // content.
@@ -1417,8 +1505,17 @@ impl Ctx {
                 // relies on the type distinction).
                 format!("rt::symbol_value({:?})", e.get())
             }
-            ContentItem::Part(ast::Expr::LetBinding(_))
-            | ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
+            ContentItem::BoundElsewhere => "rt::embed(Value::None)".into(),
+            ContentItem::Part(ast::Expr::LetBinding(lets)) => {
+                // A let inside a content block: evaluates the init (side
+                // effects run — constructor warnings, degraded calls) and
+                // writes the block-local hoisted slot; the statement value
+                // is none, displayed as empty content (mirrors
+                // eval_markup's LetBinding branch delegating to
+                // binding.rs, then displaying Value::None as empty).
+                format!("rt::embed({})", self.let_expr(*lets, env))
+            }
+            ContentItem::Part(ast::Expr::ModuleImport(_)) => "rt::embed(Value::None)".into(),
             ContentItem::Part(other) => {
                 // Values enter the sequence **without** embed: the display
                 // in attach_labels has the same shape as eval_markup's

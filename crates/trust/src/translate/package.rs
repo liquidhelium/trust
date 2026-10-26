@@ -155,10 +155,12 @@ fn plan_files(
         };
         let mut mutated_roots = Vec::new();
         collect_mutated_roots(source.root(), &mut mutated_roots);
-        let parse_diags = source
-            .root()
-            .errors_and_warnings()
-            .0
+        let (parse_errors, parse_warn_diags) = source.root().errors_and_warnings();
+        let parse_diags = parse_errors
+            .into_iter()
+            .map(|d| d.message.to_string())
+            .collect::<Vec<_>>();
+        let parse_warnings = parse_warn_diags
             .into_iter()
             .map(|d| d.message.to_string())
             .collect::<Vec<_>>();
@@ -392,7 +394,9 @@ fn plan_files(
             let mut stack = vec![root.clone()];
             while let Some(node) = stack.pop() {
                 if let Some(import) = node.clone().cast::<ast::ModuleImport>()
-                    && !skip.iter().any(|p| *p == (&node as &typst_syntax::SyntaxNode as *const _))
+                    && !skip
+                        .iter()
+                        .any(|p| std::ptr::eq(*p, &node as &typst_syntax::SyntaxNode))
                     && let ast::Expr::Str(path_expr) = import.source()
                 {
                     let raw = path_expr.get().to_string();
@@ -416,12 +420,13 @@ fn plan_files(
                         }
                     }
                 }
-                stack.extend(node.children().map(|c| c.clone()));
+                stack.extend(node.children().cloned());
                 let _ = &mut skip;
             }
         }
         plans.push(FilePlan {
             parse_diags,
+            parse_warnings,
             mutated_roots,
             path: path.clone(),
             mod_name,
@@ -799,6 +804,24 @@ return;
                         bound.push((name.to_string(), slot));
                     }
                     if bound.is_empty() {
+                        // No bindings (a `_`-only pattern, or an empty
+                        // destructuring pattern like `()`): typst still
+                        // evaluates the init (side effects must run —
+                        // e.g. `#let _ = decimal(1.234)` warns about the
+                        // imprecise float literal) and runs the full
+                        // destructure — an empty pattern is NOT a skip:
+                        // `#let () = (1, 2)` errors with "too many
+                        // elements to destructure" (binding.rs runs the
+                        // same destructure_impl; Placeholder is its no-op
+                        // leaf).
+                        let mut env2 = self.env.clone();
+                        for (seen, seen_slot) in &self.own {
+                            env2.module
+                                .push((seen.clone(), Ref::Slot(seen_slot.clone())));
+                        }
+                        let value = cx.expr(init_expr, &mut env2);
+                        let stmts = cx.destructure(pattern, value, &mut env2, true);
+                        let _ = writeln!(self.binding_code, "    {{ {stmts} }}");
 return;
                     }
                     let mut env2 = self.env.clone();
@@ -979,9 +1002,13 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                 }
                 ast::Expr::LetBinding(lets) => {
                     // Mirrors eval_markup: the statement joins the output
-                    // as an empty display slot.
+                    // as an empty display slot. The binding itself is
+                    // emitted below (gen_let → plan slot + binding_code),
+                    // so the item must not re-evaluate it —
+                    // BoundElsewhere keeps the empty slot without
+                    // touching the content frame.
                     content_items.push(super::expr::TopItem {
-                        item: super::expr::ContentItem::Part(expr),
+                        item: super::expr::ContentItem::BoundElsewhere,
                         env: top.content_env(),
                     });
                     top.gen_let(cx, plan, &mut state_fields, lets);
@@ -1075,6 +1102,14 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // subsequent content) into the slot.
         let body_slot = format!("BODY_{}", plan.mod_name);
         state_fields.push((plan.path.clone(), body_slot.clone()));
+        // Module identity cache: `Module` equality is Arc-pointer identity
+        // and typst-eval's memoized eval_module returns the SAME module
+        // value to every importer — `#test(m, other-m)` compares modules
+        // by pointer. The built module is stored once per state board and
+        // cloned thereafter (a process-global static would leak across
+        // cases/builds; the state board is per-build).
+        let module_slot = format!("MODULE_{}", plan.mod_name);
+        state_fields.push((plan.path.clone(), module_slot.clone()));
         let mut body_env = env.clone();
         for (seen, seen_slot) in &own {
             body_env
@@ -1087,6 +1122,22 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             "    rt::fill(&__st.{body_slot}, Value::Content({body}))?;"
         );
 
+        // Parse-stage warnings: warned into the sink at the head of eval,
+        // before the parse-error bail — mirroring typst-eval lib.rs's
+        // module eval (`for warning in warnings { sink.warn(...) }` then
+        // the error bail): a warning-only source still surfaces them.
+        let parse_warn_src = if plan.parse_warnings.is_empty() {
+            String::new()
+        } else {
+            plan.parse_warnings
+                .iter()
+                .map(|m| {
+                    format!(
+                        "        engine.sink.warn(typst::diag::SourceDiagnostic::warning(file_span(), ecow::eco_format!(\"{{}}\", {m:?})));\n"
+                    )
+                })
+                .collect()
+        };
         let parse_guard_src = if plan.parse_diags.is_empty() {
             String::new()
         } else {
@@ -1111,13 +1162,14 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         // scope/FileId/Module construction (ident passthrough keeps the
         // pasted bodies hygiene-compatible with their own locals).
         let eval_body_src = format!(
-            "let _ = (&*engine, context);\n    let mut __flow: Option<rt::FlowEvent> = None;\n    let _ = &__flow;\n{parse_guard_src}{import_fills}{binding_code}        Ok(())"
+            "let _ = (&*engine, context);\n    let mut __flow: Option<rt::FlowEvent> = None;\n    let _ = &__flow;\n{parse_warn_src}{parse_guard_src}{import_fills}{binding_code}        Ok(())"
         );
         let body_slot_name = format!("BODY_{}", plan.mod_name);
         let module_body_src = format!(
-            "let _ = __st;\n    let mut scope = Scope::new();\n{file_defines}    let __fid = typst::syntax::RootedPath::new(\n        typst::syntax::VirtualRoot::Project,\n        typst::syntax::VirtualPath::new({path_repr:?}).expect(\"path\"),\n    )\n    .intern();\n    Ok(Module::new({stem_repr:?}, scope).with_content(rt::read_content(&__st.{body_slot_name})?).with_file_id(__fid))",
+            "let _ = __st;\n    if let Some(typst::foundations::Value::Module(__trust_m)) = __st.{module_slot}.get() {{\n        return Ok(__trust_m.clone());\n    }}\n    let mut scope = Scope::new();\n{file_defines}    let __fid = typst::syntax::RootedPath::new(\n        typst::syntax::VirtualRoot::Project,\n        typst::syntax::VirtualPath::new({path_repr:?}).expect(\"path\"),\n    )\n    .intern();\n    let __trust_m: SourceResult<Module> = Ok(Module::new({stem_repr:?}, scope).with_content(rt::read_content(&__st.{body_slot_name})?).with_file_id(__fid));\n    if let Ok(m) = &__trust_m {{\n        let _ = __st.{module_slot}.set(Value::Module(m.clone()));\n    }}\n    __trust_m",
             path_repr = plan.path,
             stem_repr = module_stem(&plan.path),
+            module_slot = module_slot,
         );
         let mut body = format!(
             "\n    rt::file_module! {{\n\

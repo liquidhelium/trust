@@ -197,16 +197,37 @@ impl Ctx {
                 // at runtime through the global + math scopes (mirrors the
                 // original CapturesVisitor's get/get_in_math).
                 let pending_lit = pending_list(&pending);
+                // The body's nodes get real per-node spans (mapped to
+                // their original offsets — FileId-carrying spans are
+                // load-bearing inside: path resolution, citation span
+                // identity, convergence). `base` is the trimmed body's
+                // start offset: the body's span is located in the current
+                // file's source (re-parsed from the same text — the span
+                // numbering matches), then shifted by the trim.
+                let body_span = ctx.body().span();
+                let at = self.span_of(body_span);
+                let base = body_span
+                    .id()
+                    .and_then(|id| {
+                        let text = self.package_files.as_ref().and_then(|m| {
+                            let key = self.current_file.as_deref()?;
+                            m.get(key).cloned()
+                        })?;
+                        let source = typst_syntax::Source::new(id, text);
+                        source.find(body_span).map(|n| n.range().start)
+                    })
+                    .map(|start| start + (body.len() - body.trim_start().len()))
+                    .unwrap_or(0);
                 if captured.is_empty() {
                     format!(
-                        "Value::Content(rt::context_body(rt::context_closure({body:?}, &[], {pending_lit}, engine)))"
+                        "Value::Content(rt::context_body(rt::context_closure({body:?}, {at}, {base}, &[], {pending_lit}, engine)))"
                     )
                 } else {
                     // Constructed and consumed inside the block (&__caps
                     // never escapes it).
                     let init = format!("vec![{}]", captured.join(", "));
                     format!(
-                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; Value::Content(rt::context_body(rt::context_closure({body:?}, &__caps, {pending_lit}, engine))) }}"
+                        "{{ let __caps: Vec<(&'static str, Value)> = {init}; Value::Content(rt::context_body(rt::context_closure({body:?}, {at}, {base}, &__caps, {pending_lit}, engine))) }}"
                     )
                 }
             }
@@ -1071,13 +1092,27 @@ impl Ctx {
             format!("&[{}]", captured.join(", "))
         };
         // Per-call-site static: parsed once; creation takes zero locks and
-        // zero lookups. The closure's own span is passed along —
-        // closure_node_at synthesizes it onto the parsed nodes so
-        // FileId-carrying spans survive (dynamic imports inside the body
-        // resolve relative to it).
+        // zero lookups. The closure's span + start offset are passed along
+        // — closure_node_at synthesizes real per-node spans onto the
+        // parsed nodes (FileId-carrying spans are load-bearing inside:
+        // dynamic import resolution, measure's closest-match-by-span).
+        // A named closure's snippet gets a "let " prefix (3 bytes of
+        // skew, harmless).
         let node = self.closure_node_static(&src_text);
         let at = self.span_of(closure.span());
-        format!("Value::Func(rt::closure_node_at(&{node}, {at}, {defaults}, {captured}, {pending_lit}, engine))")
+        let closure_span = closure.span();
+        let base = closure_span
+            .id()
+            .and_then(|id| {
+                let text = self.package_files.as_ref().and_then(|m| {
+                    let key = self.current_file.as_deref()?;
+                    m.get(key).cloned()
+                })?;
+                let source = typst_syntax::Source::new(id, text);
+                source.find(closure_span).map(|n| n.range().start)
+            })
+            .unwrap_or(0);
+        format!("Value::Func(rt::closure_node_at(&{node}, {at}, {base}, {defaults}, {captured}, {pending_lit}, engine))")
     }
 
     /// C2: the native path for value-position closures.

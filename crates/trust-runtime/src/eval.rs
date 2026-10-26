@@ -33,7 +33,7 @@ pub fn eval_expr(
     engine: &mut Engine,
     context: Tracked<Context>,
 ) -> SourceResult<Value> {
-    let func = context_closure(src, captured, pending, engine);
+    let func = context_closure(src, Span::detached(), 0, captured, pending, engine);
     func.call::<[Value; 0]>(engine, context, [])
 }
 

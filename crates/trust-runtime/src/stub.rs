@@ -393,19 +393,36 @@ fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::S
 pub fn closure_node_at(
     node: &(typst_syntax::SyntaxNode, usize),
     span: Span,
+    base: usize,
     defaults: Vec<Value>,
     captured: &[(&'static str, Value)],
     pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
     let (node, num_pos_params) = node.clone();
-    // Synthesize the closure's source span onto every node: the bare-parse
-    // static has detached spans, and FileId-carrying spans are load-bearing
-    // for statements interpreted by typst-eval — a dynamic `import "…" `
-    // inside the body resolves its path relative to the span's file (a
-    // detached span makes the import fail with "file not found").
+    // Synthesize real, per-node spans onto the parsed nodes: the bare
+    // static has detached spans, and FileId-carrying spans are
+    // load-bearing inside typst-eval-interpreted bodies — a dynamic
+    // `import "…"` resolves relative to span.id(), and measure() resolves
+    // introspections by finding the closest matching element BY SPAN, so
+    // collapsing the body onto one span makes every element "match"
+    // itself (a measure-loop that must not converge then converges).
+    // RangeMapper keeps each node at its own offset in the original file
+    // (for named closures the emitted "let " prefix skews positions by
+    // its length — harmless, the FileId is what carries semantics).
     let mut node = node;
-    node.synthesize(span);
+    match span.id() {
+        Some(id) => {
+            let len = node.len();
+            match typst_syntax::RangeMapper::new(std::iter::once(base..base + len))
+                .and_then(|mapper| node.synthesize_mapped(id, &mapper))
+            {
+                Ok(()) => {}
+                Err(_) => node.synthesize(span),
+            }
+        }
+        None => node.synthesize(span),
+    }
     let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
     resolve_pending(engine, &mut captured, pending);
     let mut scope = Scope::new();

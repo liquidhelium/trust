@@ -25,11 +25,34 @@ use typst::diag::{Hint, SourceDiagnostic, Trace};
 /// location/styles).
 pub fn context_closure(
     body_src: &str,
+    span: Span,
+    base: usize,
     captured: &[(&'static str, Value)],
     pending: &[(&'static str, bool)],
     engine: &mut Engine,
 ) -> Func {
-    let node = cached_body_node(body_src);
+    let mut node = cached_body_node(body_src);
+    // Synthesize real, per-node spans: the snippet parse leaves detached
+    // spans, and FileId-carrying spans are load-bearing inside the
+    // interpreted body — image()/bibliography() resolve their paths via
+    // span.id() ("cannot access file system from here" otherwise), and
+    // span identity feeds citation matching and the layout convergence
+    // machinery. Mapping (RangeMapper, the primitive typst uses for
+    // doc-comment code) keeps every node at its own offset in the
+    // original file — collapsing the whole body onto ONE span once made
+    // a measure-loop converge that must not converge.
+    match span.id() {
+        Some(id) => {
+            let len = body_src.trim().len();
+            match typst_syntax::RangeMapper::new(std::iter::once(base..base + len))
+                .and_then(|mapper| node.synthesize_mapped(id, &mapper))
+            {
+                Ok(()) => {}
+                Err(_) => node.synthesize(span),
+            }
+        }
+        None => node.synthesize(span),
+    }
     let scope = captured_scope(captured, pending, engine);
     Func::from(Closure {
         node: ClosureNode::Context(node.clone()),

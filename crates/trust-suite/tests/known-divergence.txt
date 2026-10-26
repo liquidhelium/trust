@@ -1,10 +1,2 @@
-cite-uncovered
-image-svg-linked-csv
-image-svg-linked-file-not-found
-image-svg-linked-jpg1
-image-svg-linked-jpg2
-image-svg-linked-many-formats
-image-svg-linked-pdf
+convergence-measure
 import-basic
-issue-measure-image
-measure-citation-in-flow-different-span

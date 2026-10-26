@@ -64,11 +64,21 @@ pub fn call_with(
     // off by the check_call_depth guardrail (80 levels) before stack
     // overflow can happen; a per-call stack probe would be pure overhead
     // (the native interpreter path needs it, the compiled path does not).
-    func.call(engine, context, args).trace(
+    let value = func.call(engine, context, args).trace(
         engine.world,
         || typst::diag::Tracepoint::Call(func.name().map(EcoString::from)),
         span,
-    )
+    )?;
+    // Mirror code.rs's `.spanned(span)` on every code expression value: a
+    // call's content result carries the call span (Content::spanned only
+    // fills a detached span). Load-bearing for elements whose layout needs
+    // the span's FileId — ImageElem resolves SVG-linked image hrefs
+    // relative to span.id() ("cannot access file system from here"
+    // otherwise).
+    match value {
+        Value::Content(content) => Ok(Value::Content(content.spanned(span))),
+        value => Ok(value),
+    }
 }
 
 

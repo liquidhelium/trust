@@ -43,17 +43,36 @@ cargo test -p trust-diff --release --test bench -- --ignored --nocapture
 
 ## CLI
 
-Translate a single file:
+Translate a single file into a standalone program — a self-contained cargo
+bin project that renders the document to PDF/SVG/PNG with no typst
+toolchain, package cache, or font discovery at run time (evaluation is the
+translated module; layout and export are borrowed from the typst crates):
 
 ```sh
-trust translate <input.typ> [--name <module>] [-o <output.rs>]
+trust translate <input.typ> [<out-dir>] [flags]
+# default out dir: ./<stem>-program/
 ```
 
-Translate a package (entrypoint discovered from `typst.toml`, module name
-taken from `package.name`):
+- `--compile` — also run `cargo build --release` on the generated project
+  and report the binary path.
+- `--input` is not a translate-time flag: the generated program takes
+  `--input key=value` itself (typst CLI semantics — inputs are part of the
+  invocation; the library is rebuilt from them on every run).
+- `--embed <path>` — embed an extra file or directory (data files read by
+  the document); the program errors with the closest embedded paths when
+  something is missing.
+- `--format pdf,svg,png` — default output formats baked into the program
+  (the program's own `--format` flag overrides per invocation).
+- `--system-fonts` — prefer system font discovery over the embedded
+  typst-assets set (output is machine-independent with the default).
+- `--with-deps`, `--lenient`, `--no-fmt` — as below.
+
+Translate a package — or a single `.typ` file — into a library module (the
+host-integration artifact; a single file is translated as a one-file
+package with that file as the entry):
 
 ```sh
-trust translate-pkg <package-root> -o <output.rs | <output-dir>/ [flags]
+trust translate-pkg <package-root-or-file.typ> -o <output.rs | <output-dir>/ [flags]
 ```
 
 - `--lenient` — downgrade unsupported constructs to runtime gaps instead of

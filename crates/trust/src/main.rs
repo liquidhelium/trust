@@ -1,8 +1,9 @@
 //! The `trust` CLI: command line for the typst → rust transpiler.
 
-use std::io::Write;
 
 use clap::Parser;
+
+mod program;
 
 /// Download a package from the registry and unpack it into the local cache
 /// (mirrors the typst CLI's automatic download of missing packages).
@@ -97,23 +98,45 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Translate a single .typ file
+    /// Translate a single .typ file into a standalone program project
+    /// (cargo bin crate; renders PDF/SVG/PNG with no typst toolchain)
     Translate {
-        /// Input .typ source file
+        /// Input .typ source file (the document to turn into a program)
         input: String,
-        /// Output .rs file; prints to stdout when omitted
-        #[arg(short, long)]
-        output: Option<String>,
-        /// Module name; defaults to the input file stem
+        /// Output project directory; defaults to ./<stem>-program/
+        dir: Option<String>,
+        /// Recursively resolve and merge `@spec` dependencies from the
+        /// local package cache into the translation
         #[arg(long)]
-        name: Option<String>,
+        with_deps: bool,
+        /// Extra file or directory to embed (repeatable; mounted at its
+        /// package-root-relative path when inside the root)
+        #[arg(long = "embed")]
+        embeds: Vec<String>,
+        /// Default output formats baked into the program (pdf,svg,png;
+        /// the program's --format flag overrides per invocation)
+        #[arg(long, value_delimiter = ',')]
+        format: Option<String>,
+        /// Prefer system font discovery over the embedded typst-assets
+        /// set
+        #[arg(long)]
+        system_fonts: bool,
+        /// Also run `cargo build --release` on the generated project
+        #[arg(long)]
+        compile: bool,
+        /// Degrade unsupported constructs to runtime warnings instead of
+        /// failing
+        #[arg(long)]
+        lenient: bool,
         /// Emit the translator's raw output without pretty-printing
         #[arg(long)]
         no_fmt: bool,
     },
-    /// Translate a local package directory (entrypoint auto-detected)
+    /// Translate a package directory — or a single .typ file — into a
+    /// library module (the host-integration artifact)
     TranslatePkg {
-        /// Package root directory
+        /// Package root directory, or a single .typ file (translated as a
+        /// one-file package with that file as the entry)
         pkg_root: String,
         /// Output: a .rs file, or a directory with trailing `/` for a
         /// generated source tree
@@ -143,58 +166,121 @@ fn main() {
     match cli.command {
         Command::Translate {
             input,
-            output,
-            name,
+            dir,
+            with_deps,
+            embeds,
+            format,
+            system_fonts,
+            compile,
+            lenient,
             no_fmt,
         } => {
-            let input = &input;
-            let output = output.as_deref();
-            let name = name.as_deref();
-            let src = match std::fs::read_to_string(input) {
-                Ok(src) => src,
-                Err(err) => {
-                    eprintln!("failed to read {input}: {err}");
+            let input_path = std::path::PathBuf::from(&input);
+            if !input_path.is_file() {
+                eprintln!("translate: input {input} is not a file");
+                std::process::exit(2);
+            }
+            let stem = input_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("program")
+                .to_string();
+            let out_dir = dir
+                .clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(format!("./{stem}-program")));
+
+            // File closure: the package root is the input file's parent
+            // directory; every sibling .typ joins the set (assembly is
+            // on-demand, unused modules never evaluate). Entry is the
+            // input file itself.
+            let root = input_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let mut files = std::collections::BTreeMap::new();
+            let out_dir_canon =
+                std::fs::create_dir_all(&out_dir).ok().and_then(|_| std::fs::canonicalize(&out_dir).ok());
+            let mut stack = vec![root.clone()];
+            while let Some(dirp) = stack.pop() {
+                // Never descend into the output project (a previous run's
+                // embedded copies would feed back into the closure).
+                if let Some(canon) = &out_dir_canon
+                    && std::fs::canonicalize(&dirp).is_ok_and(|d| d == *canon)
+                {
+                    continue;
+                }
+                for entry in std::fs::read_dir(&dirp).unwrap_or_else(|e| {
+                    eprintln!("failed to read dir {}: {e}", dirp.display());
                     std::process::exit(1);
+                }) {
+                    let entry = entry.expect("entry");
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                        let rel = path
+                            .strip_prefix(&root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        files.insert(rel, std::fs::read_to_string(&path).expect("read .typ"));
+                    }
                 }
+            }
+            let entry = input_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("file name")
+                .to_string();
+            if !files.contains_key(&entry) {
+                eprintln!("internal: entry {entry} missing from the file set");
+                std::process::exit(2);
+            }
+            let dep_entries = if with_deps {
+                collect_translatable_deps(&mut files)
+            } else {
+                Default::default()
             };
-            let name = name.unwrap_or_else(|| {
-                std::path::Path::new(input)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("module")
-            });
-            match trust::translate(&src, name) {
-                Ok(code) => {
-                    // Pretty-print unless opted out (see the `fmt` module).
-                    let code = if no_fmt { code } else { trust::format_generated(&code) };
-                    match output {
-                        Some(path) => {
-                            if let Err(err) = std::fs::write(path, code) {
-                                eprintln!("failed to write {path}: {err}");
+            let spec = program::ProgramSpec {
+                input: input_path,
+                out_dir: out_dir.clone(),
+                embed: embeds.iter().map(std::path::PathBuf::from).collect(),
+                formats: format
+                    .as_deref()
+                    .map(|f| f.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                    .unwrap_or_default(),
+                system_fonts,
+                lenient,
+                no_fmt,
+            };
+            match program::generate(&spec, &files, &entry, &dep_entries, &stem) {
+                Ok(result) => {
+                    println!(
+                        "generated {} ({} module files, {} embedded files)",
+                        result.out_dir.display(),
+                        result.module_files,
+                        result.embedded_files
+                    );
+                    if compile {
+                        let status = std::process::Command::new("cargo")
+                            .args(["build", "--release"])
+                            .current_dir(&out_dir)
+                            .status()
+                            .unwrap_or_else(|e| {
+                                eprintln!("failed to run cargo: {e}");
                                 std::process::exit(1);
-                            }
+                            });
+                        if !status.success() {
+                            std::process::exit(1);
                         }
-                        None => {
-                            let mut out = std::io::stdout();
-                            let _ = writeln!(out, "{code}");
-                        }
+                        let bin = program::sanitize_bin_name(&stem);
+                        println!("binary: {}/target/release/{bin}", out_dir.display());
                     }
                 }
-                Err(diags) => {
-                    for diag in diags {
-                        let mut one = std::collections::BTreeMap::new();
-                        // In single-file form the span's vpath is
-                        // /main.typ — the double-key insert guarantees a
-                        // hit.
-                        one.insert("main.typ".to_string(), src.clone());
-                        one.insert(input.to_string(), src.clone());
-                        eprintln!(
-                            "{input}: {:?}{}: {}",
-                            diag.span,
-                            diag_snippet(&diag, &one),
-                            diag.message
-                        );
-                    }
+                Err(msg) => {
+                    eprintln!("{msg}");
                     std::process::exit(1);
                 }
             }
@@ -208,7 +294,22 @@ fn main() {
         } => {
             let input = pkg_root.as_str();
             let output = output.as_str();
-            let root = std::path::Path::new(input);
+            let root_path = std::path::Path::new(input);
+            // Single .typ file: translate as a one-file package (root =
+            // the parent directory, entry = the file itself; sibling
+            // .typ files join the set — assembly is on-demand).
+            let (root, single_entry) = if root_path.is_file() {
+                (
+                    root_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+                    root_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string),
+                )
+            } else {
+                (root_path.to_path_buf(), None)
+            };
+            let root = root.as_path();
             let mut files = std::collections::BTreeMap::new();
             let mut stack = vec![root.to_path_buf()];
             while let Some(dir) = stack.pop() {
@@ -227,27 +328,32 @@ fn main() {
                     }
                 }
             }
-            // Entry: read typst.toml's entrypoint per the package spec
-            // (relative to the package root, mandatory for published
-            // packages; no particular entry name is assumed).
-            let entry = std::fs::read_to_string(root.join("typst.toml"))
-                .map_err(|e| format!("failed to read typst.toml: {e}"))
-                .and_then(|text| {
-                    let manifest: toml::Table =
-                        toml::from_str(&text).map_err(|e| e.to_string())?;
-                    let entry = manifest
-                        .get("package")
-                        .and_then(|p| p.get("entrypoint"))
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| "typst.toml is missing package.entrypoint".to_string())?
-                        .trim_start_matches('/')
-                        .to_string();
-                    if files.contains_key(&entry) {
-                        Ok(entry)
-                    } else {
-                        Err(format!("entrypoint `{entry}` is not in the file set"))
-                    }
-                });
+            // Entry: for a single .typ input, the file itself; otherwise
+            // read typst.toml's entrypoint per the package spec (relative
+            // to the package root, mandatory for published packages; no
+            // particular entry name is assumed).
+            let entry = match single_entry {
+                Some(entry) if files.contains_key(&entry) => Ok(entry),
+                Some(entry) => Err(format!("entry file `{entry}` is not in the file set")),
+                None => std::fs::read_to_string(root.join("typst.toml"))
+                    .map_err(|e| format!("failed to read typst.toml: {e}"))
+                    .and_then(|text| {
+                        let manifest: toml::Table =
+                            toml::from_str(&text).map_err(|e| e.to_string())?;
+                        let entry = manifest
+                            .get("package")
+                            .and_then(|p| p.get("entrypoint"))
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| "typst.toml is missing package.entrypoint".to_string())?
+                            .trim_start_matches('/')
+                            .to_string();
+                        if files.contains_key(&entry) {
+                            Ok(entry)
+                        } else {
+                            Err(format!("entrypoint `{entry}` is not in the file set"))
+                        }
+                    }),
+            };
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(msg) => {
@@ -281,12 +387,17 @@ fn main() {
             };
             // The module name comes from the manifest's package.name (not
             // the directory name — package cache directory names are
-            // version numbers).
-            let name = std::fs::read_to_string(root.join("typst.toml"))
-                .ok()
-                .and_then(|text| {
-                    let manifest: toml::Table = toml::from_str(&text).ok()?;
-                    manifest.get("package")?.get("name")?.as_str().map(str::to_string)
+            // version numbers); a single .typ input names by its stem.
+            let name = root_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .filter(|e| *e == "typ")
+                .and_then(|_| root_path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                .or_else(|| {
+                    std::fs::read_to_string(root.join("typst.toml")).ok().and_then(|text| {
+                        let manifest: toml::Table = toml::from_str(&text).ok()?;
+                        manifest.get("package")?.get("name")?.as_str().map(str::to_string)
+                    })
                 })
                 .or_else(|| root.file_name().and_then(|s| s.to_str()).map(str::to_string))
                 .unwrap_or_else(|| "pkg".into());

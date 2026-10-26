@@ -542,9 +542,16 @@ impl World for InjectWorld {
                         + h as f64 * 3_600.0
                         + m as f64 * 60.0
                         + s as f64;
+                    // Mirrors Time::today's two gates: the i32 cast check
+                    // and FixedOffset::east_opt's validity range
+                    // (-86400 < secs < 86400, STRICT — an offset of
+                    // exactly ±24h or more → None → "unable to get the
+                    // current date").
                     if !total.is_finite()
                         || total < f64::from(i32::MIN)
                         || total > f64::from(i32::MAX)
+                        || total <= -86_400.0
+                        || total >= 86_400.0
                     {
                         return None;
                     }

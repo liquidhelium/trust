@@ -172,6 +172,11 @@ pub fn split_and_write(root: &Path) -> (Vec<Case>, BTreeMap<String, usize>) {
     }
 
     // 2) 写类别包源(suite-pkg 形态,同探针)并并行翻译。
+    // 翻译器的 vpath 采用官方布局前缀 tests/suite/(cats 磁盘布局不变):
+    // gen 侧 span/FileId 的解析深度与基准世界完全一致 —— path()/read()
+    // 的逃逸判定和相对解析对深度敏感(../../../../file.txt 从
+    // tests/suite/loading/x.typ 逃逸,从更浅路径不逃逸)。
+    let prefix = "tests/suite/";
     let cats_dir = root.join("cats");
     let gen_dir = root.join("gen");
     let _ = std::fs::remove_dir_all(&cats_dir);
@@ -192,7 +197,7 @@ pub fn split_and_write(root: &Path) -> (Vec<Case>, BTreeMap<String, usize>) {
                 let pkg_dir = cats_dir.join(key);
                 let mut input_files: BTreeMap<String, String> = BTreeMap::new();
                 input_files.insert(
-                    "lib.typ".into(),
+                    format!("{prefix}lib.typ"),
                     "// 批驱动入口(空):module_by_path 按需装配\n".into(),
                 );
                 for (rel, body) in sections {
@@ -201,7 +206,7 @@ pub fn split_and_write(root: &Path) -> (Vec<Case>, BTreeMap<String, usize>) {
                         std::fs::create_dir_all(parent).expect("create case dir");
                     }
                     std::fs::write(&p, body).expect("write case file");
-                    input_files.insert(rel.clone(), body.clone());
+                    input_files.insert(format!("{prefix}{rel}"), body.clone());
                 }
                 for (rel, text) in fixtures {
                     let p = pkg_dir.join(rel);
@@ -209,11 +214,11 @@ pub fn split_and_write(root: &Path) -> (Vec<Case>, BTreeMap<String, usize>) {
                         std::fs::create_dir_all(parent).expect("create fixture dir");
                     }
                     std::fs::write(&p, text).expect("write fixture file");
-                    input_files.insert(rel.clone(), text.clone());
+                    input_files.insert(format!("{prefix}{rel}"), text.clone());
                 }
                 let input = trust::PackageInput {
                     files: input_files,
-                    entry: "lib.typ".into(),
+                    entry: format!("{prefix}lib.typ"),
                     dep_entries: BTreeMap::new(),
                 };
                 let (tree, _diags) =

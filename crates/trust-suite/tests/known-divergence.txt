@@ -1,7 +1,4 @@
 cite-uncovered
-datetime-today-offset-invalid-1
-datetime-today-offset-invalid-2
-eval-path-resolve-relative
 image-svg-linked-csv
 image-svg-linked-file-not-found
 image-svg-linked-jpg1
@@ -11,6 +8,3 @@ image-svg-linked-pdf
 import-basic
 issue-measure-image
 measure-citation-in-flow-different-span
-path
-path-escapes
-read-escapes

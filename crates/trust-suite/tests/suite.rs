@@ -255,20 +255,31 @@ fn run() {
             );
         }
     }
+    // 世界布局镜像官方测试世界:所有套件文件挂在 tests/suite/<rel>
+    // (golden 的 main、gen 侧 span/FileId、相对导入/读取解析到同一棵树,
+    // 深度也一致 —— 逃逸判定对深度敏感)。分段文件与夹具在各类别包中
+    // 内容一致,重复挂载同键无害;另挂原始 suite/ 全文(read("./eval.typ")
+    // 这类对源文件本身的读取,官方世界从磁盘原样读到)。
     for (p, data) in walk(&root.join("cats")) {
         if p.extension().and_then(|e| e.to_str()) == Some("typ")
             && p.file_name().and_then(|n| n.to_str()) != Some("lib.typ")
         {
             let rel = p.strip_prefix(root.join("cats")).unwrap();
             let text = String::from_utf8_lossy(&data).into_owned();
-            base.add_source(&format!("suite/cats/{}", rel.to_string_lossy()), &text);
             let mut comps = rel.components();
             let _key = comps.next();
             let unprefixed: std::path::PathBuf = comps.collect();
             let unprefixed = unprefixed.to_string_lossy().to_string();
             if !unprefixed.is_empty() {
-                base.add_source(&unprefixed, &text);
+                base.add_source(&format!("tests/suite/{unprefixed}"), &text);
             }
+        }
+    }
+    for (p, data) in walk(&root.join("suite")) {
+        if p.extension().and_then(|e| e.to_str()) == Some("typ") {
+            let rel = p.strip_prefix(root.join("suite")).unwrap();
+            let text = String::from_utf8_lossy(&data).into_owned();
+            base.add_source(&format!("tests/suite/{}", rel.to_string_lossy()), &text);
         }
     }
 
@@ -296,7 +307,7 @@ fn run() {
         comemo::evict(0);
         let body = std::fs::read_to_string(root.join("cats").join(&case.key).join(&case.file))
             .expect("case body");
-        let path = format!("suite/cats/{}/{}", case.key, case.file);
+        let path = format!("tests/suite/{}", case.file);
         let paged = case
             .attrs
             .iter()
@@ -307,7 +318,7 @@ fn run() {
         comemo::evict(0);
         let gen_compiled2 = {
             let mut w = base.clone();
-            match assemble(&mut w, &case.key, &case.file) {
+            match assemble(&mut w, &case.key, &format!("tests/suite/{}", case.file)) {
                 Ok((_, mut asm_warnings)) => {
                     // main 与 golden 用完全相同的 vpath(两世界各自
                     // clone,不冲突):用例内相对路径的解析基准一致。

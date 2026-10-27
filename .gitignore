@@ -4,3 +4,4 @@ crates/*/target
 
 # Local resources and exploration notes
 /_things
+/tests/build/

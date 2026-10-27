@@ -1,0 +1,248 @@
+[package]
+name = "trust-suite-driver"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[[test]]
+name = "suite"
+path = "tests/suite.rs"
+
+[dependencies]
+trust-tests = { path = "../../" }
+trust-runtime = { path = "../../../crates/trust-runtime" }
+trust-world = { path = "../../../crates/trust-world" }
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+typst-svg = "0.15.1"
+typst-layout = "0.15.1"
+comemo = "0.5.1"
+ecow = "0.2"
+serde_json = "1"
+
+[dependencies.typst-assets]
+version = "0.15.1"
+features = ["fonts"]
+
+[dev-dependencies]
+# BEGIN tcat deps
+tcat-foundations-arguments = { path = "../gencrate-foundations-arguments" }
+tcat-foundations-array = { path = "../gencrate-foundations-array" }
+tcat-foundations-assert = { path = "../gencrate-foundations-assert" }
+tcat-foundations-bytes = { path = "../gencrate-foundations-bytes" }
+tcat-foundations-calc = { path = "../gencrate-foundations-calc" }
+tcat-foundations-content = { path = "../gencrate-foundations-content" }
+tcat-foundations-context = { path = "../gencrate-foundations-context" }
+tcat-foundations-datetime = { path = "../gencrate-foundations-datetime" }
+tcat-foundations-decimal = { path = "../gencrate-foundations-decimal" }
+tcat-foundations-dict = { path = "../gencrate-foundations-dict" }
+tcat-foundations-duration = { path = "../gencrate-foundations-duration" }
+tcat-foundations-eval = { path = "../gencrate-foundations-eval" }
+tcat-foundations-float = { path = "../gencrate-foundations-float" }
+tcat-foundations-int = { path = "../gencrate-foundations-int" }
+tcat-foundations-label = { path = "../gencrate-foundations-label" }
+tcat-foundations-panic = { path = "../gencrate-foundations-panic" }
+tcat-foundations-path = { path = "../gencrate-foundations-path" }
+tcat-foundations-plugin = { path = "../gencrate-foundations-plugin" }
+tcat-foundations-repr = { path = "../gencrate-foundations-repr" }
+tcat-foundations-std = { path = "../gencrate-foundations-std" }
+tcat-foundations-str = { path = "../gencrate-foundations-str" }
+tcat-foundations-type = { path = "../gencrate-foundations-type" }
+tcat-foundations-version = { path = "../gencrate-foundations-version" }
+tcat-html-elem = { path = "../gencrate-html-elem" }
+tcat-html-frame = { path = "../gencrate-html-frame" }
+tcat-html-mathml = { path = "../gencrate-html-mathml" }
+tcat-html-syntax = { path = "../gencrate-html-syntax" }
+tcat-html-typed = { path = "../gencrate-html-typed" }
+tcat-introspection-convergence = { path = "../gencrate-introspection-convergence" }
+tcat-introspection-counter = { path = "../gencrate-introspection-counter" }
+tcat-introspection-here = { path = "../gencrate-introspection-here" }
+tcat-introspection-locate = { path = "../gencrate-introspection-locate" }
+tcat-introspection-query = { path = "../gencrate-introspection-query" }
+tcat-introspection-state = { path = "../gencrate-introspection-state" }
+tcat-introspection-tags = { path = "../gencrate-introspection-tags" }
+tcat-layout-align = { path = "../gencrate-layout-align" }
+tcat-layout-angle = { path = "../gencrate-layout-angle" }
+tcat-layout-columns = { path = "../gencrate-layout-columns" }
+tcat-layout-container = { path = "../gencrate-layout-container" }
+tcat-layout-dir = { path = "../gencrate-layout-dir" }
+tcat-layout-flow-flow = { path = "../gencrate-layout-flow-flow" }
+tcat-layout-flow-footnote = { path = "../gencrate-layout-flow-footnote" }
+tcat-layout-flow-invisibles = { path = "../gencrate-layout-flow-invisibles" }
+tcat-layout-flow-orphan = { path = "../gencrate-layout-flow-orphan" }
+tcat-layout-flow-place = { path = "../gencrate-layout-flow-place" }
+tcat-layout-grid-cell = { path = "../gencrate-layout-grid-cell" }
+tcat-layout-grid-colspan = { path = "../gencrate-layout-grid-colspan" }
+tcat-layout-grid-footers = { path = "../gencrate-layout-grid-footers" }
+tcat-layout-grid-grid = { path = "../gencrate-layout-grid-grid" }
+tcat-layout-grid-headers = { path = "../gencrate-layout-grid-headers" }
+tcat-layout-grid-html = { path = "../gencrate-layout-grid-html" }
+tcat-layout-grid-positioning = { path = "../gencrate-layout-grid-positioning" }
+tcat-layout-grid-rowspan = { path = "../gencrate-layout-grid-rowspan" }
+tcat-layout-grid-rtl = { path = "../gencrate-layout-grid-rtl" }
+tcat-layout-grid-stroke = { path = "../gencrate-layout-grid-stroke" }
+tcat-layout-grid-styling = { path = "../gencrate-layout-grid-styling" }
+tcat-layout-grid-subheaders = { path = "../gencrate-layout-grid-subheaders" }
+tcat-layout-hide = { path = "../gencrate-layout-hide" }
+tcat-layout-inline-baseline = { path = "../gencrate-layout-inline-baseline" }
+tcat-layout-inline-bidi = { path = "../gencrate-layout-inline-bidi" }
+tcat-layout-inline-cjk = { path = "../gencrate-layout-inline-cjk" }
+tcat-layout-inline-hyphenate = { path = "../gencrate-layout-inline-hyphenate" }
+tcat-layout-inline-justify = { path = "../gencrate-layout-inline-justify" }
+tcat-layout-inline-linebreak = { path = "../gencrate-layout-inline-linebreak" }
+tcat-layout-inline-overhang = { path = "../gencrate-layout-inline-overhang" }
+tcat-layout-inline-shaping = { path = "../gencrate-layout-inline-shaping" }
+tcat-layout-inline-text = { path = "../gencrate-layout-inline-text" }
+tcat-layout-layout = { path = "../gencrate-layout-layout" }
+tcat-layout-length = { path = "../gencrate-layout-length" }
+tcat-layout-limits = { path = "../gencrate-layout-limits" }
+tcat-layout-line-numbers = { path = "../gencrate-layout-line-numbers" }
+tcat-layout-measure = { path = "../gencrate-layout-measure" }
+tcat-layout-pad = { path = "../gencrate-layout-pad" }
+tcat-layout-page = { path = "../gencrate-layout-page" }
+tcat-layout-pagebreak = { path = "../gencrate-layout-pagebreak" }
+tcat-layout-relative = { path = "../gencrate-layout-relative" }
+tcat-layout-repeat = { path = "../gencrate-layout-repeat" }
+tcat-layout-spacing = { path = "../gencrate-layout-spacing" }
+tcat-layout-stack = { path = "../gencrate-layout-stack" }
+tcat-layout-table = { path = "../gencrate-layout-table" }
+tcat-layout-transform = { path = "../gencrate-layout-transform" }
+tcat-loading-cbor = { path = "../gencrate-loading-cbor" }
+tcat-loading-csv = { path = "../gencrate-loading-csv" }
+tcat-loading-json = { path = "../gencrate-loading-json" }
+tcat-loading-read = { path = "../gencrate-loading-read" }
+tcat-loading-toml = { path = "../gencrate-loading-toml" }
+tcat-loading-xml = { path = "../gencrate-loading-xml" }
+tcat-loading-yaml = { path = "../gencrate-loading-yaml" }
+tcat-math-accent = { path = "../gencrate-math-accent" }
+tcat-math-alignment = { path = "../gencrate-math-alignment" }
+tcat-math-attach = { path = "../gencrate-math-attach" }
+tcat-math-call = { path = "../gencrate-math-call" }
+tcat-math-cancel = { path = "../gencrate-math-cancel" }
+tcat-math-cases = { path = "../gencrate-math-cases" }
+tcat-math-class = { path = "../gencrate-math-class" }
+tcat-math-delimited = { path = "../gencrate-math-delimited" }
+tcat-math-equation = { path = "../gencrate-math-equation" }
+tcat-math-frac = { path = "../gencrate-math-frac" }
+tcat-math-interactions = { path = "../gencrate-math-interactions" }
+tcat-math-mat = { path = "../gencrate-math-mat" }
+tcat-math-mozilla-mathml-test = { path = "../gencrate-math-mozilla-mathml-test" }
+tcat-math-multiline = { path = "../gencrate-math-multiline" }
+tcat-math-op = { path = "../gencrate-math-op" }
+tcat-math-primes = { path = "../gencrate-math-primes" }
+tcat-math-root = { path = "../gencrate-math-root" }
+tcat-math-size = { path = "../gencrate-math-size" }
+tcat-math-spacing = { path = "../gencrate-math-spacing" }
+tcat-math-stretch = { path = "../gencrate-math-stretch" }
+tcat-math-style = { path = "../gencrate-math-style" }
+tcat-math-symbols = { path = "../gencrate-math-symbols" }
+tcat-math-syntax = { path = "../gencrate-math-syntax" }
+tcat-math-text = { path = "../gencrate-math-text" }
+tcat-math-underover = { path = "../gencrate-math-underover" }
+tcat-math-vec = { path = "../gencrate-math-vec" }
+tcat-model-asset = { path = "../gencrate-model-asset" }
+tcat-model-bibliography = { path = "../gencrate-model-bibliography" }
+tcat-model-cite = { path = "../gencrate-model-cite" }
+tcat-model-divider = { path = "../gencrate-model-divider" }
+tcat-model-document = { path = "../gencrate-model-document" }
+tcat-model-emph-strong = { path = "../gencrate-model-emph-strong" }
+tcat-model-enum = { path = "../gencrate-model-enum" }
+tcat-model-figure = { path = "../gencrate-model-figure" }
+tcat-model-heading = { path = "../gencrate-model-heading" }
+tcat-model-link = { path = "../gencrate-model-link" }
+tcat-model-list = { path = "../gencrate-model-list" }
+tcat-model-numbering = { path = "../gencrate-model-numbering" }
+tcat-model-outline = { path = "../gencrate-model-outline" }
+tcat-model-par = { path = "../gencrate-model-par" }
+tcat-model-quote = { path = "../gencrate-model-quote" }
+tcat-model-ref = { path = "../gencrate-model-ref" }
+tcat-model-terms = { path = "../gencrate-model-terms" }
+tcat-model-title = { path = "../gencrate-model-title" }
+tcat-pdf-attach = { path = "../gencrate-pdf-attach" }
+tcat-pdf-validation = { path = "../gencrate-pdf-validation" }
+tcat-pdftags-break = { path = "../gencrate-pdftags-break" }
+tcat-pdftags-deco = { path = "../gencrate-pdftags-deco" }
+tcat-pdftags-disable = { path = "../gencrate-pdftags-disable" }
+tcat-pdftags-figure = { path = "../gencrate-pdftags-figure" }
+tcat-pdftags-footnote = { path = "../gencrate-pdftags-footnote" }
+tcat-pdftags-grid = { path = "../gencrate-pdftags-grid" }
+tcat-pdftags-heading = { path = "../gencrate-pdftags-heading" }
+tcat-pdftags-lang = { path = "../gencrate-pdftags-lang" }
+tcat-pdftags-layout = { path = "../gencrate-pdftags-layout" }
+tcat-pdftags-link = { path = "../gencrate-pdftags-link" }
+tcat-pdftags-list = { path = "../gencrate-pdftags-list" }
+tcat-pdftags-logical-children = { path = "../gencrate-pdftags-logical-children" }
+tcat-pdftags-query = { path = "../gencrate-pdftags-query" }
+tcat-pdftags-raw = { path = "../gencrate-pdftags-raw" }
+tcat-pdftags-table = { path = "../gencrate-pdftags-table" }
+tcat-pdftags-text = { path = "../gencrate-pdftags-text" }
+tcat-playground = { path = "../gencrate-playground" }
+tcat-reg-capture-analysis = { path = "../gencrate-reg-capture-analysis" }
+tcat-reg-import-chains = { path = "../gencrate-reg-import-chains" }
+tcat-scripting-blocks = { path = "../gencrate-scripting-blocks" }
+tcat-scripting-call = { path = "../gencrate-scripting-call" }
+tcat-scripting-closure = { path = "../gencrate-scripting-closure" }
+tcat-scripting-destructuring = { path = "../gencrate-scripting-destructuring" }
+tcat-scripting-field = { path = "../gencrate-scripting-field" }
+tcat-scripting-for = { path = "../gencrate-scripting-for" }
+tcat-scripting-get-rule = { path = "../gencrate-scripting-get-rule" }
+tcat-scripting-if = { path = "../gencrate-scripting-if" }
+tcat-scripting-import = { path = "../gencrate-scripting-import" }
+tcat-scripting-include = { path = "../gencrate-scripting-include" }
+tcat-scripting-let = { path = "../gencrate-scripting-let" }
+tcat-scripting-loop = { path = "../gencrate-scripting-loop" }
+tcat-scripting-methods = { path = "../gencrate-scripting-methods" }
+tcat-scripting-ops = { path = "../gencrate-scripting-ops" }
+tcat-scripting-params = { path = "../gencrate-scripting-params" }
+tcat-scripting-recursion = { path = "../gencrate-scripting-recursion" }
+tcat-scripting-return = { path = "../gencrate-scripting-return" }
+tcat-scripting-while = { path = "../gencrate-scripting-while" }
+tcat-styling-fold = { path = "../gencrate-styling-fold" }
+tcat-styling-set = { path = "../gencrate-styling-set" }
+tcat-styling-show = { path = "../gencrate-styling-show" }
+tcat-styling-show-set = { path = "../gencrate-styling-show-set" }
+tcat-styling-show-text = { path = "../gencrate-styling-show-text" }
+tcat-styling-show-where = { path = "../gencrate-styling-show-where" }
+tcat-symbols-symbol = { path = "../gencrate-symbols-symbol" }
+tcat-syntax-backtracking = { path = "../gencrate-syntax-backtracking" }
+tcat-syntax-code = { path = "../gencrate-syntax-code" }
+tcat-syntax-comment = { path = "../gencrate-syntax-comment" }
+tcat-syntax-depth = { path = "../gencrate-syntax-depth" }
+tcat-syntax-escape = { path = "../gencrate-syntax-escape" }
+tcat-syntax-newlines = { path = "../gencrate-syntax-newlines" }
+tcat-syntax-numbers = { path = "../gencrate-syntax-numbers" }
+tcat-syntax-panics = { path = "../gencrate-syntax-panics" }
+tcat-syntax-shebang = { path = "../gencrate-syntax-shebang" }
+tcat-syntax-shorthand = { path = "../gencrate-syntax-shorthand" }
+tcat-text-case = { path = "../gencrate-text-case" }
+tcat-text-coma = { path = "../gencrate-text-coma" }
+tcat-text-copy-paste = { path = "../gencrate-text-copy-paste" }
+tcat-text-deco = { path = "../gencrate-text-deco" }
+tcat-text-edge = { path = "../gencrate-text-edge" }
+tcat-text-em = { path = "../gencrate-text-em" }
+tcat-text-font = { path = "../gencrate-text-font" }
+tcat-text-lang = { path = "../gencrate-text-lang" }
+tcat-text-lorem = { path = "../gencrate-text-lorem" }
+tcat-text-raw = { path = "../gencrate-text-raw" }
+tcat-text-shift = { path = "../gencrate-text-shift" }
+tcat-text-smallcaps = { path = "../gencrate-text-smallcaps" }
+tcat-text-smartquote = { path = "../gencrate-text-smartquote" }
+tcat-text-space = { path = "../gencrate-text-space" }
+tcat-visualize-circle = { path = "../gencrate-visualize-circle" }
+tcat-visualize-color = { path = "../gencrate-visualize-color" }
+tcat-visualize-curve = { path = "../gencrate-visualize-curve" }
+tcat-visualize-ellipse = { path = "../gencrate-visualize-ellipse" }
+tcat-visualize-gradient = { path = "../gencrate-visualize-gradient" }
+tcat-visualize-image = { path = "../gencrate-visualize-image" }
+tcat-visualize-line = { path = "../gencrate-visualize-line" }
+tcat-visualize-polygon = { path = "../gencrate-visualize-polygon" }
+tcat-visualize-rect = { path = "../gencrate-visualize-rect" }
+tcat-visualize-square = { path = "../gencrate-visualize-square" }
+tcat-visualize-stroke = { path = "../gencrate-visualize-stroke" }
+tcat-visualize-tiling = { path = "../gencrate-visualize-tiling" }
+# END tcat deps
+
+[workspace]

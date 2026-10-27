@@ -49,7 +49,7 @@ which verifies byte-identical output before timing; median of 10 runs):
 | `crates/trust-runtime` | Runtime support for generated code: parameter destructuring, call protocol, closure construction, content/markup construction |
 | `crates/trust-world` | Injected World: global module injection, package virtualization, the `module_init` engine-value protocol |
 | `crates/trust-diff` | Differential testing: fixtures translated at build time, compared case by case against the `typst-eval` interpreter |
-| `crates/trust-suite` | Official typst `tests/suite` comparison harness: vendored corpus, per-case differential against the interpreter, known-divergence gating |
+| `tests/` | Official typst `tests/suite` comparison harness: vendored corpus, per-case differential against the interpreter, known-divergence gating (`cargo suite` regenerates, `cargo testit` runs) |
 | `docs/` | Architecture and host-integration documents |
 
 ## Build
@@ -133,7 +133,7 @@ design basis see [docs/architecture.md](docs/architecture.md).
   interpreted by `typst-eval` and compiled by `trust` — and the results are
   compared value by value. Expectations are produced by typst itself, never
   hand-written.
-- **Official suite comparison** (`crates/trust-suite`): the official typst
+- **Official suite comparison** (`tests/`): the official typst
   `tests/suite` corpus is vendored and driven case by case — each segment
   compiles two ways through one world, the translated assembly versus the
   original interpreted sources — comparing rendered output page by page,

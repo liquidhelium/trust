@@ -2289,6 +2289,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trust-tests"
+version = "0.1.0"
+dependencies = [
+ "comemo",
+ "serde",
+ "serde_json",
+ "trust",
+ "trust-runtime",
+ "typst",
+]
+
+[[package]]
 name = "trust-world"
 version = "0.1.0"
 dependencies = [

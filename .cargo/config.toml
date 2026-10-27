@@ -1,0 +1,5 @@
+[alias]
+# Regenerates the translated suite corpus under tests/build/.
+suite = "run -p trust-tests --bin refresh"
+# Runs the official-suite differential (generate first with `cargo suite`).
+testit = "test --manifest-path tests/build/driver/Cargo.toml --test suite"

@@ -12,27 +12,22 @@ fn collect_typ_sources(
     skip: Option<&std::path::Path>,
 ) -> std::collections::BTreeMap<String, String> {
     let mut files = std::collections::BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("typ") {
+            continue;
+        }
         if let Some(skip) = skip
-            && std::fs::canonicalize(&dir).is_ok_and(|d| d == skip)
+            && std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(skip))
         {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                files.insert(rel, std::fs::read_to_string(&path).expect("read .typ"));
-            }
-        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        files.insert(rel, std::fs::read_to_string(path).expect("read .typ"));
     }
     files
 }
@@ -84,37 +79,6 @@ fn diag_snippet(diag: &trust::Diag, files: &std::collections::BTreeMap<String, S
         );
     }
     out
-}
-
-fn package_cache_root() -> std::path::PathBuf {
-    std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".cache/typst/packages")
-        })
-}
-
-fn fetch_package(ns: &str, name: &str, version: &str) -> bool {
-    if ns != "preview" {
-        return false; // Only the official preview namespace is recognized
-    }
-    let url = format!("https://packages.typst.org/preview/{name}-{version}.tar.gz");
-    let Ok(resp) = ureq::get(&url).call() else {
-        return false;
-    };
-    let reader = std::io::BufReader::new(resp.into_reader());
-    let gz = flate2::read::GzDecoder::new(reader);
-    let cache = package_cache_root();
-    let dir = cache.join(ns).join(name).join(version);
-    let parent = dir.parent().map(std::path::Path::to_path_buf);
-    if let Some(p) = parent
-        && std::fs::create_dir_all(&p).is_err()
-    {
-        return false;
-    }
-    let mut archive = tar::Archive::new(gz);
-    archive.unpack(&dir).is_ok()
 }
 
 /// Command-line interface (clap derive).
@@ -800,8 +764,24 @@ fn collect_translatable_deps(
             // {name}-{version}.tar.gz; TRUST_NO_FETCH=1 disables it. Only
             // on failure does it fall back to runtime interpretation.
             if !dir.join("typst.toml").exists() {
+                // typst-kit's SystemPackages: same cache layout the CLI
+                // uses (atomic unpack into the cache, data dir first).
                 let ok = std::env::var_os("TRUST_NO_FETCH").is_none()
-                    && fetch_package(ns, name, rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
+                    && rest
+                        .split_once(':')
+                        .and_then(|(_, v)| v.parse().ok())
+                        .map(|version| {
+                            let spec = typst_syntax::package::PackageSpec {
+                                namespace: ns.into(),
+                                name: name.into(),
+                                version,
+                            };
+                            let packages = typst_kit::packages::SystemPackages::new(
+                                typst_kit::downloader::SystemDownloader::new("trust"),
+                            );
+                            packages.obtain(&spec).is_ok()
+                        })
+                        .unwrap_or(false);
                 if !ok {
                     eprintln!(
                         "dependency not found in local package cache (falling back to runtime interpretation): {spec}"

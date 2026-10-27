@@ -77,11 +77,15 @@ pub fn embedded_source(id: FileId) -> Option<String> {
 }
 
 /// The embedded bytes for a FileId, if a registered module owns it.
+/// Text-only entries (source texts) fall back to their UTF-8 bytes:
+/// `read("x.typ")` of a package source file is a dynamic read like any
+/// other and must work without the host having the package.
 pub fn embedded_bytes(id: FileId) -> Option<Bytes> {
-    registry()
-        .read()
-        .unwrap()
-        .get(&id)
-        .and_then(|f| f.data.clone())
-        .map(Bytes::new)
+    let guard = registry().read().unwrap();
+    let file = guard.get(&id)?;
+    match (&file.data, &file.text) {
+        (Some(data), _) => Some(Bytes::new(data.clone())),
+        (None, Some(text)) => Some(Bytes::from_string(text.clone())),
+        (None, None) => None,
+    }
 }

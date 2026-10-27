@@ -33,7 +33,16 @@ pub(super) fn parse_module_access(expr: ast::Expr) -> Option<(String, Vec<String
 pub(super) fn normalize_import(from: &str, raw: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let dir = if raw.starts_with('/') {
-        Vec::new()
+        // Absolute path: anchored at the owning root. In package key
+        // space (`@ns/name:ver/...` keys) that root is the spec segment
+        // — typst's vpath join re-anchors inside the same root, never
+        // the project. Degenerate ".." pops past the root merely miss
+        // the file set (runtime typst then reports the proper escape
+        // error through the glue fallback).
+        match from.split_once('/') {
+            Some((first, _)) if first.starts_with('@') => vec![first],
+            _ => Vec::new(),
+        }
     } else {
         match from.rfind('/') {
             Some(idx) => from[..idx].split('/').collect::<Vec<_>>(),

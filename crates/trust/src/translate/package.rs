@@ -56,6 +56,13 @@ pub struct PackageInput {
     /// interpretation); misses keep the runtime fallback (mixed
     /// execution).
     pub dep_entries: std::collections::BTreeMap<String, String>,
+    /// The package's own non-source files to embed into the module
+    /// artifact (data files, wasm plugins): translator vpath → bytes.
+    /// The generated crate registers them (plus its source texts) in
+    /// `trust_runtime::embedded`, so a host injecting the module needs no
+    /// copy of the package on disk or in cache. Empty for consumers that
+    /// mount files themselves (the suite).
+    pub data_files: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// The emittable output for one typ file: the file body + module names for
@@ -1443,6 +1450,46 @@ fn tree_impl(
         .replace("{EVAL_CALLS}", &parts.eval_tree)
         .replace("{REGISTRY}", &render_registry(&parts.registry, true))
         .replace("{ITEMS}", &root_decls);
+    // Embedded package files: the module registers its own files (source
+    // texts + data binaries) at install; worlds consult the registry so
+    // hosts need no copy of the package. Binaries ride as sidecar files
+    // (`files/<n>.bin` beside the tree) via include_bytes! — tree
+    // consumers must carry them along.
+    if !input.data_files.is_empty() {
+        let mut entries = String::new();
+        let mut sidecars: Vec<(String, String)> = Vec::new();
+        for (vkey, text) in &input.files {
+            let _ = writeln!(
+                entries,
+                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), text: Some({text:?}.into()), data: None }},"
+            );
+        }
+        for (idx, (vkey, _bytes)) in input.data_files.iter().enumerate() {
+            let name = format!("files/{idx}.bin");
+            sidecars.push((name.clone(), format!("__sidecar_{idx}")));
+            let _ = writeln!(
+                entries,
+                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), text: None, data: Some(include_bytes!(\"files/{idx}.bin\").to_vec()) }},"
+            );
+        }
+        let mut decl = String::from(
+            "// Generated: the package's own files, registered at install.\n\
+             // Data binaries ride as sidecar `files/*.bin` next to the tree —\n\
+             // carry them along when relocating the output.\n\
+             use trust_runtime as rt;\n",
+        );
+        decl.push_str("pub(crate) fn register() {\n    rt::embedded::register_embedded_files(vec![\n");
+        decl.push_str(&entries);
+        decl.push_str("    ]);\n}\n");
+        tree.insert("embedded_files.rs".to_string(), decl);
+        root = root.replace(
+            "pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {\n    rt::init_module(world, library, module_init)\n}",
+            "pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {\n    embedded_files::register();\n    rt::init_module(world, library, module_init)\n}",
+        );
+        // {ITEMS} is already substituted into `root` at this point; the
+        // module declaration appends at the end (same namespace).
+        root.push_str("\nmod embedded_files;\n");
+    }
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
     // The C2 closure section gets the same treatment as file bodies:
     // flat-module references to other files inside the bodies

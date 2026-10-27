@@ -62,6 +62,7 @@ fn main() {
             files,
             entry: "entry.typ".into(),
             dep_entries: Default::default(),
+            data_files: Default::default(),
         };
         let code = trust::translate_package(&input, &name).unwrap_or_else(|diags| {
             panic!(

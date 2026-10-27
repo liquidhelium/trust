@@ -50,6 +50,26 @@ embedding constructs a `Library` somewhere; that is the natural mount point.
 `InjectWorld::init_native_module` is a thin wrapper over these two
 primitives, kept for test convenience.
 
+## Embedded package files
+
+The generated crate carries the package's own files and registers them
+at `install()`: the manifest (`typst.toml` — a host's spec-import reads
+it from the world), the source texts of the translated closure, and the
+data files the package's code statically references (`read`/`image`/
+`plugin`/`csv`/`json`/`toml`/`yaml`/`xml`/`cbor`/`bibliography` with a
+string-literal argument; computed paths stay with the host world, like
+typst itself). Dependency-merged packages (`--with-deps`, cache layout)
+embed their non-source files wholesale. Entries register under the
+package's `PackageSpec` root — the FileId namespace typst's own import
+resolution uses.
+
+Worlds consult `trust_runtime::embedded::` (`embedded_source` /
+`embedded_bytes`) to serve these; `InjectWorld` does so after its own
+mounts and before disk/cache fallbacks (embedded shadows, nothing the
+host explicitly mounted is overridden). Binary payloads ride as sidecar
+`files/*.bin` beside the generated tree — carry them along when
+relocating the output.
+
 ## Modules are self-contained after injection
 
 State travels with the function values (per-build state slots), not in a

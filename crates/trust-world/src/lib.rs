@@ -459,6 +459,17 @@ impl World for InjectWorld {
         if let Some(source) = self.sources.get(&id) {
             return Ok(source.clone());
         }
+        // Embedded package files registered by injected modules
+        // (embedded shadows disk/cache, matching the standalone world's
+        // lookup order).
+        if let Some(text) = trust_runtime::embedded::embedded_source(id) {
+            let source = Source::new(id, text);
+            self.package_sources
+                .write()
+                .unwrap()
+                .insert(id, source.clone());
+            return Ok(source);
+        }
         // Package path fallback: the on-disk package repository; parse once
         // into the cache (see the field comment).
         if let Some(cached) = self.package_sources.read().unwrap().get(&id) {
@@ -494,6 +505,10 @@ impl World for InjectWorld {
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         if let Some(bytes) = self.files.get(&id) {
             return Ok(bytes.clone());
+        }
+        // Embedded package files (see source()'s note on lookup order).
+        if let Some(bytes) = trust_runtime::embedded::embedded_bytes(id) {
+            return Ok(bytes);
         }
         // For source files, serve a byte view of their text (an equivalent
         // the World trait docs sanction).

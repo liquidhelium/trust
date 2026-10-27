@@ -9,6 +9,7 @@ mod assign;
 mod calls;
 mod content;
 mod context;
+pub mod embedded;
 mod destruct;
 mod eval;
 mod flow;

@@ -32,6 +32,103 @@ fn collect_typ_sources(
     files
 }
 
+/// Resolves `raw` (relative or root-absolute) in the translator's key
+/// space against the file `from`, via typst-syntax's own `VirtualPath::
+/// join` — the same normalization, leading-separator root anchoring, and
+/// escape error that `PathOrStr::resolve` applies to imports and reads
+/// (`parent().join(v)`, falling back to the base itself when parentless).
+fn resolve_key(from: &str, raw: &str) -> Option<String> {
+    use typst_syntax::{RootedPath, VirtualPath, VirtualRoot};
+    let id = if from.starts_with('@') {
+        let colon = from.find(':')?;
+        let slash = from[colon..].find('/')? + colon;
+        let spec: typst_syntax::package::PackageSpec = from[..slash].parse().ok()?;
+        RootedPath::new(
+            VirtualRoot::Package(spec),
+            VirtualPath::new(&from[slash + 1..]).ok()?,
+        )
+        .intern()
+    } else {
+        RootedPath::new(VirtualRoot::Project, VirtualPath::new(from).ok()?).intern()
+    };
+    let rooted = id.get();
+    let base = rooted.vpath().parent().unwrap_or_else(|| rooted.vpath().clone());
+    let joined = base.join(raw).ok()?;
+    // VirtualPath's string form carries a leading separator; the
+    // key space is separator-free.
+    let vpath = joined.get_with_slash().trim_start_matches('/');
+    Some(match rooted.root() {
+        typst_syntax::VirtualRoot::Project => vpath.to_string(),
+        typst_syntax::VirtualRoot::Package(spec) => {
+            format!("@{}/{name}:{version}/{vpath}", spec.namespace, name = spec.name, version = spec.version)
+        }
+    })
+}
+
+/// The file-reading functions of the typst standard library: their first
+/// positional argument is a path resolved relative to the calling file.
+const FILE_READERS: &[&str] = &[
+    "read", "image", "plugin", "csv", "json", "toml", "yaml", "xml", "cbor", "bibliography",
+];
+
+/// Reference-reachable data files of a translation target: every
+/// file-reading call with a **string-literal** first argument, its path
+/// resolved in the translator's key space (relative to the calling
+/// file's directory; absolute paths anchor at the owning root — the spec
+/// segment in package key space). Computed paths stay with the run-time
+/// world (like typst itself, which also only reads them at run time).
+/// Missing files are skipped (the run-time read reports typst's own
+/// error, or the host world serves it).
+fn referenced_data_files(
+    files: &std::collections::BTreeMap<String, String>,
+    disk_root: &std::path::Path,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn scan(node: &typst_syntax::SyntaxNode, from: &str, out: &mut Vec<String>) {
+        if let Some(call) = node.cast::<typst_syntax::ast::FuncCall>()
+            && let typst_syntax::ast::Expr::Ident(ident) = call.callee()
+            && FILE_READERS.contains(&ident.as_str())
+            && let Some(arg) = call.args().items().next()
+            && let typst_syntax::ast::Arg::Pos(typst_syntax::ast::Expr::Str(s)) = arg
+        {
+            let raw = s.get().to_string();
+            if !raw.starts_with('@')
+                && let Some(key) = resolve_key(from, &raw)
+            {
+                out.push(key);
+            }
+        }
+        for child in node.children() {
+            scan(child, from, out);
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    for (vkey, text) in files {
+        let root_node = typst_syntax::parse(text);
+        let mut found = Vec::new();
+        scan(&root_node, vkey, &mut found);
+        for key in found {
+            if out.contains_key(&key) || files.contains_key(&key) {
+                continue; // already embedded, or a source (not data)
+            }
+            // Strip the spec the way package_root_file_id parses it:
+            // the vkey is `@ns/name:ver/rel` — the spec itself contains
+            // a slash (between namespace and name), so the split point is
+            // the slash AFTER the version's colon.
+            let rel = (|| {
+                let colon = key.find(':')?;
+                let slash = key[colon..].find('/')? + colon;
+                key.starts_with('@').then(|| key[slash + 1..].to_string())
+            })();
+            let rel = rel.unwrap_or_else(|| key.clone());
+            if let Ok(bytes) = std::fs::read(disk_root.join(&rel)) {
+                out.insert(key, bytes);
+            }
+        }
+    }
+    out
+}
+
 /// Collects the **import closure** of one entry file: every `.typ` file
 /// reachable through `import`/`include` string sources (anywhere in the
 /// tree, including inside function bodies — typst resolves those at call
@@ -47,7 +144,7 @@ fn collect_import_closure(
     entry: &str,
     dynamic: &std::collections::BTreeSet<String>,
 ) -> std::collections::BTreeMap<String, String> {
-    fn scan(node: &typst_syntax::SyntaxNode, dir: &str, out: &mut Vec<String>) {
+    fn scan(node: &typst_syntax::SyntaxNode, vkey: &str, out: &mut Vec<String>) {
         for source in [
             node.cast::<typst_syntax::ast::ModuleImport>()
                 .map(|i| i.source()),
@@ -59,20 +156,19 @@ fn collect_import_closure(
         {
             if let typst_syntax::ast::Expr::Str(s) = source {
                 let raw = s.get().to_string();
-                if !raw.starts_with('@') && !raw.starts_with('/') {
-                    let joined = if dir.is_empty() {
-                        raw.clone()
-                    } else {
-                        format!("{dir}/{raw}")
-                    };
-                    if let Some(norm) = normalize_vpath(&joined) {
-                        out.push(norm);
-                    }
+                // '@spec' imports are package-space (handled by
+                // --with-deps); everything else resolves through typst's
+                // own join (relative to the importing file, root-absolute
+                // '/' included).
+                if !raw.starts_with('@')
+                    && let Some(key) = resolve_key(vkey, &raw)
+                {
+                    out.push(key);
                 }
             }
         }
         for child in node.children() {
-            scan(child, dir, out);
+            scan(child, vkey, out);
         }
     }
 
@@ -88,9 +184,8 @@ fn collect_import_closure(
             continue;
         };
         let root_node = typst_syntax::parse(&text);
-        let dir = vpath.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
         let mut found = Vec::new();
-        scan(&root_node, &dir, &mut found);
+        scan(&root_node, &vpath, &mut found);
         for f in found {
             if !seen.contains(&f) {
                 queue.push(f);
@@ -99,24 +194,6 @@ fn collect_import_closure(
         files.insert(vpath, text);
     }
     files
-}
-
-/// Normalizes a joined vpath lexically (`a/../b` → `b`); `None` when it
-/// escapes the root.
-fn normalize_vpath(path: &str) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                if parts.pop().is_none() {
-                    return None;
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    Some(parts.join("/"))
 }
 
 /// Download a package from the registry and unpack it into the local cache
@@ -454,8 +531,8 @@ fn main() {
             // read typst.toml's entrypoint per the package spec (relative
             // to the package root, mandatory for published packages; no
             // particular entry name is assumed).
-            let entry = match single_entry {
-                Some(entry) if files.contains_key(&entry) => Ok(entry),
+            let entry = match single_entry.as_deref() {
+                Some(entry) if files.contains_key(entry) => Ok(entry.to_string()),
                 Some(entry) => Err(format!("entry file `{entry}` is not in the file set")),
                 None => std::fs::read_to_string(root.join("typst.toml"))
                     .map_err(|e| format!("failed to read typst.toml: {e}"))
@@ -476,7 +553,10 @@ fn main() {
                         }
                     }),
             };
-            let entry = match entry {
+            let dir_mode = single_entry.is_none();
+            let mut pkg_data_files: std::collections::BTreeMap<String, Vec<u8>> =
+                Default::default();
+            let mut entry = match entry {
                 Ok(entry) => entry,
                 Err(msg) => {
                     eprintln!("failed to resolve entrypoint: {msg}");
@@ -492,6 +572,68 @@ fn main() {
             if !src_root.is_empty() {
                 files.retain(|k, _| k.starts_with(&src_root));
             }
+            // Package identity (directory mode only — a single .typ input
+            // has no manifest and keeps plain project keys): the package's
+            // own files key under its PackageSpec root (`{spec}/{rel}`) —
+            // the FileId namespace typst's import resolution uses
+            // (relative imports inherit the caller's root, so a package's
+            // tree lives under its package root, never the project). The
+            // spec derives from the cache layout
+            // (`cache/<ns>/<name>/<ver>`) when translating from cache,
+            // else `@preview/{name}:{version}` from the manifest
+            // (namespaces are not part of typst.toml).
+            if dir_mode {
+                let manifest_name = std::fs::read_to_string(root.join("typst.toml"))
+                    .ok()
+                    .and_then(|text| {
+                        let manifest: toml::Table = toml::from_str(&text).ok()?;
+                        let package = manifest.get("package")?;
+                        let name = package.get("name")?.as_str()?.to_string();
+                        let version = package.get("version")?.as_str()?.to_string();
+                        Some((name, version))
+                    });
+                let spec = (|| {
+                    let ver = root.file_name()?.to_str()?;
+                    let name = root.parent()?.file_name()?.to_str()?;
+                    let ns = root.parent()?.parent()?.file_name()?.to_str()?;
+                    if name == manifest_name.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
+                        && ver == manifest_name.as_ref().map(|(_, v)| v.as_str()).unwrap_or("")
+                    {
+                        Some(format!("@{ns}/{name}:{ver}"))
+                    } else {
+                        None
+                    }
+                })()
+                .or_else(|| {
+                    manifest_name
+                        .as_ref()
+                        .map(|(name, version)| format!("@preview/{name}:{version}"))
+                });
+                let Some(spec) = spec else {
+                    eprintln!(
+                        "failed to derive a package spec (typst.toml needs name and version)"
+                    );
+                    std::process::exit(2);
+                };
+                let mut spec_files = std::collections::BTreeMap::new();
+                for (k, v) in &files {
+                    spec_files.insert(format!("{spec}/{k}"), v.clone());
+                }
+                files = spec_files;
+                entry = format!("{spec}/{entry}");
+                // The package's own non-.typ files (data, wasm, the
+                // manifest) embed into the module artifact by default.
+                // Data embedding policy (by how files enter):
+                // dependency-merged packages enumerate fully (cache
+                // layout = published shape, the ecosystem's cleanliness
+                // convention); the explicit translation target embeds by
+                // reference reachability (file-reading functions with
+                // string-literal arguments — a dirty working tree can
+                // never leak in). typst.toml always embeds (a host's
+                // spec-import reads it from the world).
+                pkg_data_files = referenced_data_files(&files, root);
+                pkg_data_files.insert(format!("{spec}/typst.toml"), std::fs::read(root.join("typst.toml")).unwrap_or_default());
+            }
             // Recursive dependencies (--with-deps): resolve @spec from the
             // local package cache, merging translatable dependency packages
             // into the file set ({spec}/{rel} keys) with import edges
@@ -502,10 +644,48 @@ fn main() {
             } else {
                 Default::default()
             };
+            // Dependency-merged packages embed their non-.typ files by
+            // full enumeration: they come from the cache layout — the
+            // published shape, the ecosystem's cleanliness convention
+            // (same policy as the standalone path's dep assets).
+            if !dep_entries.is_empty() {
+                let cache_root = std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join(".cache/typst/packages"))
+                    })
+                    .unwrap_or_else(|| {
+                        std::path::PathBuf::from(".cache/typst/packages")
+                    });
+                for spec in dep_entries.keys() {
+                    let Some(rest) = spec.strip_prefix('@') else { continue };
+                    let Some((ns, name_ver)) = rest.split_once('/') else { continue };
+                    let Some((name, ver)) = name_ver.split_once(':') else { continue };
+                    let base = cache_root.join(ns).join(name).join(ver);
+                    for entry_item in walkdir::WalkDir::new(&base).into_iter().filter_map(Result::ok) {
+                        let path = entry_item.path();
+                        if !path.is_file()
+                            || path.extension().and_then(|x| x.to_str()) == Some("typ")
+                        {
+                            continue;
+                        }
+                        let Ok(rel) = path.strip_prefix(&base) else { continue };
+                        let vkey = format!("{spec}/{}", rel.to_string_lossy().replace('\\', "/"));
+                        if !files.contains_key(&vkey) {
+                            pkg_data_files.insert(
+                                vkey,
+                                std::fs::read(path).unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
+            }
             let pkg = trust::PackageInput {
                 files,
                 entry,
                 dep_entries,
+                data_files: pkg_data_files.clone(),
             };
             // The module name comes from the manifest's package.name (not
             // the directory name — package cache directory names are
@@ -555,6 +735,17 @@ fn main() {
                     Ok(tree) => {
                         let out_root = std::path::Path::new(dir);
                         std::fs::create_dir_all(out_root).expect("create output dir");
+                        // Embedded data sidecars (files/<n>.bin), referenced
+                        // from the generated embedded_files.rs via
+                        // include_bytes! relative to the crate root.
+                        if dir_mode {
+                            for (idx, (_, bytes)) in pkg_data_files.iter().enumerate() {
+                                let side = out_root.join(format!("files/{idx}.bin"));
+                                std::fs::create_dir_all(side.parent().expect("parent"))
+                                    .expect("create sidecar dir");
+                                std::fs::write(&side, bytes).expect("write sidecar");
+                            }
+                        }
                         let mut bytes = 0usize;
                         for (rel, content) in &tree {
                             let path = out_root.join(rel);
@@ -710,6 +901,7 @@ fn coverage(root: &str) -> i32 {
                 files: map,
                 entry,
                 dep_entries: Default::default(),
+                data_files: Default::default(),
             };
             match trust::translate_package(&input, "cetz") {
                 Ok(_) => println!("package mode: whole-package translation passed"),

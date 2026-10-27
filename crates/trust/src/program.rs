@@ -58,6 +58,7 @@ pub fn generate(
         files: files.clone(),
         entry: entry.to_string(),
         dep_entries: dep_entries.clone(),
+        data_files: Default::default(),
     };
     let tree = if spec.lenient {
         let (tree, diags) = trust::translate_package_tree_lenient(&pkg, name);

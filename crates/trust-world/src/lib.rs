@@ -468,17 +468,15 @@ impl World for InjectWorld {
         // sources so package imports resolve without the disk repository.
         if matches!(id.root(), VirtualRoot::Package(_))
             && id.vpath().get_with_slash().ends_with(".typ")
+            && let Some(bytes) = self.files.get(&id)
+            && let Ok(text) = String::from_utf8(bytes.to_vec())
         {
-            if let Some(bytes) = self.files.get(&id)
-                && let Ok(text) = String::from_utf8(bytes.to_vec())
-            {
-                let source = Source::new(id, text);
-                self.package_sources
-                    .write()
-                    .unwrap()
-                    .insert(id, source.clone());
-                return Ok(source);
-            }
+            let source = Source::new(id, text);
+            self.package_sources
+                .write()
+                .unwrap()
+                .insert(id, source.clone());
+            return Ok(source);
         }
         if let Some(path) = self.package_path(id) {
             let text =

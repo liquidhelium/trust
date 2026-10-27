@@ -281,34 +281,17 @@ impl World for StaticWorld {
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        // typst CLI semantics: SOURCE_DATE_EPOCH overrides the system
-        // clock (reproducible builds); the offset is applied as a UTC
-        // shift with FixedOffset::east_opt's strict ±24h validity.
-        let base =
-            match std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.parse::<i64>().ok()) {
-                Some(ts) => ts,
-                None => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()?
-                    .as_secs() as i64,
-            };
-        let secs = offset
-            .map(|d| {
-                let [w, dd, h, m, s] = d.decompose();
-                w as i64 * 604_800
-                    + dd as i64 * 86_400
-                    + h as i64 * 3_600
-                    + m as i64 * 60
-                    + s as i64
-            })
-            .unwrap_or(0);
-        if !(-86_400..86_400).contains(&secs) {
-            return None;
-        }
-        let total = base + secs;
-        let days = total.div_euclid(86_400);
-        let (y, m, d) = civil_from_days(days);
-        Datetime::from_ymd(y as i32, m as u8, d as u8)
+        // typst CLI semantics, via the same typst-kit clock: SOURCE_DATE_EPOCH
+        // pins a reproducible timestamp, otherwise the system clock; the
+        // offset handling (±24h validity, date truncation) is upstream's.
+        let time = match std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            Some(ts) => typst_kit::datetime::Time::fixed_timestamp(ts).ok()?,
+            None => typst_kit::datetime::Time::system(),
+        };
+        time.today(offset)
     }
 }
 
@@ -338,21 +321,6 @@ impl StaticWorld {
         eprintln!("file not embedded: {vpath} ({hint}); re-run translate with --embed");
         FileError::NotFound(vpath.into())
     }
-}
-
-/// Days-since-epoch → (year, month, day) — Howard Hinnant's
-/// `civil_from_days`.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 fn parse_pages(spec: &str, total: usize) -> Vec<usize> {

@@ -36,17 +36,7 @@ pub fn source_span(path: &str, orig_raw: u64) -> Span {
     // span points straight at the host's package file, and plugin
     // relative-path resolution also anchors at the package root).
     let id = if path.starts_with('@') {
-        let colon = path.find(':').expect("spec contains a version separator");
-        let slash = path[colon..].find('/').expect("spec is followed by a path") + colon;
-        let spec: typst::syntax::package::PackageSpec = path[..slash]
-            .parse()
-            .unwrap_or_else(|e| panic!("invalid spec {}: {e}", &path[..slash]));
-        typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Package(spec),
-            typst::syntax::VirtualPath::new(&path[slash + 1..])
-                .unwrap_or_else(|_| panic!("invalid path {path}")),
-        )
-        .intern()
+        package_root_file_id(path).unwrap_or_else(|| panic!("invalid package path {path}"))
     } else {
         typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Project,

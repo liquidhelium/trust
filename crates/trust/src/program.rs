@@ -283,7 +283,7 @@ typst-pdf = "{TYPST_VERSION}"
 typst-svg = "{TYPST_VERSION}"
 typst-render = "{TYPST_VERSION}"
 tiny-skia = "0.12"
-typst-kit = {{ version = "{TYPST_VERSION}", default-features = false, features = ["embedded-fonts", "scan-fonts"] }}
+typst-kit = {{ version = "{TYPST_VERSION}", default-features = false, features = ["embedded-fonts", "scan-fonts", "datetime"] }}
 trust-runtime = {{ path = "vendor/trust-runtime" }}
 ecow = "0.2"
 comemo = "0.5.1"
@@ -327,28 +327,17 @@ fn workspace_version_edition() -> (String, String) {
     let Ok(text) = std::fs::read_to_string(root) else {
         return ("0.1.0".into(), "2021".into());
     };
-    let in_table = text
-        .lines()
-        .skip_while(|l| !l.trim_start().starts_with("[workspace.package]"))
-        // Skip the section header itself (it starts with '[' and would
-        // otherwise terminate the table immediately).
-        .skip(1)
-        .take_while(|l| !l.trim_start().starts_with('['));
-    let mut version = None;
-    let mut edition = None;
-    for line in in_table {
-        if let Some((k, v)) = line.split_once('=') {
-            let v = v.trim().trim_matches('"').to_string();
-            match k.trim() {
-                "version" => version = Some(v),
-                "edition" => edition = Some(v),
-                _ => {}
-            }
-        }
-    }
+    let manifest: toml::Table = toml::from_str(&text).unwrap_or_default();
+    let package = manifest.get("workspace").and_then(|w| w.get("package"));
+    let get = |key: &str| {
+        package
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
     (
-        version.unwrap_or_else(|| "0.1.0".into()),
-        edition.unwrap_or_else(|| "2021".into()),
+        get("version").unwrap_or_else(|| "0.1.0".into()),
+        get("edition").unwrap_or_else(|| "2021".into()),
     )
 }
 

@@ -4,6 +4,39 @@ use clap::Parser;
 
 mod program;
 
+/// Collects every `.typ` file under `root` (recursively) as
+/// root-relative POSIX vpath → source text. `skip` (a canonicalized dir)
+/// is never descended into.
+fn collect_typ_sources(
+    root: &std::path::Path,
+    skip: Option<&std::path::Path>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if let Some(skip) = skip
+            && std::fs::canonicalize(&dir).is_ok_and(|d| d == skip)
+        {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.insert(rel, std::fs::read_to_string(&path).expect("read .typ"));
+            }
+        }
+    }
+    files
+}
+
 /// Download a package from the registry and unpack it into the local cache
 /// (mirrors the typst CLI's automatic download of missing packages).
 /// Returns true on success (cache directory in place).
@@ -195,37 +228,12 @@ fn main() {
                 .filter(|p| !p.as_os_str().is_empty())
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            let mut files = std::collections::BTreeMap::new();
+            // The output project is never descended into (a previous
+            // run's embedded copies would feed back into the closure).
             let out_dir_canon = std::fs::create_dir_all(&out_dir)
                 .ok()
                 .and_then(|_| std::fs::canonicalize(&out_dir).ok());
-            let mut stack = vec![root.clone()];
-            while let Some(dirp) = stack.pop() {
-                // Never descend into the output project (a previous run's
-                // embedded copies would feed back into the closure).
-                if let Some(canon) = &out_dir_canon
-                    && std::fs::canonicalize(&dirp).is_ok_and(|d| d == *canon)
-                {
-                    continue;
-                }
-                for entry in std::fs::read_dir(&dirp).unwrap_or_else(|e| {
-                    eprintln!("failed to read dir {}: {e}", dirp.display());
-                    std::process::exit(1);
-                }) {
-                    let entry = entry.expect("entry");
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                    } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
-                        let rel = path
-                            .strip_prefix(&root)
-                            .unwrap()
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        files.insert(rel, std::fs::read_to_string(&path).expect("read .typ"));
-                    }
-                }
-            }
+            let mut files = collect_typ_sources(&root, out_dir_canon.as_deref());
             let entry = input_path
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -364,24 +372,7 @@ fn main() {
                 (root_path.to_path_buf(), None)
             };
             let root = root.as_path();
-            let mut files = std::collections::BTreeMap::new();
-            let mut stack = vec![root.to_path_buf()];
-            while let Some(dir) = stack.pop() {
-                for entry in std::fs::read_dir(&dir).expect("read dir") {
-                    let entry = entry.expect("entry");
-                    let path = entry.path();
-                    if path.is_dir() {
-                        stack.push(path);
-                    } else if path.extension().and_then(|e| e.to_str()) == Some("typ") {
-                        let rel = path
-                            .strip_prefix(root)
-                            .unwrap()
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        files.insert(rel, std::fs::read_to_string(&path).expect("read"));
-                    }
-                }
-            }
+            let mut files = collect_typ_sources(root_path, None);
             // Entry: for a single .typ input, the file itself; otherwise
             // read typst.toml's entrypoint per the package spec (relative
             // to the package root, mandatory for published packages; no

@@ -131,6 +131,31 @@ design basis see [docs/architecture.md](docs/architecture.md).
   directions (a new failure fails the suite; a tracked case silently
   passing fails it too).
 
+## Benchmark
+
+`bench.sh` compares a translated standalone program against the typst CLI
+on the same document:
+
+```sh
+./bench.sh                    # deterministic cetz stress workload (20×60)
+BENCH_K=60 BENCH_M=60 ./bench.sh
+./bench.sh my-doc.typ 20      # any document, 20 timed runs
+```
+
+Prerequisites: `typst` 0.15.x on PATH (or `TYPST_BIN`; other versions
+fail the version gate — nothing is auto-installed) and cetz in the local
+package cache. The trust binary is built automatically.
+
+Before timing, a correctness gate renders both ways and compares the
+pages byte for byte as SVG (PDF bytes are not comparable across
+independently built binaries — deflate backends differ while the
+decompressed content is equal); the benchmark refuses to run on a
+correctness divergence. On the cetz stress workload the standalone
+program renders ~2× faster than the typst CLI (e.g. 343 ms vs 775 ms,
+median of 10 runs; both sides carry the same large fixed costs — font
+loading and the borrowed layout/export — so the ratio is driven by
+native evaluation plus zero package/CLI overhead).
+
 ## Status
 
 Translation covers the Typst 0.15.1 scripting language — bindings, functions

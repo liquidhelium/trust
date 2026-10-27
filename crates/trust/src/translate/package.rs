@@ -1461,7 +1461,7 @@ fn tree_impl(
         for (vkey, text) in &input.files {
             let _ = writeln!(
                 entries,
-                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), bytes: {text:?}.as_bytes().to_vec() }},"
+                "    ({vkey:?}, {text:?}.as_bytes()),"
             );
         }
         for (idx, (vkey, _bytes)) in input.data_files.iter().enumerate() {
@@ -1469,7 +1469,7 @@ fn tree_impl(
             sidecars.push((name.clone(), format!("__sidecar_{idx}")));
             let _ = writeln!(
                 entries,
-                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), bytes: include_bytes!(\"files/{idx}.bin\").to_vec() }},"
+                "    ({vkey:?}, include_bytes!(\"files/{idx}.bin\")),"
             );
         }
         let mut decl = String::from(
@@ -1478,7 +1478,7 @@ fn tree_impl(
              // carry them along when relocating the output.\n\
              use trust_runtime as rt;\n",
         );
-        decl.push_str("pub(crate) fn register() {\n    rt::embedded::register_embedded_files(vec![\n");
+        decl.push_str("pub(crate) fn register() {\n    rt::embedded::register_embedded_files(&[\n");
         decl.push_str(&entries);
         decl.push_str("    ]);\n}\n");
         tree.insert("embedded_files.rs".to_string(), decl);

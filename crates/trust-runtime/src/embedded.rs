@@ -21,18 +21,6 @@ use std::sync::OnceLock;
 use typst::foundations::Bytes;
 use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
-/// One embedded file: its vkey and content. The vkey follows the
-/// translator's key convention — `@ns/name:ver/inside-package-path` for
-/// package files, a plain project vpath otherwise. The content is bytes,
-/// the single underlying channel typst itself uses (`World::file`;
-/// `source()` is derived by parsing).
-pub struct EmbeddedFile {
-    /// The vkey (`@spec/rel` for package files, plain vpath otherwise).
-    pub vkey: String,
-    /// The file's content.
-    pub bytes: Vec<u8>,
-}
-
 type RegistryMap = HashMap<FileId, &'static [u8]>;
 
 static REGISTRY: OnceLock<std::sync::RwLock<RegistryMap>> = OnceLock::new();
@@ -51,14 +39,16 @@ fn id_of(vkey: &str) -> Option<FileId> {
     }
 }
 
-/// Registers a set of embedded files (called by generated `install()`s;
-/// the byte slices are leaked — a module's files live for the process).
-pub fn register_embedded_files(files: Vec<EmbeddedFile>) {
+/// Registers a set of embedded files: (vkey, bytes) pairs, called by
+/// generated `install()`s. The vkey follows the translator's key
+/// convention — `@ns/name:ver/inside-package-path` for package files,
+/// a plain project vpath otherwise; the bytes are static by construction
+/// on the generated side (string literals' `as_bytes()`,
+/// `include_bytes!` sidecars), so nothing is copied or leaked here.
+pub fn register_embedded_files(files: &[(&'static str, &'static [u8])]) {
     let mut map = registry().write().unwrap();
-    for file in files {
-        let EmbeddedFile { vkey, bytes } = file;
-        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        if let Some(id) = id_of(&vkey) {
+    for (vkey, bytes) in files {
+        if let Some(id) = id_of(vkey) {
             map.insert(id, bytes);
         }
     }

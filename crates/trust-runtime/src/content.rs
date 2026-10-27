@@ -1,4 +1,4 @@
-//! `trust_runtime` 的 content 分区(自 lib.rs 机械拆分)。
+//! The `content` section of `trust_runtime` (a mechanical split out of lib.rs).
 
 #![allow(unused_imports)]
 use crate::{

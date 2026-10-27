@@ -1,4 +1,4 @@
-//! `trust_runtime` 的 eval 分区(自 lib.rs 机械拆分)。
+//! The `eval` section of `trust_runtime` (a mechanical split out of lib.rs).
 
 #![allow(unused_imports)]
 use crate::{

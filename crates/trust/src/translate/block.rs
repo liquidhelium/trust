@@ -64,9 +64,11 @@ impl Ctx {
             if let Some((prev, prev_at)) = last.take() {
                 flushed = true;
                 if has_flow {
-                    // 先绑定再 join:语句表达式可能含边界早退(引用/克隆
-                    // 累加器),与 join 首参的移动同处一个调用表达式会
-                    // use-after-move。
+                    // Bind to a local before joining: the statement
+                    // expression may contain a boundary early-exit
+                    // (referencing/cloning the accumulator), and sharing
+                    // one call expression with the move into join's first
+                    // argument would use-after-move.
                     let pv = format!("__pv{}", self.fresh_id());
                     let _ = writeln!(out, "    let {pv} = {prev};");
                     let _ = writeln!(out, "    {acc} = rt::join({acc}, {pv}, {prev_at})?;");
@@ -496,8 +498,11 @@ impl Ctx {
                 full.push_str(&hoists);
                 full.push_str(&out);
                 if let Some((tail, tail_at)) = last {
-                    // 先绑定再 join(同 flush 段:尾表达式可含边界早退,
-                    // 引用累加器与 join 首参移动同表达式会 use-after-move)。
+                    // Bind to a local before joining (same as the flush
+                    // section: the tail expression may contain a boundary
+                    // early-exit; referencing the accumulator and moving
+                    // it into join's first argument in one expression
+                    // would use-after-move).
                     let pv = format!("__pv{}", self.fresh_id());
                     let _ = writeln!(full, "    let {pv} = {tail};");
                     let _ = writeln!(full, "    {acc} = rt::join({acc}, {pv}, {tail_at})?;");

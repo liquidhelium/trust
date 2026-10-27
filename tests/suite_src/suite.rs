@@ -30,7 +30,7 @@ fn compile(w: &InjectWorld) -> Compiled {
         .warnings
         .iter()
         .map(|d| d.message.to_string())
-        .filter(|m| !m.contains("trust 降级"))
+        .filter(|m| !m.contains("trust degraded"))
         .collect();
     match warned.output {
         Ok(doc) => {
@@ -76,7 +76,7 @@ fn assemble(
         .warnings()
         .iter()
         .map(|d| d.message.to_string())
-        .filter(|m| !m.contains("trust 降级"))
+        .filter(|m| !m.contains("trust degraded"))
         .collect();
     match result {
         Some(Ok(module)) => {
@@ -84,7 +84,7 @@ fn assemble(
             Ok((module, std::mem::take(&mut warnings)))
         }
         Some(Err(diags)) => Err(diags.iter().map(|d| d.message.to_string()).collect()),
-        None => Err(vec![format!("module_by_path 未登记: {file}")]),
+        None => Err(vec![format!("module_by_path has no entry: {file}")]),
     }
 }
 
@@ -95,7 +95,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
         return (
             "golden-anomaly".into(),
             format!(
-                "注记与基准不符:期望错误={expected_error}, 基准通过={golden_ok}, notes={:?}, 基准诊断={:?}",
+                "notes disagree with the golden: expected-error={expected_error}, golden-ok={golden_ok}, notes={:?}, golden-diagnostics={:?}",
                 case.notes
                     .iter()
                     .filter(|n| n.kind == "error")
@@ -118,7 +118,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
         if nm.is_empty() {
             return (
                 "gen-missed-error".into(),
-                format!("期望错误 {gm:?},gen 通过"),
+                format!("expected error {gm:?}, gen passed"),
             );
         }
         let (a, b) = (norm(&gm), norm(&nm));
@@ -128,7 +128,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
         return ("diag-mismatch".into(), format!("golden={a:?} gen={b:?}"));
     }
     if let Err(e) = &gen_c.pages {
-        return ("gen-error".into(), format!("gen 意外错误: {e:?}"));
+        return ("gen-error".into(), format!("unexpected gen error: {e:?}"));
     }
     let warn_notes: Vec<String> = case
         .notes
@@ -140,7 +140,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
         return (
             "warning-mismatch".into(),
             format!(
-                "期望 {:?};gen {:?}",
+                "expected {:?}; gen {:?}",
                 norm(&warn_notes),
                 norm(&gen_c.warnings)
             ),
@@ -154,7 +154,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
     if gp.len() != np.len() {
         return (
             "page-count".into(),
-            format!("页数 {} vs {}", gp.len(), np.len()),
+            format!("pages {} vs {}", gp.len(), np.len()),
         );
     }
     for (i, (a, b)) in gp.iter().zip(np.iter()).enumerate() {
@@ -165,7 +165,7 @@ fn judge(case: &Case, golden: &Compiled, gen_c: &Compiled, paged: bool) -> (Stri
                     let _ = std::fs::write(format!("/tmp/suite-{}-n.svg", case.name), b);
                 }
             }
-            return ("svg-diff".into(), format!("第 {} 页 SVG 不一致", i + 1));
+            return ("svg-diff".into(), format!("page {} SVG differs", i + 1));
         }
     }
     ("pass".into(), String::new())
@@ -206,9 +206,9 @@ fn run() {
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let manifest: Vec<Case> = serde_json::from_str(
         &std::fs::read_to_string(root.join("build/manifest.json"))
-            .expect("manifest.json 缺失:先跑 cargo suite"),
+            .expect("manifest.json missing: run cargo suite first"),
     )
-    .expect("manifest 解析");
+    .expect("parse manifest");
 
     let filters: Vec<String> = std::env::var("TRUST_SUITE_FILTER")
         .map(|f| f.split(',').map(str::to_string).collect())
@@ -404,7 +404,7 @@ fn run() {
         }
     }
     if !flaky.is_empty() {
-        println!("  ⚠ 闪烁(复跑通过,已豁免): {}", flaky.join(", "));
+        println!("  ⚠ flaky (rerun passed, exempted): {}", flaky.join(", "));
     }
     for k in &known {
         if !cases.iter().any(|c| c.name == *k) && filters.is_empty() {
@@ -414,7 +414,7 @@ fn run() {
 
     let total: usize = by_status.values().sum();
     println!(
-        "══ trust-suite:{total} 测试(known-divergence {} 项)══",
+        "══ trust-suite: {total} cases (known-divergence: {}) ══",
         known.len()
     );
     for (k, v) in &by_status {
@@ -424,21 +424,21 @@ fn run() {
         println!("  ✗ {f}");
     }
     if fail_details.len() > 20 {
-        println!("  … 另 {} 个失败", fail_details.len() - 20);
+        println!("  … {} more failures", fail_details.len() - 20);
     }
     assert!(
         new_failures.is_empty(),
-        "新增失败(不在 known-divergence.txt):\n  {}",
+        "new failures (not in known-divergence.txt):\n  {}",
         new_failures.join("\n  ")
     );
     assert!(
         unexpected_pass.is_empty(),
-        "known-divergence 中的用例现在通过(更新名单并审视):\n  {}",
+        "known-divergence cases now passing (update the list and review):\n  {}",
         unexpected_pass.join("\n  ")
     );
     assert!(
         fixed.is_empty(),
-        "名单含未运行/已消失的用例(修剪名单):\n  {}",
+        "list contains unrun/vanished cases (prune it):\n  {}",
         fixed.join("\n  ")
     );
 }

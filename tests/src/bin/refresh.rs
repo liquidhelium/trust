@@ -21,7 +21,7 @@ fn main() {
     write_manifest(&build, &manifest);
     write_scaffolding(&root, &build, &crates);
     let total: usize = manifest.len();
-    println!("refresh: {total} 段 / {} crate", crates.len());
+    println!("refresh: {total} sections / {} crates", crates.len());
 }
 
 fn write_manifest(build: &Path, manifest: &[split::Case]) {
@@ -51,7 +51,7 @@ fn write_scaffolding(root: &Path, build: &Path, crates: &BTreeMap<String, usize>
         std::fs::write(
             dir.join("lib.rs"),
             format!(
-                "//! 套件 `{key}` 的翻译产物挂载(refresh 生成,勿手改)。\n\n\
+                "//! Mount point for suite `{key}` generated output (written by\n//! refresh; do not edit).\n\n\
                  #[allow(unknown_lints, clippy::all)]\n\
                  #[allow(unused, unused_mut, non_snake_case, non_upper_case_globals, dead_code)]\n\
                  #[path = \"../gen/{key}/mod.rs\"]\npub mod pkg;\n"
@@ -87,7 +87,7 @@ fn write_scaffolding(root: &Path, build: &Path, crates: &BTreeMap<String, usize>
     std::fs::copy(root.join("driver/lib.rs"), driver.join("lib.rs")).expect("copy driver lib.rs");
     std::fs::write(
         driver.join("tests/suite.rs"),
-        "// refresh 生成:#[path] 挂载被追踪的对拍 harness(仅 build/ 副本被构建)。\n\
+        "// Written by refresh: mounts the tracked harness via #[path] (only\n// the build/ copy is ever built).\n\
          #[path = \"../../../suite_src/suite.rs\"]\nmod suite;\n",
     )
     .expect("write driver suite shim");
@@ -110,7 +110,7 @@ fn write_scaffolding(root: &Path, build: &Path, crates: &BTreeMap<String, usize>
     std::fs::write(
         driver.join("src/dispatch.rs"),
         format!(
-            "// refresh 生成,勿手改:套件类别 → 生成 crate 的按文件装配分发。\n\
+            "// Written by refresh; do not edit: category → generated crate\n// dispatch for on-demand per-file assembly.\n\
              #[allow(unused)]\npub fn dispatch_by_path(\n    key: &str,\n    file: &str,\n    \
              engine: &mut typst::engine::Engine,\n    context: comemo::Tracked<typst::foundations::Context>,\n\
              ) -> Option<typst::diag::SourceResult<typst::foundations::Module>> {{\n    match key {{\n\

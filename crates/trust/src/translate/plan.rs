@@ -655,8 +655,9 @@ pub(super) fn import_reaches(
     to: &str,
     dep_entries: &std::collections::BTreeMap<String, String>,
 ) -> bool {
-    // 体内导入边不参与环判定(typst 里体内导入的环是运行期语义,调用
-    // 才触发;meander 的 tiling↔contour 互引即此形态)。
+    // In-body import edges stay out of cycle detection (typst gives
+    // in-body import cycles runtime semantics — they only trigger on a
+    // call; meander's tiling↔contour mutual references are that shape).
     let mut edges: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for plan in plans {
         for edge in &plan.imports {

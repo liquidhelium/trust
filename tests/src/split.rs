@@ -138,7 +138,8 @@ fn crate_key(rel: &Path) -> String {
 }
 
 pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String, usize>) {
-    // 1) 分段:section 文件 → 类别包;无段文件 = 夹具(镜像进所有包)。
+    // 1) Splitting: section files → category packages; section-less
+    // files are fixtures (mirrored into every package).
     let mut manifest: Vec<Case> = Vec::new();
     let mut fixtures: BTreeMap<String, String> = BTreeMap::new();
     let mut crates: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
@@ -148,7 +149,8 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
     let reg = root.join("reg");
     let files = walk_typ(&suite);
     let files = files.into_iter().chain(walk_typ(&reg)).collect::<Vec<_>>();
-    // reg 文件的类别键加前缀,与官方类目隔离。
+    // reg files get a prefixed category key, isolated from
+    // the official categories.
     for f in files {
         let in_reg = f.starts_with(&reg);
         let rel = f
@@ -163,15 +165,16 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
             crate_key(&rel)
         };
         if secs.is_empty() {
-            // 夹具与用例同基(包内相对路径):reg 夹具不加前缀——用例文件
-            // 在包根,`import "leaf.typ"` 按用例文件的相对解析去找它。
+            // Fixtures share the case base (in-package relative paths):
+            // reg fixtures carry no prefix — case files sit at the package
+            // root, `import "leaf.typ"` resolves against the case file.
             fixtures.insert(rel.to_string_lossy().into_owned(), text);
             continue;
         }
         for sec in secs {
             assert!(
                 seen.insert(sec.name.clone()),
-                "重复测试名 {} ({})",
+                "duplicate test name {} ({})",
                 sec.name,
                 rel.display()
             );
@@ -195,11 +198,13 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
         }
     }
 
-    // 2) 写类别包源(suite-pkg 形态,同探针)并并行翻译。
-    // 翻译器的 vpath 采用官方布局前缀 tests/suite/(cats 磁盘布局不变):
-    // gen 侧 span/FileId 的解析深度与基准世界完全一致 —— path()/read()
-    // 的逃逸判定和相对解析对深度敏感(../../../../file.txt 从
-    // tests/suite/loading/x.typ 逃逸,从更浅路径不逃逸)。
+    // 2) Write category package sources (suite-pkg shape, as the former
+    // probe) and translate in parallel. Translator vpaths carry the
+    // official-layout prefix tests/suite/ (the on-disk cats layout is
+    // unchanged): gen-side span/FileId resolution depth matches the
+    // golden world exactly — path()/read() escape checks and relative
+    // resolution are depth-sensitive (../../../../file.txt escapes from
+    // tests/suite/loading/x.typ but not from a shallower path).
     let prefix = "tests/suite/";
     let cats_dir = build.join("cats");
     let gen_dir = build.join("gen");
@@ -220,7 +225,7 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
                 let mut input_files: BTreeMap<String, String> = BTreeMap::new();
                 input_files.insert(
                     format!("{prefix}lib.typ"),
-                    "// 批驱动入口(空):module_by_path 按需装配\n".into(),
+                    "// Batch-driver entry (empty): module_by_path assembles on demand\n".into(),
                 );
                 for (rel, body) in sections {
                     let p = pkg_dir.join(rel);
@@ -256,13 +261,13 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
                     errors
                         .lock()
                         .unwrap()
-                        .push(format!("类别 {key} 翻译产物为空"));
+                        .push(format!("category {key} translated to nothing"));
                 }
             });
         }
     });
     let errors = errors.into_inner().unwrap();
-    assert!(errors.is_empty(), "翻译失败: {errors:?}");
+    assert!(errors.is_empty(), "translation failed: {errors:?}");
 
     (manifest, counts)
 }

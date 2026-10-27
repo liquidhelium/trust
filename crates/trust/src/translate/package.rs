@@ -1461,7 +1461,7 @@ fn tree_impl(
         for (vkey, text) in &input.files {
             let _ = writeln!(
                 entries,
-                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), text: Some({text:?}.into()), data: None }},"
+                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), bytes: {text:?}.as_bytes().to_vec() }},"
             );
         }
         for (idx, (vkey, _bytes)) in input.data_files.iter().enumerate() {
@@ -1469,7 +1469,7 @@ fn tree_impl(
             sidecars.push((name.clone(), format!("__sidecar_{idx}")));
             let _ = writeln!(
                 entries,
-                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), text: None, data: Some(include_bytes!(\"files/{idx}.bin\").to_vec()) }},"
+                "    rt::embedded::EmbeddedFile {{ vkey: {vkey:?}.into(), bytes: include_bytes!(\"files/{idx}.bin\").to_vec() }},"
             );
         }
         let mut decl = String::from(

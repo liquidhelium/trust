@@ -27,10 +27,11 @@ use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 pub struct EmbeddedFile {
     /// The vkey (`@spec/rel` for package files, plain vpath otherwise).
     pub vkey: String,
-    /// Text form (`.typ` sources) when present.
-    pub text: Option<String>,
-    /// Binary form (data files, wasm) when present.
-    pub data: Option<Vec<u8>>,
+    /// The file's content — bytes, the single underlying channel typst
+    /// itself uses (`World::file`; `source()` is derived by parsing).
+    /// Registration normalizes both entry kinds into it, so no
+    /// "text-here-data-there" state can exist for `read()` to miss.
+    pub bytes: Vec<u8>,
 }
 
 type RegistryMap = HashMap<FileId, &'static EmbeddedFile>;
@@ -67,25 +68,16 @@ fn ids_of(file: &EmbeddedFile) -> Vec<FileId> {
     }
 }
 
-/// The embedded source text for a FileId, if a registered module owns it.
+/// The embedded source text for a FileId, if a registered module owns
+/// it — derived from the bytes (a `.typ` must be valid UTF-8; anything
+/// else fails here, exactly where typst's own source loading would).
 pub fn embedded_source(id: FileId) -> Option<String> {
-    registry()
-        .read()
-        .unwrap()
-        .get(&id)
-        .and_then(|f| f.text.clone())
+    embedded_bytes(id).and_then(|b| String::from_utf8(b.to_vec()).ok())
 }
 
 /// The embedded bytes for a FileId, if a registered module owns it.
-/// Text-only entries (source texts) fall back to their UTF-8 bytes:
-/// `read("x.typ")` of a package source file is a dynamic read like any
-/// other and must work without the host having the package.
 pub fn embedded_bytes(id: FileId) -> Option<Bytes> {
     let guard = registry().read().unwrap();
     let file = guard.get(&id)?;
-    match (&file.data, &file.text) {
-        (Some(data), _) => Some(Bytes::new(data.clone())),
-        (None, Some(text)) => Some(Bytes::from_string(text.clone())),
-        (None, None) => None,
-    }
+    Some(Bytes::new(file.bytes.clone()))
 }

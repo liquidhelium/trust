@@ -38,6 +38,7 @@ route's 100% compatibility rests on.
 | `crates/trust-runtime` | Runtime support for generated code: parameter destructuring, call protocol, closure construction, content/markup construction |
 | `crates/trust-world` | Injected World: global module injection, package virtualization, the `module_init` engine-value protocol |
 | `crates/trust-diff` | Differential testing: fixtures translated at build time, compared case by case against the `typst-eval` interpreter |
+| `crates/trust-suite` | Official typst `tests/suite` comparison harness: vendored corpus, per-case differential against the interpreter, known-divergence gating |
 | `docs/` | Architecture and host-integration documents |
 
 ## Build
@@ -121,11 +122,14 @@ design basis see [docs/architecture.md](docs/architecture.md).
   interpreted by `typst-eval` and compiled by `trust` — and the results are
   compared value by value. Expectations are produced by typst itself, never
   hand-written.
-- **Official suite comparison** (external harness): the official typst
-  `tests/suite` corpus compiles two ways through one binary — native
-  registration versus the original interpreted sources — and compares
-  rendered output page by page, byte for byte, plus diagnostics as message
-  sets with positions stripped.
+- **Official suite comparison** (`crates/trust-suite`): the official typst
+  `tests/suite` corpus is vendored and driven case by case — each segment
+  compiles two ways through one world, the translated assembly versus the
+  original interpreted sources — comparing rendered output page by page,
+  byte for byte, plus diagnostics and warnings as message sets. Remaining
+  divergences are tracked in a known-divergence list gated in both
+  directions (a new failure fails the suite; a tracked case silently
+  passing fails it too).
 - **Real-package rendering comparison**: real packages injected into
   unmodified typst render byte-identically to their interpreted originals
   (SVG compared as strings, PNG compared after rasterization).
@@ -138,5 +142,6 @@ content construction, context expressions, multi-file packages with all
 import forms — and whole real packages compile and link without errors;
 constructs outside the supported subset surface as explicit translation
 errors, never as silent behavior changes. On the official typst
-`tests/suite` segments the comparison harness drives, 97.6% currently
-produce results identical to the interpreter.
+`tests/suite` corpus, all but 2 of the 3018 comparison cases currently
+produce results identical to the interpreter; the two remainders are
+tracked in the suite's known-divergence list.

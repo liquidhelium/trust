@@ -130,9 +130,6 @@ design basis see [docs/architecture.md](docs/architecture.md).
   divergences are tracked in a known-divergence list gated in both
   directions (a new failure fails the suite; a tracked case silently
   passing fails it too).
-- **Real-package rendering comparison**: real packages injected into
-  unmodified typst render byte-identically to their interpreted originals
-  (SVG compared as strings, PNG compared after rasterization).
 
 ## Status
 

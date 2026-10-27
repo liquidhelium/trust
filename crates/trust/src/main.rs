@@ -65,10 +65,17 @@ fn resolve_key(from: &str, raw: &str) -> Option<String> {
     })
 }
 
-/// The file-reading functions of the typst standard library: their first
-/// positional argument is a path resolved relative to the calling file.
+/// The file-addressing functions of the typst standard library: their
+/// first positional argument is a path resolved relative to the calling
+/// file. Includes the `path()` **constructor** — packages export path
+/// values for consumers to read through (the official reader-package
+/// pattern: `#let hello-path = path("../hello.txt")`, then the host
+/// `read`s it), so those files embed too. Path values may legitimately
+/// point at files that never get read — over-embedding is safe, missing
+/// the reader pattern is not.
 const FILE_READERS: &[&str] = &[
-    "read", "image", "plugin", "csv", "json", "toml", "yaml", "xml", "cbor", "bibliography",
+    "path", "read", "image", "plugin", "csv", "json", "toml", "yaml", "xml", "cbor",
+    "bibliography",
 ];
 
 /// Reference-reachable data files of a translation target: every

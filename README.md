@@ -30,6 +30,13 @@ layout and export pipelines. The output is not a reimplementation of
 Typst — it is the same program in compiled form, which is what this
 route's 100% compatibility rests on.
 
+## Speed
+
+On a cetz stress workload, the translated standalone program renders
+**~2× faster** than the typst CLI (343 ms vs 775 ms, median of 10 runs;
+measured by [bench.sh](#benchmark), which verifies byte-identical output
+before timing).
+
 ## Workspace layout
 
 | Path | Contents |
@@ -134,9 +141,7 @@ design basis see [docs/architecture.md](docs/architecture.md).
 ## Benchmark
 
 `bench.sh` measures the speedup of a translated program against the
-typst CLI on the same document. On the cetz stress workload, the
-standalone program renders **~2× faster** (343 ms vs 775 ms, median of
-10 runs).
+typst CLI on the same document:
 
 ```sh
 ./bench.sh                    # deterministic cetz stress workload (20×60)

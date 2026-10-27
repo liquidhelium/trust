@@ -4,34 +4,6 @@ use clap::Parser;
 
 mod program;
 
-/// Collects every `.typ` file under `root` (recursively) as
-/// root-relative POSIX vpath → source text. `skip` (a canonicalized dir)
-/// is never descended into.
-fn collect_typ_sources(
-    root: &std::path::Path,
-    skip: Option<&std::path::Path>,
-) -> std::collections::BTreeMap<String, String> {
-    let mut files = std::collections::BTreeMap::new();
-    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("typ") {
-            continue;
-        }
-        if let Some(skip) = skip
-            && std::fs::canonicalize(path).is_ok_and(|p| p.starts_with(skip))
-        {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        files.insert(rel, std::fs::read_to_string(path).expect("read .typ"));
-    }
-    files
-}
-
 /// Resolves `raw` (relative or root-absolute) in the translator's key
 /// space against the file `from`, via typst-syntax's own `VirtualPath::
 /// join` — the same normalization, leading-separator root anchoring, and
@@ -522,8 +494,7 @@ fn main() {
             let output = output.as_str();
             let root_path = std::path::Path::new(input);
             // Single .typ file: translate as a one-file package (root =
-            // the parent directory, entry = the file itself; sibling
-            // .typ files join the set — assembly is on-demand).
+            // the parent directory, entry = the file itself).
             let (root, single_entry) = if root_path.is_file() {
                 (
                     root_path
@@ -539,31 +510,24 @@ fn main() {
                 (root_path.to_path_buf(), None)
             };
             let root = root.as_path();
-            let mut files = collect_typ_sources(root_path, None);
             // Entry: for a single .typ input, the file itself; otherwise
             // read typst.toml's entrypoint per the package spec (relative
             // to the package root, mandatory for published packages; no
             // particular entry name is assumed).
             let entry = match single_entry.as_deref() {
-                Some(entry) if files.contains_key(entry) => Ok(entry.to_string()),
-                Some(entry) => Err(format!("entry file `{entry}` is not in the file set")),
+                Some(entry) => Ok(entry.to_string()),
                 None => std::fs::read_to_string(root.join("typst.toml"))
                     .map_err(|e| format!("failed to read typst.toml: {e}"))
                     .and_then(|text| {
                         let manifest: toml::Table =
                             toml::from_str(&text).map_err(|e| e.to_string())?;
-                        let entry = manifest
+                        Ok(manifest
                             .get("package")
                             .and_then(|p| p.get("entrypoint"))
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| "typst.toml is missing package.entrypoint".to_string())?
                             .trim_start_matches('/')
-                            .to_string();
-                        if files.contains_key(&entry) {
-                            Ok(entry)
-                        } else {
-                            Err(format!("entrypoint `{entry}` is not in the file set"))
-                        }
+                            .to_string())
                     }),
             };
             let dir_mode = single_entry.is_none();
@@ -576,14 +540,18 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            // Only collect the package source tree containing the entry
-            // (docs/tests etc. are not part of the package).
-            let src_root = entry
-                .rsplit_once('/')
-                .map(|(dir, _)| format!("{dir}/"))
-                .unwrap_or_default();
-            if !src_root.is_empty() {
-                files.retain(|k, _| k.starts_with(&src_root));
+            // Import closure of the entry — the complete evaluation
+            // surface (typst 0.15 has no subpath package imports and no
+            // cross-root path strings; every externally triggered
+            // evaluation enters through the entrypoint, and in-package
+            // paths cannot escape the package root). Files outside the
+            // closure are never translated and cannot break the build.
+            // This also keeps legal cross-directory imports that the old
+            // entry-subtree retain used to drop.
+            let mut files = collect_import_closure(root, &entry, &Default::default());
+            if !files.contains_key(&entry) {
+                eprintln!("failed to resolve entrypoint: `{entry}` not found");
+                std::process::exit(2);
             }
             // Package identity (directory mode only — a single .typ input
             // has no manifest and keeps plain project keys): the package's

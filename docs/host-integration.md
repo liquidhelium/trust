@@ -61,7 +61,12 @@ string-literal argument; computed paths stay with the host world, like
 typst itself). Dependency-merged packages (`--with-deps`, cache layout)
 embed their non-source files wholesale. Entries register under the
 package's `PackageSpec` root — the FileId namespace typst's own import
-resolution uses.
+resolution uses. Without `--spec`, the module carries a synthetic
+`@trust/{name}:{version}` identity: it claims no real package identity
+(no universe package can collide with `@trust/*`; a host's spec-import
+of some real package resolves through its own world and never aliases
+two evaluations onto one FileId). `--spec` relays a real identity for
+spec-import interop.
 
 Worlds consult `trust_runtime::embedded::` (`embedded_source` /
 `embedded_bytes`) to serve these; `InjectWorld` does so after its own

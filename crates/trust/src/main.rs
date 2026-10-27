@@ -598,14 +598,18 @@ fn main() {
                         let version = package.get("version")?.as_str()?.to_string();
                         Some((name, version))
                     });
-                // Package identity: explicit `--spec`, else
-                // `@preview/{name}:{version}` from the manifest (the
-                // universe publishes everything under preview; other
-                // namespaces are opt-in). Never derived from the path —
-                // identity is declared, and where files sit carries no
-                // namespace (dependency packages differ: their specs come
-                // from the import strings, spec → cache path, the sound
-                // direction).
+                // Package identity: explicit `--spec` relays the
+                // consuming host's declaration (the only place a real
+                // spec is written down is the import string, which lives
+                // in the host's documents, out of sight here). Without
+                // it, the default is a SYNTHETIC namespace — the module
+                // claims no real package identity: no universe package
+                // can collide with `@trust/*`, and a host's spec-import
+                // of some real package resolves through its own world,
+                // never aliasing two evaluations onto one FileId.
+                // Dependency packages differ: their specs are read from
+                // the import strings in-band (spec → cache path, the
+                // sound direction).
                 let spec = match spec.as_deref() {
                     Some(s) => s.to_string(),
                     None => {
@@ -615,7 +619,7 @@ fn main() {
                             );
                             std::process::exit(2);
                         };
-                        format!("@preview/{name}:{version}")
+                        format!("@trust/{name}:{version}")
                     }
                 };
                 let mut spec_files = std::collections::BTreeMap::new();

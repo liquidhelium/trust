@@ -462,7 +462,12 @@ impl World for InjectWorld {
         // Embedded package files registered by injected modules
         // (embedded shadows disk/cache, matching the standalone world's
         // lookup order).
-        if let Some(text) = trust_runtime::embedded::embedded_source(id) {
+        // Embedded registry: bytes interpreted as UTF-8 — invalid UTF-8
+        // misses here, exactly where typst's own source loading would
+        // fail.
+        if let Some(text) = trust_runtime::embedded::embedded_bytes(id)
+            .and_then(|b| String::from_utf8(b.to_vec()).ok())
+        {
             let source = Source::new(id, text);
             self.package_sources
                 .write()

@@ -54,13 +54,6 @@ pub fn register_embedded_files(files: &[(&'static str, &'static [u8])]) {
     }
 }
 
-/// The embedded source text for a FileId, if a registered module owns
-/// it — derived from the bytes (a `.typ` must be valid UTF-8; anything
-/// else fails here, exactly where typst's own source loading would).
-pub fn embedded_source(id: FileId) -> Option<String> {
-    embedded_bytes(id).and_then(|b| String::from_utf8(b.to_vec()).ok())
-}
-
 /// The embedded bytes for a FileId, if a registered module owns it.
 pub fn embedded_bytes(id: FileId) -> Option<Bytes> {
     let guard = registry().read().unwrap();

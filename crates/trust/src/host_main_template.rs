@@ -40,6 +40,9 @@ fn main() {
     let mut dpi = 144.0f64;
     let mut quiet = false;
     let mut out_dir = PathBuf::from(".");
+    // Root for the disk fallback of non-embedded files (typst CLI --root
+    // semantics; FileId vpaths resolve under it).
+    let mut root_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -66,6 +69,11 @@ fn main() {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| die("--dpi needs a number"))
             }
+            "--root" => {
+                root_dir = PathBuf::from(
+                    args.next().unwrap_or_else(|| die("--root needs a directory")),
+                )
+            }
             "--quiet" => quiet = true,
             other => {
                 if other.starts_with('-') {
@@ -84,7 +92,7 @@ fn main() {
     }
     let library = LazyHash::new(typst::Library::builder().with_inputs(dict).build());
 
-    let mut world = StaticWorld::new(library);
+    let mut world = StaticWorld::new(library, root_dir);
 
     // Install the translated module (the standard host protocol; also
     // installs the eval-closure fast path) and bind it under `tm`.
@@ -180,12 +188,16 @@ struct StaticWorld {
     fonts: typst_kit::fonts::FontStore,
     book: LazyHash<FontBook>,
     main: FileId,
-    sources: HashMap<FileId, Source>,
-    files: HashMap<FileId, Bytes>,
+    sources: std::sync::Mutex<HashMap<FileId, Source>>,
+    files: std::sync::Mutex<HashMap<FileId, Bytes>>,
+    /// Disk root for non-embedded reads: embedded first, then disk —
+    /// a pinned file (--embed) shadows the disk copy, everything else
+    /// behaves like typst reading the live tree.
+    disk_root: PathBuf,
 }
 
 impl StaticWorld {
-    fn new(library: LazyHash<typst::Library>) -> Self {
+    fn new(library: LazyHash<typst::Library>, disk_root: PathBuf) -> Self {
         let mut sources = HashMap::new();
         let mut files = HashMap::new();
         let intern = |vpath: &str| {
@@ -236,7 +248,15 @@ impl StaticWorld {
         sources.insert(main, Source::new(main, "#include tm\n".to_string()));
         let fonts = load_fonts();
         let book = fonts.book().clone();
-        Self { library, fonts, book, main, sources, files }
+        Self {
+            library,
+            fonts,
+            book,
+            main,
+            sources: std::sync::Mutex::new(sources),
+            files: std::sync::Mutex::new(files),
+            disk_root,
+        }
     }
 
     fn set_library(&mut self, library: LazyHash<typst::Library>) {
@@ -262,16 +282,42 @@ impl World for StaticWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.sources.get(&id).cloned().ok_or_else(|| self.not_found(id))
+        if let Some(source) = self.sources.lock().unwrap().get(&id) {
+            return Ok(source.clone());
+        }
+        // Virtual closure files registered by the runtime (interpreted
+        // closure/context bodies): served from the registry, memoized.
+        if let Some(text) = trust_runtime::closure_source(id) {
+            let source = Source::new(id, text);
+            self.sources.lock().unwrap().insert(id, source.clone());
+            return Ok(source);
+        }
+        // Disk fallback (project-root vpaths only; package files are
+        // embedded-or-missing), memoized into the table.
+        if id.root() == &VirtualRoot::Project
+            && let Ok(text) = std::fs::read_to_string(self.disk_root.join(self.vpath(id)))
+        {
+            let source = Source::new(id, text);
+            self.sources.lock().unwrap().insert(id, source.clone());
+            return Ok(source);
+        }
+        Err(self.not_found(id))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        if let Some(bytes) = self.files.get(&id) {
+        if let Some(bytes) = self.files.lock().unwrap().get(&id) {
             return Ok(bytes.clone());
         }
         // Byte view of a mounted source (the sanctioned equivalent).
-        if let Some(source) = self.sources.get(&id) {
+        if let Some(source) = self.sources.lock().unwrap().get(&id) {
             return Ok(Bytes::from_string(source.text().to_string()));
+        }
+        if id.root() == &VirtualRoot::Project
+            && let Ok(bytes) = std::fs::read(self.disk_root.join(self.vpath(id)))
+        {
+            let bytes = Bytes::new(bytes);
+            self.files.lock().unwrap().insert(id, bytes.clone());
+            return Ok(bytes);
         }
         Err(self.not_found(id))
     }
@@ -302,8 +348,10 @@ impl StaticWorld {
         let vpath = self.vpath(id);
         let keys: Vec<String> = self
             .sources
+            .lock()
+            .unwrap()
             .keys()
-            .chain(self.files.keys())
+            .chain(self.files.lock().unwrap().keys())
             .map(|k| self.vpath(*k))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -318,7 +366,9 @@ impl StaticWorld {
         } else {
             format!("closest embedded: {closest:?}")
         };
-        eprintln!("file not embedded: {vpath} ({hint}); re-run translate with --embed");
+        eprintln!(
+            "file not embedded and not under --root: {vpath} ({hint}); re-run translate with --embed or run where the file exists",
+        );
         FileError::NotFound(vpath.into())
     }
 }

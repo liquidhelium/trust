@@ -88,8 +88,13 @@ trust translate <input.typ> [<out-dir>] [flags]
   `--input key=value` itself (typst CLI semantics — inputs are part of the
   invocation; the library is rebuilt from them on every run).
 - `--embed <path>` — embed an extra file or directory (data files read by
-  the document); the program errors with the closest embedded paths when
-  something is missing.
+  the document), pinning it at translate time; the program errors with
+  the closest embedded paths when something is missing.
+- `--dynamic <path>` — the opt-out dual of `--embed`: the file leaves the
+  import closure (not translated, not embedded) and is imported at run
+  time through the interpreter, read live from the run directory (or the
+  program's `--root`) — edits apply without retranslation. Non-embedded
+  files generally read embedded-first-then-disk, like typst.
 - `--format pdf,svg,png` — default output formats baked into the program
   (the program's own `--format` flag overrides per invocation).
 - `--system-fonts` — prefer system font discovery over the embedded

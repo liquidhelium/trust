@@ -32,6 +32,93 @@ fn collect_typ_sources(
     files
 }
 
+/// Collects the **import closure** of one entry file: every `.typ` file
+/// reachable through `import`/`include` string sources (anywhere in the
+/// tree, including inside function bodies — typst resolves those at call
+/// time, but the files are statically known), keyed by root-relative
+/// POSIX vpath. Files outside the closure are never translated.
+///
+/// `@spec` imports are not followed here (they are package-space, not
+/// project files; `--with-deps` handles them separately). Fully dynamic
+/// sources (computed paths) are unknowable statically — at run time they
+/// read from the world, like typst.
+fn collect_import_closure(
+    root: &std::path::Path,
+    entry: &str,
+    dynamic: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeMap<String, String> {
+    fn scan(node: &typst_syntax::SyntaxNode, dir: &str, out: &mut Vec<String>) {
+        for source in [
+            node.cast::<typst_syntax::ast::ModuleImport>()
+                .map(|i| i.source()),
+            node.cast::<typst_syntax::ast::ModuleInclude>()
+                .map(|i| i.source()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let typst_syntax::ast::Expr::Str(s) = source {
+                let raw = s.get().to_string();
+                if !raw.starts_with('@') && !raw.starts_with('/') {
+                    let joined = if dir.is_empty() {
+                        raw.clone()
+                    } else {
+                        format!("{dir}/{raw}")
+                    };
+                    if let Some(norm) = normalize_vpath(&joined) {
+                        out.push(norm);
+                    }
+                }
+            }
+        }
+        for child in node.children() {
+            scan(child, dir, out);
+        }
+    }
+
+    let mut files = std::collections::BTreeMap::new();
+    let mut queue = vec![entry.to_string()];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(vpath) = queue.pop() {
+        if dynamic.contains(&vpath) || !seen.insert(vpath.clone()) {
+            continue;
+        }
+        let on_disk = root.join(&vpath);
+        let Ok(text) = std::fs::read_to_string(&on_disk) else {
+            continue;
+        };
+        let root_node = typst_syntax::parse(&text);
+        let dir = vpath.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let mut found = Vec::new();
+        scan(&root_node, &dir, &mut found);
+        for f in found {
+            if !seen.contains(&f) {
+                queue.push(f);
+            }
+        }
+        files.insert(vpath, text);
+    }
+    files
+}
+
+/// Normalizes a joined vpath lexically (`a/../b` → `b`); `None` when it
+/// escapes the root.
+fn normalize_vpath(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return None;
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    Some(parts.join("/"))
+}
+
 /// Download a package from the registry and unpack it into the local cache
 /// (mirrors the typst CLI's automatic download of missing packages).
 /// Returns true on success (cache directory in place).
@@ -106,6 +193,12 @@ enum Command {
         /// package-root-relative path when inside the root)
         #[arg(long = "embed")]
         embeds: Vec<String>,
+        /// Mark a file as dynamic (repeatable): it leaves the import
+        /// closure — not translated, not embedded — and is imported at
+        /// run time through the interpreter, read live from --root (the
+        /// opt-out dual of --embed's pinning)
+        #[arg(long = "dynamic")]
+        dynamics: Vec<String>,
         /// Default output formats baked into the program (pdf,svg,png;
         /// the program's --format flag overrides per invocation)
         #[arg(long, value_delimiter = ',')]
@@ -162,6 +255,7 @@ fn main() {
             dir,
             with_deps,
             embeds,
+            dynamics,
             format,
             system_fonts,
             compile,
@@ -183,28 +277,47 @@ fn main() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from(format!("./{stem}-program")));
 
-            // File closure: the package root is the input file's parent
-            // directory; every sibling .typ joins the set (assembly is
-            // on-demand, unused modules never evaluate). Entry is the
-            // input file itself.
+            // File closure: the import closure of the entry file —
+            // sibling files outside the closure are never translated (and
+            // cannot break the build). The output project never enters
+            // the closure (only import/include-reachable files do).
             let root = input_path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            // The output project is never descended into (a previous
-            // run's embedded copies would feed back into the closure).
-            let out_dir_canon = std::fs::create_dir_all(&out_dir)
-                .ok()
-                .and_then(|_| std::fs::canonicalize(&out_dir).ok());
-            let mut files = collect_typ_sources(&root, out_dir_canon.as_deref());
             let entry = input_path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .expect("file name")
                 .to_string();
+            // Dynamic files leave the closure: an import edge to them
+            // falls back to run-time interpretation (mixed execution),
+            // their source read live from disk — edits apply without
+            // retranslation.
+            let mut dynamic = std::collections::BTreeSet::new();
+            for d in &dynamics {
+                let path = std::path::Path::new(d);
+                let rel = if path.is_absolute() {
+                    path.strip_prefix(&root).ok().map(|r| r.to_path_buf())
+                } else {
+                    Some(path.to_path_buf())
+                };
+                let Some(rel) = rel else {
+                    eprintln!("--dynamic {d} is not under the package root");
+                    std::process::exit(2);
+                };
+                dynamic.insert(rel.to_string_lossy().replace('\\', "/"));
+            }
+            for d in &dynamic {
+                if embeds.iter().any(|e| e.trim_start_matches("./") == *d) {
+                    eprintln!("--dynamic {d} is also --embed'd: pick one (pinned or live)");
+                    std::process::exit(2);
+                }
+            }
+            let mut files = collect_import_closure(&root, &entry, &dynamic);
             if !files.contains_key(&entry) {
-                eprintln!("internal: entry {entry} missing from the file set");
+                eprintln!("internal: entry {entry} missing from the closure");
                 std::process::exit(2);
             }
             let dep_entries = if with_deps {

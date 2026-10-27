@@ -75,6 +75,10 @@ pub fn generate(
     // vendor/trust-runtime/, Cargo.toml.
     let src = spec.out_dir.join("src");
     let typ_dir = src.join("typ");
+    // Clean slate: files from a previous generation (e.g. one that left
+    // the import closure via --dynamic) must not linger as orphans.
+    let _ = std::fs::remove_dir_all(&typ_dir);
+    let _ = std::fs::remove_dir_all(spec.out_dir.join("assets"));
     std::fs::create_dir_all(&typ_dir).map_err(|e| format!("create {}: {e}", typ_dir.display()))?;
     let mut module_files = 0usize;
     for (rel, content) in &tree {

@@ -1,17 +1,34 @@
-# trust
+# trust - translator, from <ins>T</ins>ypst to <ins>RUST</ins>
 
-`trust` compiles Typst packages to Rust. The output is not a standalone
-program: it is a Rust crate that drives the same value model as the Typst
-interpreter — `typst-library`'s `Value`, `Func`, and `Content` — so a
-compiled package behaves like, and interoperates with, the original `.typ`
-package inside an unmodified typst. The relationship is the one Nuitka has
-to CPython: compile the program, keep the host runtime and its object model.
+`trust` is a translator from Typst to Rust. It can turn a single `.typ`
+file into a standalone program, or a Typst package into a Rust crate.
 
-The translator consumes a package directory (`typst.toml`, entrypoint,
-import graph) and emits one Rust crate per package. The generated crate
-exposes `module()` (the export surface of the original entry file, bound
-name by name), `module_init` (per-build initialization of top-level engine
-values), and `install(world, library)` (injection into a host).
+The program translator (`trust translate`) emits a self-contained cargo
+project for the given file — optionally with its `@spec` dependencies
+merged into the translation (`--with-deps`) — and, with `--compile`,
+builds it with cargo in one step. The resulting program renders the
+document with no typst toolchain at run time.
+
+The package translator (`trust translate-pkg`) consumes a package
+directory (`typst.toml`, entrypoint, import graph) and emits one Rust
+crate per package. The generated crate exposes `module()` (the export
+surface of the original entry file, bound name by name), `module_init`
+(per-build initialization of top-level engine values), and
+`install(world, library)` (injection into a host).
+
+The goal of trust is to improve runtime performance while maintaining
+100% compatibility with Typst scripts. See [How it works](#how-it-works).
+
+## How it works
+
+Inspired by Nuitka — which compiles Python by translating it into C++
+that calls the same C API the interpreter itself uses — trust applies the
+same idea even more directly, because the Typst compiler is itself a Rust
+program: generated code drives the very libraries the interpreter runs
+on, `typst-library`'s `Value`, `Func`, and `Content`, and the same
+layout and export pipelines. The output is not a reimplementation of
+Typst — it is the same program in compiled form, which is what this
+route's 100% compatibility rests on.
 
 ## Workspace layout
 

@@ -32,10 +32,14 @@ route's 100% compatibility rests on.
 
 ## Speed
 
-On a cetz stress workload, the translated standalone program renders
-**~2× faster** than the typst CLI (343 ms vs 775 ms, median of 10 runs;
-measured by [bench.sh](#benchmark), which verifies byte-identical output
-before timing).
+On cetz stress workloads, the translated standalone program renders
+**~2× faster** than the typst CLI (measured by [bench.sh](#benchmark),
+which verifies byte-identical output before timing; median of 10 runs):
+
+| Workload            | Standalone program | typst CLI 0.15.1 | Speedup |
+|---------------------|--------------------|------------------|---------|
+| 20 canvases × 60 elements (1 page) | 343 ms | 775 ms | **2.3×** |
+| 60 canvases × 60 elements (2 pages) | 415 ms | 866 ms | **2.1×** |
 
 ## Workspace layout
 

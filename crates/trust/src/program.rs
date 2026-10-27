@@ -28,6 +28,9 @@ pub struct ProgramSpec {
     /// Default output formats baked into the program (`pdf`, `svg`,
     /// `png`).
     pub formats: Vec<String>,
+    /// Non-.typ files of merged dependency packages: `{spec}/{rel}` vkey →
+    /// on-disk path (wasm plugins, data files; embedded like `--embed`).
+    pub dep_assets: Vec<(String, PathBuf)>,
     /// Prefer system font discovery over the embedded typst-assets set.
     pub system_fonts: bool,
     pub lenient: bool,
@@ -98,6 +101,9 @@ pub fn generate(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     let mut embedded: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for (vkey, on_disk) in &spec.dep_assets {
+        embedded.insert(vkey.clone(), on_disk.clone());
+    }
     for vpath in files.keys() {
         let on_disk = package_root.join(vpath);
         if on_disk.is_file() {
@@ -235,7 +241,7 @@ fn cargo_toml(package_name: &str, bin_name: &str) -> String {
         r#"[package]
 name = "{package_name}"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 publish = false
 # Embedded fonts come from typst-assets (SIL OFL 1.1) via typst-kit.
 

@@ -198,15 +198,35 @@ impl StaticWorld {
         for (vpath, text) in assets::TEXTS {
             let id = intern(vpath);
             sources.insert(id, Source::new(id, text.to_string()));
+            // Merged-dependency sources (`@ns/name:ver/rel`) double-mount
+            // at their package root: span-driven lookups (and any
+            // interpreted import) resolve package FileIds.
+            if vpath.starts_with('@')
+                && let Some(pid) = trust_runtime::package_root_file_id(vpath)
+            {
+                sources.insert(pid, Source::new(pid, text.to_string()));
+            }
         }
         for (vpath, data) in assets::FILES {
             let id = intern(vpath);
             files.insert(id, Bytes::new(*data));
+            // Same package-root double mount for embedded package files
+            // (wasm plugins, data).
+            if vpath.starts_with('@')
+                && let Some(pid) = trust_runtime::package_root_file_id(vpath)
+            {
+                files.insert(pid, Bytes::new(*data));
+            }
             // `.typ` entries double as sources (diagnostics and dynamic
             // include/import resolution read them).
             if vpath.ends_with(".typ") {
                 let Ok(text) = std::str::from_utf8(data) else { continue };
                 sources.insert(id, Source::new(id, text.to_string()));
+                if vpath.starts_with('@')
+                    && let Some(pid) = trust_runtime::package_root_file_id(vpath)
+                {
+                    sources.insert(pid, Source::new(pid, text.to_string()));
+                }
             }
         }
         // Document root: a one-line shim including the translated module

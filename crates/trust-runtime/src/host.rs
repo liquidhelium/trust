@@ -137,6 +137,24 @@ pub fn import_external(engine: &mut Engine, spec: &str, span: Span) -> SourceRes
 }
 
 
+/// A FileId under a **package root** for a merged-dependency vkey of the
+/// form `@ns/name:ver/rel` — the same convention `source_span` derives
+/// span FileIds from, exposed so generated hosts can mount dependency
+/// files/sources at the roots the interpreter (and span-driven lookups)
+/// resolve them at. Returns `None` for non-package keys or bad specs.
+pub fn package_root_file_id(vkey: &str) -> Option<typst::syntax::FileId> {
+    let colon = vkey.find(':')?;
+    let slash = vkey[colon..].find('/').map(|i| i + colon)?;
+    let spec: typst::syntax::package::PackageSpec = vkey[..slash].parse().ok()?;
+    let rel = &vkey[slash + 1..];
+    typst::syntax::RootedPath::new(
+        typst::syntax::VirtualRoot::Package(spec),
+        typst::syntax::VirtualPath::new(rel).ok()?,
+    )
+    .intern()
+    .into()
+}
+
 /// Explicit degradation marker: emits a warning and returns none (the
 /// no-silent-degradation principle — the generated artifact lacks
 /// functionality here, and the user must see it).

@@ -243,9 +243,47 @@ fn main() {
             } else {
                 Default::default()
             };
+            // Non-.typ package files (wasm plugins, data) of merged
+            // dependencies: embedded under their {spec}/{rel} key so the
+            // program resolves them like the package cache would.
+            let mut dep_assets: Vec<(String, std::path::PathBuf)> = Vec::new();
+            if !dep_entries.is_empty() {
+                let cache_root = std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join(".cache/typst/packages"))
+                    })
+                    .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
+                for spec in dep_entries.keys() {
+                    // "@ns/name:ver" → cache/<ns>/<name>/<ver>
+                    let Some(rest) = spec.strip_prefix('@') else { continue };
+                    let Some((ns, name_ver)) = rest.split_once('/') else { continue };
+                    let Some((name, ver)) = name_ver.split_once(':') else { continue };
+                    let base = cache_root.join(ns).join(name).join(ver);
+                    let mut stack = vec![base.clone()];
+                    while let Some(d) = stack.pop() {
+                        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+                        for e in entries.flatten() {
+                            let p = e.path();
+                            if p.is_dir() {
+                                stack.push(p);
+                            } else if p.extension().and_then(|x| x.to_str()) != Some("typ") {
+                                let Ok(rel) = p.strip_prefix(&base) else { continue };
+                                let vkey =
+                                    format!("{spec}/{}", rel.to_string_lossy().replace('\\', "/"));
+                                if !files.contains_key(&vkey) {
+                                    dep_assets.push((vkey, p));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let spec = program::ProgramSpec {
                 input: input_path,
                 out_dir: out_dir.clone(),
+                dep_assets,
                 embed: embeds.iter().map(std::path::PathBuf::from).collect(),
                 formats: format
                     .as_deref()

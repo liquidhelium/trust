@@ -305,6 +305,11 @@ enum Command {
         /// generated source tree
         #[arg(short, long)]
         output: String,
+        /// Package identity for the module's FileId namespace
+        /// (`@ns/name:version`); defaults to `@preview/{name}:{version}`
+        /// from the manifest
+        #[arg(long)]
+        spec: Option<String>,
         /// Degrade unsupported constructs to runtime warnings instead of
         /// failing
         #[arg(long)]
@@ -501,6 +506,7 @@ fn main() {
         Command::TranslatePkg {
             pkg_root,
             output,
+            spec,
             lenient,
             with_deps,
             no_fmt,
@@ -592,28 +598,25 @@ fn main() {
                         let version = package.get("version")?.as_str()?.to_string();
                         Some((name, version))
                     });
-                let spec = (|| {
-                    let ver = root.file_name()?.to_str()?;
-                    let name = root.parent()?.file_name()?.to_str()?;
-                    let ns = root.parent()?.parent()?.file_name()?.to_str()?;
-                    if name == manifest_name.as_ref().map(|(n, _)| n.as_str()).unwrap_or("")
-                        && ver == manifest_name.as_ref().map(|(_, v)| v.as_str()).unwrap_or("")
-                    {
-                        Some(format!("@{ns}/{name}:{ver}"))
-                    } else {
-                        None
+                // Package identity: explicit `--spec`, else
+                // `@preview/{name}:{version}` from the manifest (the
+                // universe publishes everything under preview; other
+                // namespaces are opt-in). Never derived from the path —
+                // identity is declared, and where files sit carries no
+                // namespace (dependency packages differ: their specs come
+                // from the import strings, spec → cache path, the sound
+                // direction).
+                let spec = match spec.as_deref() {
+                    Some(s) => s.to_string(),
+                    None => {
+                        let Some((name, version)) = &manifest_name else {
+                            eprintln!(
+                                "failed to derive a package spec (typst.toml needs name and version, or pass --spec)"
+                            );
+                            std::process::exit(2);
+                        };
+                        format!("@preview/{name}:{version}")
                     }
-                })()
-                .or_else(|| {
-                    manifest_name
-                        .as_ref()
-                        .map(|(name, version)| format!("@preview/{name}:{version}"))
-                });
-                let Some(spec) = spec else {
-                    eprintln!(
-                        "failed to derive a package spec (typst.toml needs name and version)"
-                    );
-                    std::process::exit(2);
                 };
                 let mut spec_files = std::collections::BTreeMap::new();
                 for (k, v) in &files {

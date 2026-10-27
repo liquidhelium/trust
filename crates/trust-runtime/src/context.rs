@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 context 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*,
+    stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// `#context expr`: builds the deferred-evaluation closure (mirrors `Eval
 /// for ast::Contextual`; evaluated during realize/layout with
@@ -61,7 +63,6 @@ pub fn context_closure(
         num_pos_params: 0,
     })
 }
-
 
 /// Snippet source → AST expression node (a lookup cache keyed by the
 /// **original snippet text**; hits do zero formatting). A context body is
@@ -118,7 +119,6 @@ pub(crate) fn cached_body_node(body_src: &str) -> typst_syntax::SyntaxNode {
     node
 }
 
-
 /// Captured scope (pending materialization + the Captured read-only mark;
 /// mirrors eval_closure's `scopes.top = closure.captured.clone()`).
 pub(crate) fn captured_scope(
@@ -143,7 +143,6 @@ pub(crate) fn captured_scope(
     scope
 }
 
-
 /// Carrier element for context closures (mirrors
 /// `ContextElem::new(func).pack()`; ContextElem implements IntoValue once
 /// wrapped in `Packed`).
@@ -154,4 +153,3 @@ pub fn context_body(func: Func) -> typst::foundations::Content {
         _ => unreachable!("ContextElem packs to content"),
     }
 }
-

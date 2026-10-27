@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 stub 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*,
+    macros::*, slots::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// `Routines.eval_closure` dispatch with a stub direct call. When the
 /// closure is one of our stubs (captured scope carries `__trust_routine`),
@@ -48,7 +50,16 @@ pub fn trust_eval_closure(
 ) -> SourceResult<Value> {
     if stub_routine(closure).is_some() {
         return eval_stub_native(
-            func, closure, world, library, introspector, traced, sink, route, context, args,
+            func,
+            closure,
+            world,
+            library,
+            introspector,
+            traced,
+            sink,
+            route,
+            context,
+            args,
         );
     }
     typst_eval::eval_closure(
@@ -64,7 +75,6 @@ pub fn trust_eval_closure(
         args,
     )
 }
-
 
 /// Fetches the direct-call routine from a stub's captured scope (the hit
 /// test; non-stub closures pay a single scope lookup). **Borrows
@@ -90,7 +100,6 @@ fn stub_routine(closure: &LazyHash<Closure>) -> Option<(&TrustRoutine, Option<&S
     };
     Some((cell, slot))
 }
-
 
 /// Memoized stub direct-call body (input set identical to typst-eval's
 /// `eval_closure`, so the comemo key is isomorphic — same types, same
@@ -149,7 +158,11 @@ fn eval_stub_native(
         }
     }
     if let Some(slot) = slot {
-        args.insert(0, args.span, Value::Dyn(typst::foundations::Dynamic::new(slot.clone())));
+        args.insert(
+            0,
+            args.span,
+            Value::Dyn(typst::foundations::Dynamic::new(slot.clone())),
+        );
     }
     (cell.f)(&mut engine, context, &mut args)
 }
@@ -187,7 +200,6 @@ pub(crate) fn install_stub_fast_path(library: &mut Library) {
     library.routines = fast;
 }
 
-
 /// Builds a closure value from a source snippet: the node is parsed by the
 /// official parser, defaults are passed in after the generated code
 /// evaluates them at creation time, and captured carries the current values
@@ -202,7 +214,6 @@ pub(crate) fn install_stub_fast_path(library: &mut Library) {
 pub(crate) static CLOSURE_SOURCES: std::sync::RwLock<Vec<(typst::syntax::FileId, String)>> =
     std::sync::RwLock::new(Vec::new());
 
-
 /// Looks up the source of a virtual closure file (`None` if absent).
 pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
     CLOSURE_SOURCES
@@ -212,7 +223,6 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
         .find(|(fid, _)| *fid == id)
         .map(|(_, src)| src.clone())
 }
-
 
 /// One-shot parse of an interpreted snippet (`closure`/`native_closure`),
 /// **without a global cache**: meant as the initializer of a per-call-site
@@ -253,7 +263,6 @@ pub fn parse_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
         .count();
     (node, num_pos_params)
 }
-
 
 fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     static CACHE: std::sync::LazyLock<
@@ -303,7 +312,6 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     (node, num_pos_params)
 }
 
-
 /// Materializes not-yet-captured names at creation time: global scope
 /// first, then the math scope (mirrors native closure creation —
 /// CapturesVisitor resolves against the scopes at the creation point, where
@@ -331,7 +339,6 @@ pub(crate) fn resolve_pending(
         }
     }
 }
-
 
 pub fn closure(
     src: &str,
@@ -377,7 +384,6 @@ pub fn closure(
     .spanned(closure_span)
 }
 
-
 /// Finds the first Closure node in pre-order.
 fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::SyntaxNode> {
     if node.kind() == SyntaxKind::Closure {
@@ -385,7 +391,6 @@ fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::S
     }
     node.children().find_map(find_closure_node)
 }
-
 
 /// Per-call-site static version of interpreted closure creation (the node
 /// comes from the call site's static; the pending materialization protocol
@@ -443,7 +448,6 @@ pub fn closure_node_at(
     .spanned(closure_span)
 }
 
-
 /// Opaque handle for per-build state: wraps an `Arc<dyn Any + Send +
 /// Sync>` into typst's value world (`Value::Dyn`) and travels with the
 /// function value (mirroring the captured data layout of typst closures);
@@ -461,7 +465,6 @@ pub struct StateSlot {
     pub(crate) inner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
-
 impl StateSlot {
     /// Wraps a piece of state / a capture tuple.
     pub fn new<T: std::any::Any + Send + Sync>(state: std::sync::Arc<T>) -> Self {
@@ -473,20 +476,17 @@ impl StateSlot {
     }
 }
 
-
 impl std::fmt::Debug for StateSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("state slot")
     }
 }
 
-
 impl typst::foundations::Repr for StateSlot {
     fn repr(&self) -> EcoString {
         "state slot".into()
     }
 }
-
 
 impl typst::foundations::NativeType for StateSlot {
     const NAME: &'static str = "state";
@@ -509,20 +509,17 @@ impl typst::foundations::NativeType for StateSlot {
     }
 }
 
-
 impl PartialEq for StateSlot {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-
 impl std::hash::Hash for StateSlot {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
-
 
 /// Stub direct-call routine: the native-body entry (same type as
 /// `NativeFuncData.function`: `&'static dyn Fn`) carried by the third
@@ -534,14 +531,8 @@ impl std::hash::Hash for StateSlot {
 /// `default.clone()` at binding time), and call the native body directly
 /// instead of the memoized interpretation.
 /// The native-body signature driven by translated closures.
-pub type TrustRoutineFn = dyn Fn(
-        &mut Engine,
-        Tracked<'_, Context>,
-        &mut Args,
-    ) -> SourceResult<Value>
-        + Send
-        + Sync;
-
+pub type TrustRoutineFn =
+    dyn Fn(&mut Engine, Tracked<'_, Context>, &mut Args) -> SourceResult<Value> + Send + Sync;
 
 #[derive(Clone)]
 pub struct TrustRoutine {
@@ -554,20 +545,17 @@ pub struct TrustRoutine {
     pub defaults: Vec<(Str, Value)>,
 }
 
-
 impl std::fmt::Debug for TrustRoutine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("trust routine")
     }
 }
 
-
 impl typst::foundations::Repr for TrustRoutine {
     fn repr(&self) -> EcoString {
         "trust routine".into()
     }
 }
-
 
 impl typst::foundations::NativeType for TrustRoutine {
     const NAME: &'static str = "routine";
@@ -590,7 +578,6 @@ impl typst::foundations::NativeType for TrustRoutine {
     }
 }
 
-
 impl PartialEq for TrustRoutine {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(
@@ -600,7 +587,6 @@ impl PartialEq for TrustRoutine {
     }
 }
 
-
 impl std::hash::Hash for TrustRoutine {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (self.f as *const _ as *const () as usize).hash(state);
@@ -608,16 +594,12 @@ impl std::hash::Hash for TrustRoutine {
     }
 }
 
-
 /// Extracts named-argument names from the stub node in declaration order
 /// and pairs them with the creation-time materialized defaults table
 /// (mirrors typst closures' `closure.defaults`); a count mismatch (a change
 /// in the generator's output shape) yields an empty table — the fast path
 /// then injects nothing and semantics fall back to the stub's own binding.
-fn stub_named_defaults(
-    node: &typst_syntax::SyntaxNode,
-    defaults: &[Value],
-) -> Vec<(Str, Value)> {
+fn stub_named_defaults(node: &typst_syntax::SyntaxNode, defaults: &[Value]) -> Vec<(Str, Value)> {
     let Some(closure_node) = find_closure_node(node) else {
         return Vec::new();
     };
@@ -641,7 +623,6 @@ fn stub_named_defaults(
         .map(|(name, value)| (Str::from(name), value))
         .collect()
 }
-
 
 /// Stub captured scope (three protocol bindings: the native-body function
 /// value + the direct-call routine + the state handle).
@@ -677,7 +658,6 @@ fn stub_scope(
     scope
 }
 
-
 /// Signature-faithful stub closure (the native-closure stub approach): the
 /// original `{name}{params}` signature is preserved (parameter checks /
 /// `params()` / repr / default introspection all faithful); the forwarding
@@ -708,7 +688,6 @@ pub fn native_closure_node(
     .spanned(closure_span)
 }
 
-
 pub fn native_closure(
     data: &'static typst::foundations::NativeFuncData,
     params_src: &str,
@@ -731,7 +710,6 @@ pub fn native_closure(
     .spanned(closure_span)
 }
 
-
 /// Stub source composition (a pure function, uncached): `stub_signature`
 /// (pattern parameters → synthesized names, unnamed sinks get a name) +
 /// `stub_source` merged — called at **translation time**; the generated
@@ -740,7 +718,6 @@ pub fn compose_stub(name: &str, params_src: &str) -> String {
     let (params, args) = stub_signature(params_src);
     stub_source(name, &params, &args, true)
 }
-
 
 /// Stub signature and forwarding argument list (cached by `params_src`
 /// text — stub creation is frequent, so parsing happens only once).
@@ -816,7 +793,6 @@ fn stub_signature(params_src: &str) -> (String, String) {
     out
 }
 
-
 /// Stub source `let {name}({params}) = __trust_impl(__trust_state, {args})`
 /// cached by (function name, signature) (zero formatting on the frequent
 /// creation path).
@@ -847,4 +823,3 @@ fn stub_source(name: &str, params: &str, args: &str, stateful: bool) -> String {
         .insert(key, src.clone());
     src
 }
-

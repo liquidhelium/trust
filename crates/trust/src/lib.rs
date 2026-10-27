@@ -12,8 +12,7 @@ pub mod translate;
 pub use fmt::format_generated;
 pub use translate::{
     Diag, PackageInput, translate, translate_package, translate_package_lenient,
-    translate_package_tree,
-    translate_package_tree_lenient,
+    translate_package_tree, translate_package_tree_lenient,
 };
 
 /// Front-end entry: parse typst source into the official syntax tree.

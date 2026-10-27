@@ -75,8 +75,7 @@ pub fn generate(
     // vendor/trust-runtime/, Cargo.toml.
     let src = spec.out_dir.join("src");
     let typ_dir = src.join("typ");
-    std::fs::create_dir_all(&typ_dir)
-        .map_err(|e| format!("create {}: {e}", typ_dir.display()))?;
+    std::fs::create_dir_all(&typ_dir).map_err(|e| format!("create {}: {e}", typ_dir.display()))?;
     let mut module_files = 0usize;
     for (rel, content) in &tree {
         let path = typ_dir.join(rel);
@@ -111,12 +110,16 @@ pub fn generate(
         }
     }
     for path in &spec.embed {
-        let canonical = std::fs::canonicalize(path)
-            .map_err(|e| format!("--embed {}: {e}", path.display()))?;
-        let root_canonical = std::fs::canonicalize(&package_root)
-            .unwrap_or_else(|_| package_root.clone());
+        let canonical =
+            std::fs::canonicalize(path).map_err(|e| format!("--embed {}: {e}", path.display()))?;
+        let root_canonical =
+            std::fs::canonicalize(&package_root).unwrap_or_else(|_| package_root.clone());
         if let Ok(rel) = canonical.strip_prefix(&root_canonical) {
-            walk_embed(&canonical, &rel.to_string_lossy().replace('\\', "/"), &mut embedded);
+            walk_embed(
+                &canonical,
+                &rel.to_string_lossy().replace('\\', "/"),
+                &mut embedded,
+            );
         } else {
             let rel = path.to_string_lossy().replace('\\', "/");
             walk_embed(&canonical, rel.trim_start_matches("./"), &mut embedded);
@@ -129,7 +132,10 @@ pub fn generate(
     let mut inlined = String::new();
     let mut embedded_files = 0usize;
     for (idx, (vpath, on_disk)) in embedded.iter().enumerate() {
-        let ext = on_disk.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+        let ext = on_disk
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin");
         let asset_name = format!("{idx}.{ext}");
         let dest = assets_dir.join(&asset_name);
         std::fs::copy(on_disk, &dest).map_err(|e| format!("copy asset {on_disk:?}: {e}"))?;
@@ -203,7 +209,13 @@ pub fn generate(
 pub(crate) fn sanitize_bin_name(name: &str) -> String {
     let mut out: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.is_empty() || out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         out.insert(0, '_');
@@ -214,7 +226,9 @@ pub(crate) fn sanitize_bin_name(name: &str) -> String {
 fn walk_embed(root: &Path, prefix: &str, out: &mut BTreeMap<String, PathBuf>) {
     if root.is_file() {
         let key = if prefix.is_empty() {
-            root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
         } else {
             prefix.to_string()
         };
@@ -223,11 +237,20 @@ fn walk_embed(root: &Path, prefix: &str, out: &mut BTreeMap<String, PathBuf>) {
         }
         return;
     }
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
-        let file = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let rel = if prefix.is_empty() { file } else { format!("{prefix}/{file}") };
+        let file = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let rel = if prefix.is_empty() {
+            file
+        } else {
+            format!("{prefix}/{file}")
+        };
         if p.is_dir() {
             walk_embed(&p, &rel, out);
         } else {
@@ -283,8 +306,14 @@ fn vendor_runtime(out_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("vendor Cargo.toml: {e}"))?;
     let (version, edition) = workspace_version_edition();
     let manifest = manifest
-        .replace("version.workspace = true", &format!("version = \"{version}\""))
-        .replace("edition.workspace = true", &format!("edition = \"{edition}\""));
+        .replace(
+            "version.workspace = true",
+            &format!("version = \"{version}\""),
+        )
+        .replace(
+            "edition.workspace = true",
+            &format!("edition = \"{edition}\""),
+        );
     std::fs::write(dest.join("Cargo.toml"), manifest)
         .map_err(|e| format!("vendor Cargo.toml: {e}"))?;
     Ok(())
@@ -317,7 +346,10 @@ fn workspace_version_edition() -> (String, String) {
             }
         }
     }
-    (version.unwrap_or_else(|| "0.1.0".into()), edition.unwrap_or_else(|| "2021".into()))
+    (
+        version.unwrap_or_else(|| "0.1.0".into()),
+        edition.unwrap_or_else(|| "2021".into()),
+    )
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {

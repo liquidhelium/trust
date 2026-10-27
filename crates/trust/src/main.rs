@@ -1,6 +1,5 @@
 //! The `trust` CLI: command line for the typst → rust transpiler.
 
-
 use clap::Parser;
 
 mod program;
@@ -11,10 +10,7 @@ mod program;
 /// Diagnostic excerpt: span → file:line:col + source line (mirrors the
 /// typst CLI's diagnostic presentation). The span's FileId,
 /// re-interned by path, is the same origin.
-fn diag_snippet(
-    diag: &trust::Diag,
-    files: &std::collections::BTreeMap<String, String>,
-) -> String {
+fn diag_snippet(diag: &trust::Diag, files: &std::collections::BTreeMap<String, String>) -> String {
     use std::fmt::Write as _;
     let Some(id) = diag.span.id() else {
         return String::new();
@@ -200,8 +196,9 @@ fn main() {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             let mut files = std::collections::BTreeMap::new();
-            let out_dir_canon =
-                std::fs::create_dir_all(&out_dir).ok().and_then(|_| std::fs::canonicalize(&out_dir).ok());
+            let out_dir_canon = std::fs::create_dir_all(&out_dir)
+                .ok()
+                .and_then(|_| std::fs::canonicalize(&out_dir).ok());
             let mut stack = vec![root.clone()];
             while let Some(dirp) = stack.pop() {
                 // Never descend into the output project (a previous run's
@@ -257,19 +254,29 @@ fn main() {
                     .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
                 for spec in dep_entries.keys() {
                     // "@ns/name:ver" → cache/<ns>/<name>/<ver>
-                    let Some(rest) = spec.strip_prefix('@') else { continue };
-                    let Some((ns, name_ver)) = rest.split_once('/') else { continue };
-                    let Some((name, ver)) = name_ver.split_once(':') else { continue };
+                    let Some(rest) = spec.strip_prefix('@') else {
+                        continue;
+                    };
+                    let Some((ns, name_ver)) = rest.split_once('/') else {
+                        continue;
+                    };
+                    let Some((name, ver)) = name_ver.split_once(':') else {
+                        continue;
+                    };
                     let base = cache_root.join(ns).join(name).join(ver);
                     let mut stack = vec![base.clone()];
                     while let Some(d) = stack.pop() {
-                        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+                        let Ok(entries) = std::fs::read_dir(&d) else {
+                            continue;
+                        };
                         for e in entries.flatten() {
                             let p = e.path();
                             if p.is_dir() {
                                 stack.push(p);
                             } else if p.extension().and_then(|x| x.to_str()) != Some("typ") {
-                                let Ok(rel) = p.strip_prefix(&base) else { continue };
+                                let Ok(rel) = p.strip_prefix(&base) else {
+                                    continue;
+                                };
                                 let vkey =
                                     format!("{spec}/{}", rel.to_string_lossy().replace('\\', "/"));
                                 if !files.contains_key(&vkey) {
@@ -287,7 +294,13 @@ fn main() {
                 embed: embeds.iter().map(std::path::PathBuf::from).collect(),
                 formats: format
                     .as_deref()
-                    .map(|f| f.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                    .map(|f| {
+                        f.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 system_fonts,
                 lenient,
@@ -338,7 +351,10 @@ fn main() {
             // .typ files join the set — assembly is on-demand).
             let (root, single_entry) = if root_path.is_file() {
                 (
-                    root_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf(),
+                    root_path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .to_path_buf(),
                     root_path
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -430,14 +446,29 @@ fn main() {
                 .extension()
                 .and_then(|e| e.to_str())
                 .filter(|e| *e == "typ")
-                .and_then(|_| root_path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-                .or_else(|| {
-                    std::fs::read_to_string(root.join("typst.toml")).ok().and_then(|text| {
-                        let manifest: toml::Table = toml::from_str(&text).ok()?;
-                        manifest.get("package")?.get("name")?.as_str().map(str::to_string)
-                    })
+                .and_then(|_| {
+                    root_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
                 })
-                .or_else(|| root.file_name().and_then(|s| s.to_str()).map(str::to_string))
+                .or_else(|| {
+                    std::fs::read_to_string(root.join("typst.toml"))
+                        .ok()
+                        .and_then(|text| {
+                            let manifest: toml::Table = toml::from_str(&text).ok()?;
+                            manifest
+                                .get("package")?
+                                .get("name")?
+                                .as_str()
+                                .map(str::to_string)
+                        })
+                })
+                .or_else(|| {
+                    root.file_name()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| "pkg".into());
             // `-o DIR/` (trailing slash): directory form, a multi-file
             // output mirroring the source tree.
@@ -470,11 +501,20 @@ fn main() {
                             std::fs::write(&path, &content).expect("write");
                             bytes += content.len();
                         }
-                        println!("generated tree of {} files ({} bytes) at {output}", tree.len(), bytes);
+                        println!(
+                            "generated tree of {} files ({} bytes) at {output}",
+                            tree.len(),
+                            bytes
+                        );
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
+                            eprintln!(
+                                "  {:?}{}: {}",
+                                d.span,
+                                diag_snippet(&d, &pkg.files),
+                                d.message
+                            );
                         }
                         std::process::exit(1);
                     }
@@ -484,9 +524,18 @@ fn main() {
             if lenient {
                 let (code, diags) = trust::translate_package_lenient(&pkg, &name);
                 for d in &diags {
-                    eprintln!("degraded {:?}{}: {}", d.span, diag_snippet(d, &pkg.files), d.message);
+                    eprintln!(
+                        "degraded {:?}{}: {}",
+                        d.span,
+                        diag_snippet(d, &pkg.files),
+                        d.message
+                    );
                 }
-                let code = if no_fmt { code } else { trust::format_generated(&code) };
+                let code = if no_fmt {
+                    code
+                } else {
+                    trust::format_generated(&code)
+                };
                 std::fs::write(output, &code).expect("write");
                 println!(
                     "generated {output} ({} bytes, {} degradations; list above and in the file header)",
@@ -496,13 +545,22 @@ fn main() {
             } else {
                 match trust::translate_package(&pkg, &name) {
                     Ok(code) => {
-                        let code = if no_fmt { code } else { trust::format_generated(&code) };
+                        let code = if no_fmt {
+                            code
+                        } else {
+                            trust::format_generated(&code)
+                        };
                         std::fs::write(output, &code).expect("write");
                         println!("generated {output} ({} bytes)", code.len());
                     }
                     Err(diags) => {
                         for d in diags {
-                            eprintln!("  {:?}{}: {}", d.span, diag_snippet(&d, &pkg.files), d.message);
+                            eprintln!(
+                                "  {:?}{}: {}",
+                                d.span,
+                                diag_snippet(&d, &pkg.files),
+                                d.message
+                            );
                         }
                         std::process::exit(1);
                     }
@@ -592,7 +650,10 @@ fn coverage(root: &str) -> i32 {
                         std::collections::BTreeMap::new();
                     for d in diags {
                         let key = if d.message.contains("encountered ") {
-                            format!("top-level: {}", d.message.split("encountered ").nth(1).unwrap_or("?"))
+                            format!(
+                                "top-level: {}",
+                                d.message.split("encountered ").nth(1).unwrap_or("?")
+                            )
                         } else {
                             d.message.clone()
                         };
@@ -658,7 +719,10 @@ fn normalize_diag(message: &str) -> String {
             .map(|i| m[i..].split(')').next().unwrap_or(&m[i..]).to_string())
     };
     if m.contains("encountered ") {
-        return format!("top-level: {}", m.split("encountered ").nth(1).unwrap_or("?"));
+        return format!(
+            "top-level: {}",
+            m.split("encountered ").nth(1).unwrap_or("?")
+        );
     }
     if let Some(e) = pick("expression ") {
         return format!("expression: {e}");
@@ -668,7 +732,6 @@ fn normalize_diag(message: &str) -> String {
     }
     m.to_string()
 }
-
 
 /// Recursive dependency closure: scan the text for `"@spec"` references,
 /// resolve them from the local package cache (`TYPST_PACKAGE_CACHE_PATH`
@@ -684,9 +747,8 @@ fn collect_translatable_deps(
     let cache_root = std::env::var_os("TYPST_PACKAGE_CACHE_PATH")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|h| {
-                std::path::PathBuf::from(h).join(".cache/typst/packages")
-            })
+            std::env::var_os("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".cache/typst/packages"))
         })
         .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
     let mut dep_entries = std::collections::BTreeMap::new();
@@ -728,7 +790,9 @@ fn collect_translatable_deps(
                 continue;
             }
             // A spec looks like @ns/name:ver.
-            let Some(rest) = spec.strip_prefix('@') else { continue };
+            let Some(rest) = spec.strip_prefix('@') else {
+                continue;
+            };
             let Some((ns_name, _ver)) = rest.split_once(':') else {
                 eprintln!("unsupported dependency spec format: {spec}");
                 continue;
@@ -736,9 +800,10 @@ fn collect_translatable_deps(
             let Some((ns, name)) = ns_name.split_once('/') else {
                 continue;
             };
-            let dir = cache_root.join(ns).join(name).join(
-                rest.split_once(':').map(|(_, v)| v).unwrap_or(""),
-            );
+            let dir = cache_root
+                .join(ns)
+                .join(name)
+                .join(rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
             // Automatic fetch of missing packages (mirrors the typst CLI's
             // registry download): registry form
             // {name}-{version}.tar.gz; TRUST_NO_FETCH=1 disables it. Only
@@ -747,7 +812,9 @@ fn collect_translatable_deps(
                 let ok = std::env::var_os("TRUST_NO_FETCH").is_none()
                     && fetch_package(ns, name, rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
                 if !ok {
-                    eprintln!("dependency not found in local package cache (falling back to runtime interpretation): {spec}");
+                    eprintln!(
+                        "dependency not found in local package cache (falling back to runtime interpretation): {spec}"
+                    );
                     continue;
                 }
                 eprintln!("missing dependency fetched automatically: {spec}");
@@ -771,16 +838,23 @@ fn collect_translatable_deps(
             else {
                 continue;
             };
-            let src_root = entry.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+            let src_root = entry
+                .rsplit_once('/')
+                .map(|(d, _)| format!("{d}/"))
+                .unwrap_or_default();
             let mut stack = vec![dir.join(&src_root)];
             while let Some(d) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&d) else { continue };
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
                 for e in entries.flatten() {
                     let path = e.path();
                     if path.is_dir() {
                         stack.push(path);
                     } else if path.extension().and_then(|x| x.to_str()) == Some("typ") {
-                        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                        let Ok(text) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
                         let rel = path
                             .strip_prefix(&dir)
                             .unwrap()

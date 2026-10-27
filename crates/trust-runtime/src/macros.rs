@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 macros 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// **Self-contained materialization** of generated spans: replaces the
 /// translator process's FileId number with the running process's own,
@@ -56,7 +58,6 @@ macro_rules! span_table {
     };
 }
 
-
 /// Argument-list segments, shared by [`call!`], [`mcall!`], and
 /// [`args!`]. Segments expand **inline** (token pasting, no closure), so
 /// flow expressions (`break` / `continue` / `return`) inside argument
@@ -85,7 +86,6 @@ macro_rules! __args_build {
     };
 }
 
-
 /// Call a resolved callee: depth check → callee value → arguments →
 /// call, expanded inline. `$callee` is the callee expression (sites
 /// pass `rt::callee(expr, span)?`, keeping its own resolution span).
@@ -102,7 +102,6 @@ macro_rules! call {
         $crate::call_with(__trust_callee, ::core::option::Option::None, $at, __trust_args, $engine, $context)?
     }};
 }
-
 
 /// Method call: resolve the method callee on a target, then call with
 /// the target bound as the implicit first argument. Segments as in
@@ -127,7 +126,6 @@ macro_rules! mcall {
     }};
 }
 
-
 /// Build an `Args` value from segments (for sites that pass the
 /// argument list as a value rather than calling immediately, e.g.
 /// mutating-method dispatch). Inline block — flow expressions in
@@ -142,7 +140,6 @@ macro_rules! args {
     }};
 }
 
-
 /// The `Value` of an expression statement (`#let`/`#import` evaluate to
 /// None; `eval_markup` displays it to empty content, so the sequence item
 /// is empty content — not a `Value::None`).
@@ -150,19 +147,16 @@ pub fn mi_none() -> Value {
     embed(Value::None).into_value()
 }
 
-
 /// A whitespace sequence item (`SpaceElem`, the interpreter's
 /// inter-statement whitespace node).
 pub fn mi_space() -> Value {
     space().into_value()
 }
 
-
 /// A paragraph-break sequence item (a blank line in markup).
 pub fn mi_par() -> Value {
     parbreak().into_value()
 }
-
 
 /// A markup sequence with run-length shorthand — "a vec that supports
 /// run-length encoding". Syntax: a capacity literal first (the emitter's
@@ -187,7 +181,6 @@ macro_rules! markup {
     }};
 }
 
-
 /// The Label-free fast path of [`markup`](macro@markup): identical
 /// bracket-group syntax, but items are **Content** (the emitter proved no
 /// item can be a `Value::Label`), so the sequence builds as
@@ -202,7 +195,6 @@ macro_rules! cseq {
         __trust_cseq
     }};
 }
-
 
 #[doc(hidden)]
 #[macro_export]
@@ -233,7 +225,6 @@ macro_rules! __cseq_item {
     };
 }
 
-
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __markup_item {
@@ -259,7 +250,6 @@ macro_rules! __markup_item {
         $seq.push($e);
     };
 }
-
 
 /// Per-file scaffolding: the `file_span` anchor plus signature wrappers
 /// for the `eval`/`module` pair every generated file module carries.
@@ -309,4 +299,3 @@ macro_rules! file_module {
         }
     };
 }
-

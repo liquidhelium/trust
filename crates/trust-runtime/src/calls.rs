@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 calls 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// Call-site guardrail: function call depth (mirrors
 /// `vm.engine.route.check_call_depth`; mutual recursion produces an error
@@ -26,7 +28,6 @@ use typst::diag::{Hint, SourceDiagnostic, Trace};
 pub fn check_call_depth(engine: &Engine, span: Span) -> SourceResult<()> {
     engine.route.check_call_depth().at(span)
 }
-
 
 /// Resolves the callee (mirrors native `callee.eval()?.cast::<Func>()`:
 /// function values, type values (their constructors), and symbols (their
@@ -40,7 +41,6 @@ pub fn callee(value: Value, span: Span) -> SourceResult<Func> {
     }
     value.cast::<Func>().at(span)
 }
-
 
 /// Unified call path (mirrors `call_func`): the func is tagged with the
 /// call-site span and errors carry a tracepoint (`error occurred in this
@@ -80,7 +80,6 @@ pub fn call_with(
         value => Ok(value),
     }
 }
-
 
 /// Callee resolution for method calls (mirrors `eval_field_callee`: methods
 /// on the type's scope first, then the content element's scope;
@@ -126,8 +125,7 @@ pub fn method_callee(
                 } else {
                     eco_format!("`{name}` is not a valid method for {kind} `{ty_name}`")
                 };
-                let mut err =
-                    SourceDiagnostic::error(span, typst::foundations::Str::from(message));
+                let mut err = SourceDiagnostic::error(span, typst::foundations::Str::from(message));
                 if callee_value.clone().cast::<Func>().is_ok() {
                     err = err.with_hint(eco_format!(
                         "to call the stored function, wrap the field access in parentheses: `({access_text})(..)`"
@@ -135,7 +133,13 @@ pub fn method_callee(
                 } else {
                     err = err.with_hint(eco_format!(
                         "to access the `{name}` {}, remove the function arguments: `{access_text}`",
-                        if is_dict { "key" } else if is_named { "argument" } else { "field" },
+                        if is_dict {
+                            "key"
+                        } else if is_named {
+                            "argument"
+                        } else {
+                            "field"
+                        },
                     ));
                 }
                 if is_dict {
@@ -167,7 +171,6 @@ pub fn method_callee(
     }
 }
 
-
 /// If the value is content, the string "element" and the name of its element
 /// function, or the string "type" and the long name of the value's type.
 fn element_or_type_with_name(value: &Value) -> (&'static str, EcoString) {
@@ -178,12 +181,10 @@ fn element_or_type_with_name(value: &Value) -> (&'static str, EcoString) {
     }
 }
 
-
 /// Join semantics of code blocks (mirrors `ops::join`).
 pub fn join(lhs: Value, rhs: Value, span: Span) -> SourceResult<Value> {
     ops::join(lhs, rhs).at(span)
 }
-
 
 /// Condition evaluation for if/while: non-boolean values error via the
 /// original cast.
@@ -191,19 +192,16 @@ pub fn boolean(value: Value, span: Span) -> SourceResult<bool> {
     value.cast::<bool>().at(span)
 }
 
-
 /// Iteration guardrail limit for while loops (mirrors
 /// `typst-eval/src/flow.rs`: `MAX_ITERATIONS = 10_000`, beyond which
 /// "loop seems to be infinite" is reported).
 pub const MAX_ITERATIONS: usize = 10_000;
-
 
 /// Positional parameter binding (declaration order; mirrors eval_closure's
 /// `args.expect`).
 pub fn param_pos(args: &mut Args, name: &str, _span: Span) -> SourceResult<Value> {
     args.expect::<Value>(name)
 }
-
 
 /// Named-argument binding for stub closures: the stub binding stage already
 /// filled in defaults, so this always succeeds (mirrors `args.named`; a
@@ -215,7 +213,6 @@ pub fn param_named(args: &mut Args, name: &str, span: Span) -> SourceResult<Valu
         None => bail!(span, "missing argument: {name}"),
     }
 }
-
 
 /// Checks for leftover arguments after parameter binding (mirrors
 /// `Args::finish`).
@@ -229,7 +226,6 @@ pub fn finish(args: &mut Args, _span: Span) -> SourceResult<()> {
     Ok(())
 }
 
-
 /// Builds a named argument (used by generated code at call sites; `span` is
 /// the argument item's span, `value_span` the value expression's span;
 /// mirrors native `Eval for ast::Args`).
@@ -240,7 +236,6 @@ pub fn named_arg(span: Span, value_span: Span, name: &str, value: Value) -> Arg 
         value: Spanned::new(value, value_span),
     }
 }
-
 
 /// Spreads arguments (`f(..args)`; mirrors `Eval for ast::Arg::Spread`:
 /// arrays by position, dictionaries by name, None skipped).
@@ -268,4 +263,3 @@ pub fn spread_args(args: &mut Args, span: Span, value: Value) -> SourceResult<()
         other => bail!(span, "cannot spread {}", other.ty()),
     }
 }
-

@@ -46,8 +46,7 @@ pub(super) struct Ctx {
     /// (id, whether it carries __st). Body code is a pure function of
     /// (AST, captured-name set), so equal keys yield equal code; dedup
     /// keeps one definition shared across call sites from ballooning.
-    pub(super) closure_dedup:
-        std::collections::HashMap<String, (String, bool)>,
+    pub(super) closure_dedup: std::collections::HashMap<String, (String, bool)>,
     /// Emission area for per-call-site node statics (`NODE_cN`, emitted to
     /// the root alongside closure items).
     pub(super) closure_nodes: String,
@@ -107,13 +106,9 @@ pub(super) struct Ctx {
 pub(super) fn field_access_chain(expr: &str, dotted: &str) -> String {
     let mut segs = dotted.split('.');
     let first = segs.next().unwrap_or(dotted);
-    let mut out = format!(
-        "rt::field(&({expr}), \"{first}\", engine, context, SPAN)?"
-    );
+    let mut out = format!("rt::field(&({expr}), \"{first}\", engine, context, SPAN)?");
     for seg in segs {
-        out = format!(
-            "rt::field(&({out}), \"{seg}\", engine, context, SPAN)?"
-        );
+        out = format!("rt::field(&({out}), \"{seg}\", engine, context, SPAN)?");
     }
     out
 }
@@ -218,7 +213,12 @@ impl Ctx {
         if idx == next {
             let path = span
                 .id()
-                .map(|id| id.vpath().get_with_slash().trim_start_matches('/').to_string())
+                .map(|id| {
+                    id.vpath()
+                        .get_with_slash()
+                        .trim_start_matches('/')
+                        .to_string()
+                })
                 .unwrap_or_default();
             self.span_table.push((path, raw));
         }
@@ -265,9 +265,7 @@ impl Ctx {
                 format!("rt::read_ms(&__st.{id})?")
             }
             Ref::Slot(id) => format!("rt::read(&__st.{id})?"),
-            Ref::ModuleField { expr, name, .. } => {
-                field_access_chain(expr, name)
-            }
+            Ref::ModuleField { expr, name, .. } => field_access_chain(expr, name),
             Ref::GlobalFallback { slot, name } => {
                 let name = escape(name);
                 format!("rt::read_or(&__st.{slot}, engine, \"{name}\")?")

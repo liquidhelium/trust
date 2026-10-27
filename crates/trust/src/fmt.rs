@@ -121,7 +121,9 @@ fn format_items(text: &str) -> String {
 fn node_range<T: syn::spanned::Spanned>(node: &T) -> Option<Range<usize>> {
     let span = node.span();
     let start = span.start();
-    (start.line != 0).then(|| span.byte_range()).filter(|r| r.start < r.end)
+    (start.line != 0)
+        .then(|| span.byte_range())
+        .filter(|r| r.start < r.end)
 }
 
 fn format_item(original: &str, item: &syn::Item, offset: usize) -> String {
@@ -129,10 +131,8 @@ fn format_item(original: &str, item: &syn::Item, offset: usize) -> String {
         syn::Item::Macro(mac) => {
             let name = mac.mac.path.segments.last().map(|s| s.ident.to_string());
             match name.as_deref() {
-                Some("file_module") => {
-                    fmt_file_module(&mac.mac, original, offset)
-                        .unwrap_or_else(|| original.to_string())
-                }
+                Some("file_module") => fmt_file_module(&mac.mac, original, offset)
+                    .unwrap_or_else(|| original.to_string()),
                 // span_table! (data table) and anything unknown: verbatim.
                 _ => original.to_string(),
             }
@@ -162,7 +162,10 @@ fn format_item(original: &str, item: &syn::Item, offset: usize) -> String {
                 let start = range.start - offset;
                 let end = range.end - offset;
                 let interior = &original[start + 1..end - 1];
-                format!("{head} {{\n{}\n}}", protect_format(interior, Mode::Stmts, 4))
+                format!(
+                    "{head} {{\n{}\n}}",
+                    protect_format(interior, Mode::Stmts, 4)
+                )
             }
         }
         _ => {
@@ -215,9 +218,7 @@ fn protect_format(text: &str, mode: Mode, indent: usize) -> String {
     // inside segments go through `protect_format` again).
     let formatted: Vec<String> = sites
         .iter()
-        .map(|r| {
-            fmt_macro_site(&text[r.clone()]).unwrap_or_else(|| text[r.clone()].to_string())
-        })
+        .map(|r| fmt_macro_site(&text[r.clone()]).unwrap_or_else(|| text[r.clone()].to_string()))
         .collect();
     // Placeholder text: unique call expressions at the sites.
     let mut ph = String::with_capacity(text.len());
@@ -246,7 +247,10 @@ fn protect_format(text: &str, mode: Mode, indent: usize) -> String {
 /// Byte offset of the only occurrence of `needle`, if unique.
 fn find_unique(hay: &str, needle: &str) -> Option<usize> {
     let at = hay.find(needle)?;
-    hay[at + needle.len()..].find(needle).is_none().then_some(at)
+    hay[at + needle.len()..]
+        .find(needle)
+        .is_none()
+        .then_some(at)
 }
 
 /// Indent every line except the first by `n` spaces (the first line
@@ -386,10 +390,14 @@ fn head_text(tts: &[TokenTree]) -> String {
 /// token before `a`, for operator-tail and unary detection).
 fn spaced(a: &TokenTree, b: &TokenTree, prev: Option<&TokenTree>) -> bool {
     use proc_macro2::Spacing;
-    let is_joint = |t: &TokenTree| matches!(t, TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
+    let is_joint =
+        |t: &TokenTree| matches!(t, TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
     let punct = |t: &TokenTree, c: char| matches!(t, TokenTree::Punct(p) if p.as_char() == c);
     let is_value = |t: &TokenTree| {
-        matches!(t, TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Group(_))
+        matches!(
+            t,
+            TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Group(_)
+        )
     };
     // Multi-punct operators (`::`, `->`, `>=`, …) stay glued. Joint only
     // means "no whitespace follows", so the tail rule is restricted to
@@ -493,7 +501,9 @@ fn rt_macro_path_start(tts: &[TokenTree]) -> Option<usize> {
     else {
         return None;
     };
-    if c1.as_char() == ':' && c2.as_char() == ':' && prefix == "rt"
+    if c1.as_char() == ':'
+        && c2.as_char() == ':'
+        && prefix == "rt"
         && SEGMENT_MACROS.contains(&name.to_string().as_str())
     {
         return Some(tts[n - 4].span().byte_range().start);
@@ -530,8 +540,12 @@ fn fmt_macro_site(text: &str) -> Option<String> {
     if tts.len() != 6 {
         return None;
     }
-    let TokenTree::Ident(name) = &tts[3] else { return None };
-    let TokenTree::Group(group) = &tts[5] else { return None };
+    let TokenTree::Ident(name) = &tts[3] else {
+        return None;
+    };
+    let TokenTree::Group(group) = &tts[5] else {
+        return None;
+    };
     if group.delimiter() != Delimiter::Parenthesis {
         return None;
     }
@@ -599,8 +613,12 @@ fn fmt_segments(tts: &[TokenTree]) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < tts.len() {
-        let TokenTree::Ident(kind) = &tts[i] else { return None };
-        let TokenTree::Group(args) = tts.get(i + 1)? else { return None };
+        let TokenTree::Ident(kind) = &tts[i] else {
+            return None;
+        };
+        let TokenTree::Group(args) = tts.get(i + 1)? else {
+            return None;
+        };
         if args.delimiter() != Delimiter::Parenthesis {
             return None;
         }
@@ -661,7 +679,9 @@ fn fmt_file_module(mac: &syn::Macro, original: &str, offset: usize) -> Option<St
     let mut module_body = None;
     let mut file_fns = None;
     while i < tts.len() {
-        let Some(TokenTree::Ident(ident)) = tts.get(i) else { return None };
+        let Some(TokenTree::Ident(ident)) = tts.get(i) else {
+            return None;
+        };
         match ident.to_string().as_str() {
             "path" => {
                 path = match tts.get(i + 2)? {
@@ -719,11 +739,7 @@ fn fmt_file_module(mac: &syn::Macro, original: &str, offset: usize) -> Option<St
     }
     Some(format!(
         "rt::file_module! {{\n    path: {},\n    state_ty: {},\n    {}\n    {}\n    file_fns {{\n{}\n    }}\n}}",
-        path?,
-        state_ty?,
-        eval_body?,
-        module_body?,
-        file_fns?
+        path?, state_ty?, eval_body?, module_body?, file_fns?
     ))
 }
 
@@ -796,8 +812,7 @@ fn ts_eq(a: &TokenStream, b: &TokenStream) -> bool {
         if !tt_eq(ta.clone(), tb.clone()) {
             if std::env::var_os("TRUST_FMT_DEBUG").is_some() {
                 let ctx = |ts: &TokenStream, k: usize| {
-                    let v: Vec<String> =
-                        ts.clone().into_iter().map(|t| t.to_string()).collect();
+                    let v: Vec<String> = ts.clone().into_iter().map(|t| t.to_string()).collect();
                     let lo = k.saturating_sub(3);
                     v[lo..(k + 2).min(v.len())].join(" ")
                 };
@@ -851,7 +866,10 @@ mod tests {
     fn header_preserved() {
         let src = "// banner\n// - degraded thing\n\nfn a() {}\n";
         let out = format_generated(src);
-        assert!(out.starts_with("// banner\n// - degraded thing\n\n"), "{out}");
+        assert!(
+            out.starts_with("// banner\n// - degraded thing\n\n"),
+            "{out}"
+        );
         assert!(out.contains("fn a() {}"), "{out}");
     }
 
@@ -872,7 +890,9 @@ mod tests {
         let src = "fn f() { let v = rt::call!(engine, context, sp(1), callee; p(sp(2), { Value::Int(0) }))?; }\n";
         let out = format_items(src);
         assert!(
-            out.contains("let v = rt::call!(engine, context, sp(1), callee; p(sp(2), { Value::Int(0) }))?;"),
+            out.contains(
+                "let v = rt::call!(engine, context, sp(1), callee; p(sp(2), { Value::Int(0) }))?;"
+            ),
             "{out}"
         );
     }
@@ -911,7 +931,10 @@ mod tests {
             ),
             "{out}"
         );
-        assert!(out.contains("fn helper() -> i32 {\n            1 + 2\n        }"), "{out}");
+        assert!(
+            out.contains("fn helper() -> i32 {\n            1 + 2\n        }"),
+            "{out}"
+        );
         assert!(tokens_equal(src, &out), "{out}");
     }
 
@@ -944,9 +967,11 @@ mod head_tests {
     #[test]
     fn spacing_rules() {
         assert_eq!(h("f(a, b)"), "f(a, b)");
-        assert_eq!(h("rt::callee(rt::global(engine, \"x\")?, sp(81))?"), "rt::callee(rt::global(engine, \"x\")?, sp(81))?");
+        assert_eq!(
+            h("rt::callee(rt::global(engine, \"x\")?, sp(81))?"),
+            "rt::callee(rt::global(engine, \"x\")?, sp(81))?"
+        );
         assert_eq!(h("&__st.V3_args"), "&__st.V3_args");
         assert_eq!(h("a.b . c?"), "a.b.c?");
     }
 }
-

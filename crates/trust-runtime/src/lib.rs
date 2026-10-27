@@ -5,9 +5,6 @@
 //! private value model); every semantic helper mirrors the corresponding
 //! `typst-eval` interpretation (error messages and span behavior included).
 
-
-
-
 mod assign;
 mod calls;
 mod content;

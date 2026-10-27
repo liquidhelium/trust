@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 destruct 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, eval::*, host::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, eval::*, host::*, lookup::*, macros::*, slots::*,
+    stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// Array construction convenience (the generated code's equivalent of the
 /// `array!` macro).
@@ -26,13 +28,11 @@ pub fn array(values: Vec<Value>) -> Array {
     Array::from_iter(values)
 }
 
-
 /// Dictionary construction helper (generated code inserts key by key,
 /// preserving source order).
 pub fn dict_put(dict: &mut typst::foundations::Dict, key: &str, value: Value) {
     dict.insert(key.into(), value);
 }
-
 
 /// Dictionary item with an expression key (`("a" + x: v)`; mirrors
 /// `Eval for ast::DictItem::Keyed`: the key is evaluated then cast to a
@@ -48,14 +48,12 @@ pub fn dict_put_key(
     Ok(())
 }
 
-
 /// Insert with an already-cast key (the dict literal's aggregating path:
 /// invalid keys were collected by the caller, the default key is
 /// inserted so later duplicates still see the same last-wins shape).
 pub fn dict_insert(dict: &mut typst::foundations::Dict, key: Str, value: Value) {
     dict.insert(key, value);
 }
-
 
 /// Destructuring patterns over strings/bytes error up front at the
 /// pattern span (mirrors typst-eval flow.rs:169-171: `cannot destructure
@@ -69,7 +67,6 @@ pub fn for_destructure_check(iterable: &Value, pattern_at: Span) -> SourceResult
         _ => Ok(()),
     }
 }
-
 
 /// Dictionary spread `(..other)` (mirrors `Eval for ast::DictItem::Spread`).
 pub fn dict_spread(
@@ -89,7 +86,6 @@ pub fn dict_spread(
     }
 }
 
-
 /// Array spread `(..other)` (the generated code's array-literal spread).
 pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> SourceResult<()> {
     match value {
@@ -105,7 +101,6 @@ pub fn array_spread(values: &mut Vec<Value>, value: Value, span: Span) -> Source
         other => bail!(span, "cannot spread {} into array", other.ty()),
     }
 }
-
 
 /// In-place invocation of mutable methods (push/pop/insert/remove); mirrors
 /// `typst-eval/src/methods.rs::call_method_mut` (errors carry the method
@@ -155,7 +150,7 @@ pub fn method_mut(
                     bail!(span, "cannot directly call dictionary keys as functions")
                 }
                 Err(err) => Err(err).at(span),
-            }
+            };
         }
         _ => bail!(span, "type {ty} has no method `{method}`"),
     }
@@ -167,7 +162,6 @@ pub fn method_mut(
         span,
     )
 }
-
 
 /// **Runtime dispatch** for mutable-method calls (mirrors the full shape
 /// of `maybe_resolve_mutating`): the four array methods and dictionary
@@ -215,7 +209,6 @@ pub fn method_mut_dispatch(
 // --- Content translation helpers (mirroring the construction in
 // typst-eval/src/markup.rs) ---
 
-
 /// Iterator-shaped loop sources (mirrors `Eval for ast::ForLoop`: arrays
 /// consumed by value, dictionaries as key-value pairs, strings by grapheme,
 /// byte strings by byte; all streaming, zero materialization —
@@ -241,19 +234,13 @@ pub fn iter_values<'a>(
                 .graphemes(true)
                 .map(|g| Value::Str(g.into())),
         ),
-        Value::Bytes(bytes) => Box::new(
-            bytes
-                .as_slice()
-                .iter()
-                .map(|b| Value::Int(*b as i64)),
-        ),
+        Value::Bytes(bytes) => Box::new(bytes.as_slice().iter().map(|b| Value::Int(*b as i64))),
         other => bail!(span, "cannot loop over {}", other.ty()),
     })
 }
 
 // --- Destructuring helpers (mirroring the semantics and error messages of
 // typst-eval/src/binding.rs) ---
-
 
 /// Array destructuring: the i-th element (errors when short).
 pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceResult<Value> {
@@ -267,7 +254,6 @@ pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceRe
         )),
     }
 }
-
 
 /// Array destructuring sink collection (`..rest`); `total` is the number of
 /// positions the pattern consumes.
@@ -289,7 +275,6 @@ pub fn d_sink_size(
     }
 }
 
-
 /// Array destructuring sink slice (`size` items from `i`; out of bounds is
 /// an element-count error; `count` is the number of non-sink items in the
 /// pattern, used only in the error message).
@@ -305,7 +290,6 @@ pub fn d_rest(
         None => Err(elements_mismatch_diagnostic(array.len(), count, true, span)),
     }
 }
-
 
 /// Post-destructuring validation for arrays (leftover elements error;
 /// `consumed` is the runtime index).
@@ -325,13 +309,11 @@ pub fn d_array_finish(
     Ok(())
 }
 
-
 /// Dictionary destructuring: fetch by key (via `Dict::get`, keeping the
 /// original hint).
 pub fn d_get(dict: &typst::foundations::Dict, key: &str, span: Span) -> SourceResult<Value> {
     dict.get(key).cloned().at(span)
 }
-
 
 /// Dictionary destructuring sink collection (`..rest`, excluding used
 /// keys).
@@ -344,7 +326,6 @@ pub fn d_dict_rest(dict: &typst::foundations::Dict, used: &[&str]) -> typst::fou
     }
     rest
 }
-
 
 /// Mirrors the original `wrong_number_of_elements`: main message + hint
 /// (count semantics live in the hint, verbatim as in typst-eval).
@@ -376,4 +357,3 @@ fn elements_mismatch_diagnostic(
         ))
     ]
 }
-

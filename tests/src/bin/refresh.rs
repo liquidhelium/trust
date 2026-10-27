@@ -84,8 +84,7 @@ fn write_scaffolding(root: &Path, build: &Path, crates: &BTreeMap<String, usize>
     std::fs::create_dir_all(driver.join("src")).expect("create driver src");
     std::fs::create_dir_all(driver.join("tests")).expect("create driver tests");
     std::fs::write(driver.join("Cargo.toml"), &template).expect("write driver Cargo.toml");
-    std::fs::copy(root.join("driver/lib.rs"), driver.join("lib.rs"))
-        .expect("copy driver lib.rs");
+    std::fs::copy(root.join("driver/lib.rs"), driver.join("lib.rs")).expect("copy driver lib.rs");
     std::fs::write(
         driver.join("tests/suite.rs"),
         "// refresh 生成:#[path] 挂载被追踪的对拍 harness(仅 build/ 副本被构建)。\n\
@@ -121,12 +120,7 @@ fn write_scaffolding(root: &Path, build: &Path, crates: &BTreeMap<String, usize>
     .expect("write dispatch.rs");
 }
 
-fn replace_between(
-    text: &str,
-    begin: &str,
-    end: &str,
-    with: &str,
-) -> Option<String> {
+fn replace_between(text: &str, begin: &str, end: &str, with: &str) -> Option<String> {
     let start = text.find(begin)? + begin.len();
     let tail = &text[start..];
     let stop = start + tail.find(end)?;

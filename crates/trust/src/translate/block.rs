@@ -109,7 +109,9 @@ impl Ctx {
                     ));
                 } else {
                     last = Some((
-                        format!("Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"),
+                        format!(
+                            "Value::Content(rt::styled_with_map(({tail}).display(), {styles}))"
+                        ),
                         at,
                     ));
                 }
@@ -223,7 +225,10 @@ impl Ctx {
                                 Some(expr)
                             }
                             None => {
-                                self.diag(source.span(), "in-body import source must be a module access".into());
+                                self.diag(
+                                    source.span(),
+                                    "in-body import source must be a module access".into(),
+                                );
                                 continue;
                             }
                         }
@@ -250,9 +255,8 @@ impl Ctx {
                         // fall back to runtime import_external
                         // interpretation.
                         if raw.starts_with('@') {
-                            if let Some((entry, _)) = mods
-                                .iter()
-                                .find(|(k, _)| k.starts_with(&format!("{raw}/")))
+                            if let Some((entry, _)) =
+                                mods.iter().find(|(k, _)| k.starts_with(&format!("{raw}/")))
                             {
                                 self.used_state = true;
                                 return format!(
@@ -292,8 +296,7 @@ impl Ctx {
                                 // The world may still resolve it at runtime:
                                 // glue (the original file-not-found carries
                                 // it naturally).
-                                let code =
-                                    self.in_body_import_glue(&stmt, import, &mut env);
+                                let code = self.in_body_import_glue(&stmt, import, &mut env);
                                 let _ = writeln!(out, "    {{ {code} }}");
                                 continue;
                             }
@@ -346,44 +349,38 @@ impl Ctx {
                     }
                     Some(ast::Imports::Wildcard) => {
                         let mut expanded = internal_target.as_ref().and_then(|target| {
-                            self.export_table.as_ref().and_then(|t| t.get(target).cloned())
+                            self.export_table
+                                .as_ref()
+                                .and_then(|t| t.get(target).cloned())
                         });
                         // Module-value source (`import cetz.draw: *`):
                         // slot → file index + chained export-table
                         // resolution to the target file.
                         if expanded.is_none()
-                            && let Some((root, fields)) =
-                                parse_module_access(source)
+                            && let Some((root, fields)) = parse_module_access(source)
                         {
-                            let mut cur = env
-                                .module
-                                .iter()
-                                .rev()
-                                .find(|(n, _)| *n == root)
-                                .and_then(|(_, r)| match r {
-                                    super::ctx::Ref::Slot(slot) => {
-                                        self.slot_files.as_ref().and_then(|m| m.get(slot).cloned())
-                                    }
-                                    _ => None,
-                                });
+                            let mut cur =
+                                env.module.iter().rev().find(|(n, _)| *n == root).and_then(
+                                    |(_, r)| match r {
+                                        super::ctx::Ref::Slot(slot) => self
+                                            .slot_files
+                                            .as_ref()
+                                            .and_then(|m| m.get(slot).cloned()),
+                                        _ => None,
+                                    },
+                                );
                             for field in &fields {
                                 cur = cur
                                     .as_ref()
-                                    .and_then(|f| {
-                                        self.export_table.as_ref().and_then(|t| t.get(f))
-                                    })
+                                    .and_then(|f| self.export_table.as_ref().and_then(|t| t.get(f)))
                                     .and_then(|exports| exports.get(field))
                                     .and_then(|slot| {
-                                        self.slot_files
-                                            .as_ref()
-                                            .and_then(|m| m.get(slot).cloned())
+                                        self.slot_files.as_ref().and_then(|m| m.get(slot).cloned())
                                     });
                             }
-                            expanded = cur
-                                .as_ref()
-                                .and_then(|f| {
-                                    self.export_table.as_ref().and_then(|t| t.get(f).cloned())
-                                });
+                            expanded = cur.as_ref().and_then(|f| {
+                                self.export_table.as_ref().and_then(|t| t.get(f).cloned())
+                            });
                         }
                         // Module-field binding names (`import cetz: draw` /
                         // top-level wildcard items): the target file carried
@@ -391,10 +388,8 @@ impl Ctx {
                         // table, zero runtime cost.
                         if expanded.is_none()
                             && let Some((root, _)) = parse_module_access(source)
-                            && let Some((
-                                _,
-                                super::ctx::Ref::ModuleField { file: Some(f), .. },
-                            )) = env.module.iter().rev().find(|(n, _)| *n == root)
+                            && let Some((_, super::ctx::Ref::ModuleField { file: Some(f), .. })) =
+                                env.module.iter().rev().find(|(n, _)| *n == root)
                         {
                             expanded = self.export_table.as_ref().and_then(|t| t.get(f).cloned());
                         }
@@ -569,7 +564,10 @@ impl Ctx {
             {
                 return Place::Captured;
             }
-            return Place::Local { root: rust.clone(), path: segs };
+            return Place::Local {
+                root: rust.clone(),
+                path: segs,
+            };
         }
         match env
             .module
@@ -583,7 +581,10 @@ impl Ctx {
             Some(super::ctx::Ref::Slot(s))
                 if self.mutable_slots.contains(s) && self.in_closure == 0 =>
             {
-                Place::Slot { slot: s.clone(), path: segs }
+                Place::Slot {
+                    slot: s.clone(),
+                    path: segs,
+                }
             }
             // Inside a function/closure body: module bindings are captures
             // (mirrors typst CapturesVisitor — top-level functions are
@@ -727,12 +728,14 @@ impl Ctx {
                 format!("{{ let _ = {value}; let _ = {ev}; rt::bail_temporary({at})?; }}\n")
             }
             Place::Deferred => {
-                self.diag(expr.span(), "destructuring-assignment target is a runtime module reference".into());
+                self.diag(
+                    expr.span(),
+                    "destructuring-assignment target is a runtime module reference".into(),
+                );
                 String::new()
             }
         }
     }
-
 
     /// Zone-1 glue for in-body imports: the statement text drives the
     /// original `Eval for ast::ModuleImport` via `rt::eval_import`
@@ -780,17 +783,13 @@ impl Ctx {
         let modules: Vec<(String, super::ctx::Ref)> = env.module.clone();
         let mut caps: Vec<String> = locals
             .iter()
-            .map(|(n, rust)| {
-                format!("(\"{}\", {rust}.clone())", super::naming::escape(n))
-            })
+            .map(|(n, rust)| format!("(\"{}\", {rust}.clone())", super::naming::escape(n)))
             .collect();
-        caps.extend(modules.iter().map(|(n, r)| {
-            format!(
-                "(\"{}\", {})",
-                super::naming::escape(n),
-                self.ref_value(r)
-            )
-        }));
+        caps.extend(
+            modules
+                .iter()
+                .map(|(n, r)| format!("(\"{}\", {})", super::naming::escape(n), self.ref_value(r))),
+        );
         let at = self.span_of(stmt.span());
         let caps_lit = if caps.is_empty() {
             "Vec::new()".to_string()

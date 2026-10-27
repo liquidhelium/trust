@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 host 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, eval::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, eval::*, lookup::*, macros::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 pub fn source_span(path: &str, orig_raw: u64) -> Span {
     /// Mask for the low 48 bits (position number); the file number sits in
@@ -48,8 +50,7 @@ pub fn source_span(path: &str, orig_raw: u64) -> Span {
     } else {
         typst::syntax::RootedPath::new(
             typst::syntax::VirtualRoot::Project,
-            typst::syntax::VirtualPath::new(path)
-                .unwrap_or_else(|_| panic!("invalid path {path}")),
+            typst::syntax::VirtualPath::new(path).unwrap_or_else(|_| panic!("invalid path {path}")),
         )
         .intern()
     };
@@ -68,11 +69,9 @@ pub fn source_span(path: &str, orig_raw: u64) -> Span {
 
 // --- Host integration protocol (self-contained; the host does not need trust-world) ---
 
-
 /// Function shape of the generated `module_init` (the module-assembly entry
 /// evaluated once per build).
 pub type ModuleInit = fn(&mut Engine, Tracked<Context>) -> SourceResult<Module>;
-
 
 /// Driver shell for `module_init` (mirrors `typst_eval::eval`'s module
 /// evaluation cache): builds an Engine (EmptyIntrospector + fresh Sink +
@@ -101,7 +100,6 @@ pub fn init_module(
     init(&mut engine, context.track())
 }
 
-
 /// Injects a module into library.global (bind, not define, so same-named
 /// definitions may be replaced) + **rebuilds the std binding** (std holds
 /// another Arc copy of global; scope copy-on-write would fork the two) +
@@ -122,7 +120,6 @@ pub fn bind_module(
     typst::utils::LazyHash::new(library)
 }
 
-
 /// Imports an external package at runtime (untranslated dependencies run
 /// through the interpreter — mixed execution; mirrors typst-eval's
 /// `import_package` + `import_file`: sink/route are passed through (warnings
@@ -135,7 +132,6 @@ pub fn import_external(engine: &mut Engine, spec: &str, span: Span) -> SourceRes
     // all of them right).
     typst_eval::import(engine, spec, span)
 }
-
 
 /// A FileId under a **package root** for a merged-dependency vkey of the
 /// form `@ns/name:ver/rel` — the same convention `source_span` derives
@@ -167,7 +163,6 @@ pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
     Ok(Value::None)
 }
 
-
 /// The **error** form of a translation-time degradation point (a semantic
 /// error rather than a missing feature: break/continue outside a loop,
 /// etc.; complements [`degraded`]'s warning form; the message follows
@@ -178,4 +173,3 @@ pub fn bail_value(_engine: &mut Engine, message: &str) -> SourceResult<Value> {
         eco_format!("{message}"),
     )])
 }
-

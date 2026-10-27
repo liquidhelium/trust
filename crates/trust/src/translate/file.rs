@@ -114,7 +114,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
         match lets.kind() {
             ast::LetBindingKind::Closure(name) => {
                 let Some(ast::Expr::Closure(closure)) = lets.init() else {
-                    cx.diag(lets.span(), "closure binding is missing its closure initializer".into());
+                    cx.diag(
+                        lets.span(),
+                        "closure binding is missing its closure initializer".into(),
+                    );
                     return;
                 };
                 let id = cx.fresh_id();
@@ -129,7 +132,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                     if let Some(name) = pattern.bindings().first() {
                         cx.diag(
                             lets.span(),
-                            format!("top-level `#let {}` is missing an initializer", name.as_str()),
+                            format!(
+                                "top-level `#let {}` is missing an initializer",
+                                name.as_str()
+                            ),
                         );
                     }
                     return;
@@ -298,7 +304,11 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 for g in &captures {
                     let _ = writeln!(fields, "    {}: std::sync::OnceLock<Value>,", g.slot);
                     let gname_escaped = super::naming::escape(&g.name);
-                    let resolver = if g.in_math { "capture_math_opt" } else { "capture_code_opt" };
+                    let resolver = if g.in_math {
+                        "capture_math_opt"
+                    } else {
+                        "capture_code_opt"
+                    };
                     let _ = writeln!(
                         g_code,
                         "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{}, v)?; }}",
@@ -351,9 +361,8 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 } else {
                     "None"
                 };
-                let func_value = format!(
-                    "rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})"
-                );
+                let func_value =
+                    format!("rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})");
                 let _ = writeln!(
                     init_code,
                     "    {{ let v = Value::Func({func_value}); rt::fill(&__st.{slot}, v.clone())?; scope.define(\"{}\", v); }}",

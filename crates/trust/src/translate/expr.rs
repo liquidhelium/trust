@@ -13,7 +13,6 @@ use typst_syntax::ast::{self, AstNode};
 
 use super::captures::collect_idents;
 
-
 use super::ctx::{Ctx, Env};
 use super::naming::{escape, sanitize_key};
 
@@ -106,10 +105,7 @@ impl Ctx {
                     Some(l) => format!("Some({:?}.into())", l.get().as_str()),
                     None => "None".to_string(),
                 };
-                format!(
-                    "rt::raw(eco_vec![{lines}], {lang}, {})",
-                    raw.block()
-                )
+                format!("rt::raw(eco_vec![{lines}], {lang}, {})", raw.block())
             }
             ast::Expr::Parenthesized(p) => self.expr(p.expr(), env),
             ast::Expr::CodeBlock(block) => self.block(block.body().exprs(), env),
@@ -164,7 +160,10 @@ impl Ctx {
                             self.package_files.clone(),
                             self.package_mods.clone(),
                         ) else {
-                            self.diag(path.span(), "include is only supported in package mode".into());
+                            self.diag(
+                                path.span(),
+                                "include is only supported in package mode".into(),
+                            );
                             return "Value::None".into();
                         };
                         let target = super::paths::normalize_import(&file, &raw);
@@ -285,7 +284,9 @@ impl Ctx {
                         }
                     }
                 }
-                out.push_str(" if !__invalid.is_empty() { rt::bail_diags(__invalid)?; } Value::Dict(__d) }");
+                out.push_str(
+                    " if !__invalid.is_empty() { rt::bail_diags(__invalid)?; } Value::Dict(__d) }",
+                );
                 out
             }
             ast::Expr::Unary(unary) => {
@@ -508,29 +509,17 @@ impl Ctx {
             ast::Expr::Heading(h) => {
                 // `= body` (depth = number of equals signs): mirrors `Eval
                 // for ast::Heading`.
-                let items: Vec<ContentItem> = h
-                    .body()
-                    .exprs()
-                    .map(ContentItem::Part)
-                    .collect();
+                let items: Vec<ContentItem> = h.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
                 format!("Value::Content(rt::heading({body}, {}))", h.depth())
             }
             ast::Expr::ListItem(li) => {
-                let items: Vec<ContentItem> = li
-                    .body()
-                    .exprs()
-                    .map(ContentItem::Part)
-                    .collect();
+                let items: Vec<ContentItem> = li.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
                 format!("Value::Content(rt::list_item({body}))")
             }
             ast::Expr::EnumItem(ei) => {
-                let items: Vec<ContentItem> = ei
-                    .body()
-                    .exprs()
-                    .map(ContentItem::Part)
-                    .collect();
+                let items: Vec<ContentItem> = ei.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
                 let num = match ei.number() {
                     Some(n) => format!("Some({n}u64)"),
@@ -539,8 +528,7 @@ impl Ctx {
                 format!("Value::Content(rt::enum_item({body}, {num}))")
             }
             ast::Expr::TermItem(ti) => {
-                let term: Vec<ContentItem> =
-                    ti.term().exprs().map(ContentItem::Part).collect();
+                let term: Vec<ContentItem> = ti.term().exprs().map(ContentItem::Part).collect();
                 let desc: Vec<ContentItem> =
                     ti.description().exprs().map(ContentItem::Part).collect();
                 let term = self.content_seq(&term, env);
@@ -551,10 +539,7 @@ impl Ctx {
                 // Markup bare link: mirrors `Eval for ast::Link`
                 // (Url::new can fail).
                 let at = self.span_of(l.span());
-                format!(
-                    "Value::Content(rt::link({:?}, {at})?)",
-                    l.get().to_string()
-                )
+                format!("Value::Content(rt::link({:?}, {at})?)", l.get().to_string())
             }
             ast::Expr::Ref(r) => {
                 // `@target` reference shorthand (mirrors `Eval for
@@ -562,7 +547,9 @@ impl Ctx {
                 // content, its value contentified via display).
                 let target = r.target().to_string();
                 let supp = match r.supplement() {
-                    Some(block) => format!("Some({})", self.expr(ast::Expr::ContentBlock(block), env)),
+                    Some(block) => {
+                        format!("Some({})", self.expr(ast::Expr::ContentBlock(block), env))
+                    }
                     None => "None".to_string(),
                 };
                 format!("Value::Content(rt::ref_elem({:?}, {supp}))", target)
@@ -584,14 +571,9 @@ impl Ctx {
                 let frame = self.let_hoists.last().cloned();
                 let export_slots: Vec<(String, String)> = match frame {
                     Some(ref map)
-                        if !lets.is_empty()
-                            && lets
-                                .iter()
-                                .all(|n| map.contains_key(n)) =>
+                        if !lets.is_empty() && lets.iter().all(|n| map.contains_key(n)) =>
                     {
-                        lets.iter()
-                            .map(|n| (n.clone(), map[n].clone()))
-                            .collect()
+                        lets.iter().map(|n| (n.clone(), map[n].clone())).collect()
                     }
                     _ => Vec::new(),
                 };
@@ -642,13 +624,15 @@ impl Ctx {
                 format!("{{ rt::bail_value(engine, {:?})? }}", message)
             }
             ast::Expr::ShowRule(show) => {
-                let message = "show is only allowed directly in code and content blocks".to_string();
+                let message =
+                    "show is only allowed directly in code and content blocks".to_string();
                 self.diag(show.span(), message.clone());
                 format!("{{ rt::bail_value(engine, {:?})? }}", message)
             }
             other => {
                 let kind = other.to_untyped().kind();
-                let message = format!("expression {kind:?} is not yet supported (v1 language subset)");
+                let message =
+                    format!("expression {kind:?} is not yet supported (v1 language subset)");
                 self.diag(other.span(), message.clone());
                 format!(
                     "{{ /* trust-degraded: {} */ rt::degraded(engine, {:?})? }}",
@@ -678,7 +662,10 @@ impl Ctx {
         // unregistered contexts (content sequences across items, etc.)
         // degrade.
         let Some(map) = self.let_hoists.last().cloned() else {
-            self.diag(lets.span(), "let binding at this position is not supported (scope not scanned)".into());
+            self.diag(
+                lets.span(),
+                "let binding at this position is not supported (scope not scanned)".into(),
+            );
             return "Value::None".into();
         };
         let hoisted: Vec<(String, String)> = match names
@@ -771,20 +758,15 @@ impl Ctx {
             let layers = wild_layers(env);
             if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
                 let static_v = self.ref_value(module_ref);
-                return format!(
-                    "rt::wild_or({layers}, \"{name_escaped}\", {static_v}, {at})?"
-                );
+                return format!("rt::wild_or({layers}, \"{name_escaped}\", {static_v}, {at})?");
             }
-            return format!(
-                "rt::wild_or_global({layers}, \"{name_escaped}\", engine, {at})?"
-            );
+            return format!("rt::wild_or_global({layers}, \"{name_escaped}\", engine, {at})?");
         }
         if let Some((_, module_ref)) = env.module.iter().rev().find(|(n, _)| n == name) {
             return self.ref_value(module_ref);
         }
         format!("rt::global(engine, \"{}\", file_span())?", escape(name))
     }
-
 
     /// Zone-1 glue expression for includes: `rt::eval_include(statement
     /// text, span, visible names, engine, context)` drives the original
@@ -796,13 +778,13 @@ impl Ctx {
         let modules: Vec<(String, super::ctx::Ref)> = env.module.clone();
         let mut caps: Vec<String> = locals
             .iter()
-            .map(|(n, rust)| {
-                format!("(\"{}\", {rust}.clone())", super::naming::escape(n))
-            })
+            .map(|(n, rust)| format!("(\"{}\", {rust}.clone())", super::naming::escape(n)))
             .collect();
-        caps.extend(modules.iter().map(|(n, r)| {
-            format!("\"{}\", {}", super::naming::escape(n), self.ref_value(r))
-        }));
+        caps.extend(
+            modules
+                .iter()
+                .map(|(n, r)| format!("\"{}\", {}", super::naming::escape(n), self.ref_value(r))),
+        );
         let caps_lit = if caps.is_empty() {
             "Vec::new()".to_string()
         } else {
@@ -905,7 +887,8 @@ impl Ctx {
                         let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let __place = rt::place_mut(&mut {root}, {path_lit}, {at})?; rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})? }}",
-                            escape(field), access_text
+                            escape(field),
+                            access_text
                         );
                     }
                     super::block::Place::Slot { slot, path } => {
@@ -918,7 +901,8 @@ impl Ctx {
                         let mut_args = format!("rt::args!({at}; {args})");
                         return format!(
                             "{{ rt::check_call_depth(engine, {at})?; let __mut_args = {mut_args}; let mut __msv = rt::read_ms(&__st.{slot})?; let __place = rt::place_mut(&mut __msv, {path_lit}, {at})?; let __r = rt::method_mut_dispatch(engine, context, __place, \"{}\", __mut_args, {at}, {:?})?; rt::write_ms(&__st.{slot}, __msv)?; __r }}",
-                            escape(field), access_text
+                            escape(field),
+                            access_text
                         );
                     }
                     // Write to a capture (including the module-slot-inside-
@@ -991,9 +975,7 @@ impl Ctx {
         let callee_at = self.span_of(call.callee().span());
         let callee = self.expr(call.callee(), env);
         let args = self.gen_args(call.args(), env);
-        format!(
-            "rt::call!(engine, context, {at}, rt::callee({callee}, {callee_at})?; {args})"
-        )
+        format!("rt::call!(engine, context, {at}, rt::callee({callee}, {callee_at})?; {args})")
     }
 
     /// Call-site arguments: build `Args` in source order; each item uses
@@ -1054,7 +1036,13 @@ impl Ctx {
         // name).
         let self_name = closure
             .name()
-            .filter(|name| closure.body().to_untyped().full_text().contains(name.as_str()))
+            .filter(|name| {
+                closure
+                    .body()
+                    .to_untyped()
+                    .full_text()
+                    .contains(name.as_str())
+            })
             .map(|name| name.as_str().to_string());
         self.closure_expr_c2(closure, env, self_name)
     }
@@ -1112,7 +1100,9 @@ impl Ctx {
                 source.find(closure_span).map(|n| n.range().start)
             })
             .unwrap_or(0);
-        format!("Value::Func(rt::closure_node_at(&{node}, {at}, {base}, {defaults}, {captured}, {pending_lit}, engine))")
+        format!(
+            "Value::Func(rt::closure_node_at(&{node}, {at}, {base}, {defaults}, {captured}, {pending_lit}, engine))"
+        )
     }
 
     /// C2: the native path for value-position closures.
@@ -1171,7 +1161,11 @@ impl Ctx {
         let wild_body = super::captures::has_wildcard_import(closure.body().to_untyped());
         if !wild_body {
             for (name, in_math) in &pending {
-                let resolver = if *in_math { "capture_math_opt" } else { "capture_code_opt" };
+                let resolver = if *in_math {
+                    "capture_math_opt"
+                } else {
+                    "capture_code_opt"
+                };
                 pairs.push((
                     name.clone(),
                     format!("rt::{resolver}(engine, \"{}\")?", escape(name)),
@@ -1285,8 +1279,6 @@ impl Ctx {
         )
     }
 
-
-
     /// Content sequence: split at set/show rules; a rule wraps "everything
     /// after it" (mirrors `eval_markup`'s tail recursion:
     /// `tail.styled_with_map/_recipe`).
@@ -1334,7 +1326,10 @@ impl Ctx {
         for top in items {
             let mut env = top.env.clone();
             env.locals.extend(frame_locals.iter().cloned());
-            enriched.push(TopItem { item: top.item.clone(), env });
+            enriched.push(TopItem {
+                item: top.item.clone(),
+                env,
+            });
             if let ContentItem::Part(ast::Expr::LetBinding(lets)) = &top.item {
                 let names: Vec<String> = match lets.kind() {
                     ast::LetBindingKind::Closure(name) => vec![name.as_str().to_string()],
@@ -1379,7 +1374,9 @@ impl Ctx {
                     // are materialized in a local first).
                     let rule_at = self.span_of(set.span());
                     let styles = self.set_styles_code(*set, &mut env, &rule_at);
-                    parts.push(format!("{{ let __s = {styles}; rt::styled_with_map({tail}, __s) }}"));
+                    parts.push(format!(
+                        "{{ let __s = {styles}; rt::styled_with_map({tail}, __s) }}"
+                    ));
                     return self.content_join(parts);
                 }
                 ContentItem::Show(show) => {
@@ -1432,7 +1429,12 @@ impl Ctx {
     /// mirroring `Eval for ast::SetRule`). `call_at` is the call-site span
     /// (Args.span and the rule span share their origin). Shared by the
     /// set/show-set arms.
-    pub(super) fn set_styles_code(&mut self, set: ast::SetRule, env: &mut Env, call_at: &str) -> String {
+    pub(super) fn set_styles_code(
+        &mut self,
+        set: ast::SetRule,
+        env: &mut Env,
+        call_at: &str,
+    ) -> String {
         let args = self.gen_args(set.args(), env);
         let args_val = format!("rt::args!({call_at}; {args})");
         let target = self.expr(set.target(), env);
@@ -1623,8 +1625,8 @@ impl Ctx {
             let mut total: usize = 0;
             let mut run: Option<(&'static str, u32)> = None;
             let flush = |run: &mut Option<(&'static str, u32)>,
-                             items: &mut Vec<String>,
-                             total: &mut usize| {
+                         items: &mut Vec<String>,
+                         total: &mut usize| {
                 if let Some((kind, n)) = run.take() {
                     *total += n as usize;
                     items.push(if n == 1 {
@@ -1652,7 +1654,11 @@ impl Ctx {
                         // form the sequence originally carried.
                         items.push(format!(
                             "[{}]",
-                            if fast { c } else { format!("Value::Content({c})") }
+                            if fast {
+                                c
+                            } else {
+                                format!("Value::Content({c})")
+                            }
                         ));
                     }
                     P::Dyn(d) => {
@@ -1712,11 +1718,7 @@ impl Ctx {
     /// plus global names left for runtime materialization (C2 closures
     /// assemble their capture tuple sorted by name, so names and
     /// expressions must be separate).
-    fn capture_pairs(
-        &mut self,
-        names: &[(String, bool)],
-        env: &mut Env,
-    ) -> CapturePairs {
+    fn capture_pairs(&mut self, names: &[(String, bool)], env: &mut Env) -> CapturePairs {
         let mut captured: Vec<(String, String)> = Vec::new();
         let mut globals: Vec<(String, bool)> = Vec::new();
         let mut seen = HashSet::new();
@@ -1840,17 +1842,13 @@ pub(super) fn has_flow_event(expr: &typst_syntax::SyntaxNode) -> bool {
 pub(super) fn scan_let_exprs(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
     if let Some(expr) = node.cast::<ast::Expr>() {
         match expr {
-            ast::Expr::Closure(_)
-            | ast::Expr::CodeBlock(_)
-            | ast::Expr::ContentBlock(_) => return,
+            ast::Expr::Closure(_) | ast::Expr::CodeBlock(_) | ast::Expr::ContentBlock(_) => return,
             ast::Expr::LetBinding(lets) => match lets.kind() {
                 ast::LetBindingKind::Closure(name) => {
                     out.push(name.as_str().to_string());
                 }
                 ast::LetBindingKind::Normal(pattern) => {
-                    out.extend(
-                        pattern.bindings().iter().map(|i| i.as_str().to_string()),
-                    );
+                    out.extend(pattern.bindings().iter().map(|i| i.as_str().to_string()));
                 }
             },
             _ => {}

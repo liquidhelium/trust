@@ -53,8 +53,22 @@ pub(super) fn sanitize(name: &str) -> String {
 /// ...` once made generated code use a Value as an &Engine) — hits get a
 /// `__trust_` prefix.
 pub(super) const RESERVED_RUST_IDENTS: &[&str] = &[
-    "engine", "context", "span", "rt", "ops", "std", "SPAN", "Value", "Args", "Dict",
-    "Unit", "SourceResult", "Tracked", "Engine", "Context", "sp",
+    "engine",
+    "context",
+    "span",
+    "rt",
+    "ops",
+    "std",
+    "SPAN",
+    "Value",
+    "Args",
+    "Dict",
+    "Unit",
+    "SourceResult",
+    "Tracked",
+    "Engine",
+    "Context",
+    "sp",
 ];
 
 /// Number same-named locals by order of appearance so generated Rust names

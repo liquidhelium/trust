@@ -53,7 +53,11 @@ pub(super) fn bare_import_bound_name(source: ast::Expr) -> String {
         let raw = s.get();
         if let Some(rest) = raw.strip_prefix('@') {
             // `@namespace/name:version` binds the package name.
-            if let Some(name) = rest.split('/').next_back().and_then(|n| n.split(':').next()) {
+            if let Some(name) = rest
+                .split('/')
+                .next_back()
+                .and_then(|n| n.split(':').next())
+            {
                 return name.to_string();
             }
         }
@@ -79,9 +83,10 @@ pub(super) fn bare_import_bound_name(source: ast::Expr) -> String {
 /// in-scope import binds it at call time).
 pub(super) fn has_wildcard_import(node: &typst_syntax::SyntaxNode) -> bool {
     if let Some(import) = node.cast::<ast::ModuleImport>()
-        && matches!(import.imports(), Some(ast::Imports::Wildcard)) {
-            return true;
-        }
+        && matches!(import.imports(), Some(ast::Imports::Wildcard))
+    {
+        return true;
+    }
     node.children().any(has_wildcard_import)
 }
 
@@ -98,7 +103,12 @@ pub(super) fn top_closure_free_names(closure: ast::Closure) -> Vec<(String, bool
     for param in closure.params().children() {
         match param {
             ast::Param::Pos(pattern) => {
-                bound.extend(pattern.bindings().into_iter().map(|i| i.as_str().to_string()));
+                bound.extend(
+                    pattern
+                        .bindings()
+                        .into_iter()
+                        .map(|i| i.as_str().to_string()),
+                );
             }
             ast::Param::Named(named) => bound.push(named.name().as_str().to_string()),
             ast::Param::Spread(spread) => {
@@ -155,7 +165,6 @@ pub(super) fn global_capture_slots(
     }
     out
 }
-
 
 pub(super) fn collect_idents(
     node: &typst_syntax::SyntaxNode,
@@ -449,7 +458,8 @@ mod tests {
         let mut out = Vec::new();
         collect_idents(&root, &mut Vec::new(), &mut out);
         assert!(
-            !out.iter().any(|(n, _)| n == "from-check") && !out.iter().any(|(n, _)| n == "from-cast"),
+            !out.iter().any(|(n, _)| n == "from-check")
+                && !out.iter().any(|(n, _)| n == "from-cast"),
             "real elembic shape: inline closure parameters must not be collected: {out:?}"
         );
     }
@@ -476,7 +486,10 @@ mod tests {
             !out.iter().any(|(n, _)| n == "twohead") && !out.iter().any(|(n, _)| n == "tt"),
             "math field names must not be collected: {out:?}"
         );
-        assert!(out.iter().any(|(n, _)| n == "arrow"), "target names must be collected: {out:?}");
+        assert!(
+            out.iter().any(|(n, _)| n == "arrow"),
+            "target names must be collected: {out:?}"
+        );
     }
 
     #[test]

@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 lookup 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, macros::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// Resolves a name in the standard library's global scope (mirrors the
 /// interpreter's `Scopes::get`, **by direct reuse**: beyond locals it looks
@@ -32,7 +34,6 @@ pub fn global(engine: &mut Engine, name: &str, span: Span) -> SourceResult<Value
     Ok(binding.read_checked((engine, span)).clone())
 }
 
-
 /// Creation-time materialization lookup for **code-name captures** (mirrors
 /// CapturesVisitor's `Ident → capture(Scopes::get)`): resolves through
 /// `Scopes::get`; a miss returns None (at call time the name is resolved by
@@ -45,7 +46,6 @@ pub fn capture_code_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<
         .ok()
         .map(|b| b.read_checked((engine, Span::detached())).clone()))
 }
-
 
 /// Creation-time materialization lookup for **math-name captures** (mirrors
 /// CapturesVisitor's `MathIdent → capture(Scopes::get_in_math)`): looks up
@@ -61,14 +61,12 @@ pub fn capture_math_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<
         .map(|b| b.read_checked((engine, Span::detached())).clone()))
 }
 
-
 /// Global lookup (code name) returning `None` when absent (mirrors typst
 /// capture semantics: names not visible at creation time are not captured;
 /// they are bound at call time by the closure body's own imports).
 pub fn global_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
     capture_code_opt(engine, name)
 }
-
 
 /// Field access `target.name` (mirrors `access_field`: `Value::field` plus
 /// a get-rule style-chain fallback — a field of an element function (e.g.
@@ -103,20 +101,17 @@ pub fn field(
     Err(err)
 }
 
-
 /// Empty scope (the initial value for generated code's
 /// NativeFuncData::scope).
 pub fn empty_scope() -> Scope {
     Scope::new()
 }
 
-
 /// Any-return-type description (the initial value for generated code's
 /// NativeFuncData::returns).
 pub fn any_cast_info() -> typst::foundations::CastInfo {
     typst::foundations::CastInfo::Any
 }
-
 
 /// Runtime wildcard layer for in-body `import <runtime value>: *` (mirrors
 /// typst-eval's import.rs: a Func source without a scope reports "cannot
@@ -130,13 +125,16 @@ pub fn wild_import(value: &Value, at: Span) -> SourceResult<typst::foundations::
         Value::Module(module) => module.scope(),
         Value::Type(ty) => ty.scope(),
         Value::Func(func) => func.scope().ok_or_else(|| {
-            eco_vec![SourceDiagnostic::error(at, "cannot import from user-defined functions")]
+            eco_vec![SourceDiagnostic::error(
+                at,
+                "cannot import from user-defined functions"
+            )]
         })?,
         v => {
             return Err(eco_vec![SourceDiagnostic::error(
                 at,
                 eco_format!("expected path, module, function, or type, found {}", v.ty()),
-            )])
+            )]);
         }
     };
     let mut layer = Scope::new();
@@ -146,16 +144,21 @@ pub fn wild_import(value: &Value, at: Span) -> SourceResult<typst::foundations::
     Ok(layer)
 }
 
-
 /// Name lookup across wildcard layers (innermost first): a hit returns the
 /// value; a full miss with no fallback reports the same "unknown variable"
 /// as typst.
-pub fn wild_get(layers: &[&typst::foundations::Scope], name: &str, at: Span) -> SourceResult<Value> {
+pub fn wild_get(
+    layers: &[&typst::foundations::Scope],
+    name: &str,
+    at: Span,
+) -> SourceResult<Value> {
     wild_lookup(layers, name).ok_or_else(|| {
-        eco_vec![SourceDiagnostic::error(at, eco_format!("unknown variable: {name}"))]
+        eco_vec![SourceDiagnostic::error(
+            at,
+            eco_format!("unknown variable: {name}")
+        )]
     })
 }
-
 
 fn wild_lookup(layers: &[&typst::foundations::Scope], name: &str) -> Option<Value> {
     layers
@@ -163,7 +166,6 @@ fn wild_lookup(layers: &[&typst::foundations::Scope], name: &str) -> Option<Valu
         .rev()
         .find_map(|scope| scope.get(name).map(|b| b.read().clone()))
 }
-
 
 /// Wildcard-layer lookup + static-chain fallback (when the name also has a
 /// static binding: a layer hit wins, mirroring typst's scope chain —
@@ -178,7 +180,6 @@ pub fn wild_or(
     Ok(wild_lookup(layers, name).unwrap_or(fallback))
 }
 
-
 /// Wildcard-layer lookup + global fallback (when the name has no static
 /// binding).
 pub fn wild_or_global(
@@ -191,4 +192,3 @@ pub fn wild_or_global(
         .map(Ok)
         .unwrap_or_else(|| global(engine, name, at))
 }
-

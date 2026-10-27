@@ -184,13 +184,15 @@ impl InjectWorld {
             use typst::foundations::Smart;
             use typst::layout::{Abs, Margin, PageElem};
             use typst::text::{TextElem, TextSize};
-            lib.styles.set(PageElem::width, Smart::Custom(Abs::pt(120.0).into()));
+            lib.styles
+                .set(PageElem::width, Smart::Custom(Abs::pt(120.0).into()));
             lib.styles.set(PageElem::height, Smart::Auto);
             lib.styles.set(
                 PageElem::margin,
                 Smart::Custom(Margin::splat(Some(Smart::Custom(Abs::pt(10.0).into())))),
             );
-            lib.styles.set(TextElem::size, TextSize(Abs::pt(10.0).into()));
+            lib.styles
+                .set(TextElem::size, TextSize(Abs::pt(10.0).into()));
         }
         lib.std = Binding::detached(lib.global.clone().into_value());
         self.library = LazyHash::new(lib);
@@ -210,15 +212,14 @@ impl InjectWorld {
         // host integration protocol, see rt::init_module / rt::bind_module);
         // InjectWorld is only a test world.
         let world: &dyn World = self;
-        let module =
-            trust_runtime::init_module(world.track(), &self.library, init).unwrap_or_else(
-                |diags| {
-                    panic!(
-                        "module_init evaluation failed: {:?}",
-                        diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-                    )
-                },
-            );
+        let module = trust_runtime::init_module(world.track(), &self.library, init).unwrap_or_else(
+            |diags| {
+                panic!(
+                    "module_init evaluation failed: {:?}",
+                    diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+                )
+            },
+        );
         self.library = trust_runtime::bind_module(&self.library, name, module.clone());
         module
     }
@@ -717,7 +718,6 @@ mod suite {
         Color::from_u8(0x43, 0xA1, 0x27, 0xFF)
     }
 
-
     #[func]
     pub fn test(lhs: Value, rhs: Value) -> StrResult<NoneValue> {
         if lhs != rhs {
@@ -769,11 +769,7 @@ mod suite {
     /// Display boundaries and the baseline around some content's frames.
     #[func]
     pub fn bounds(content: Content) -> SourceResult<Content> {
-        Ok(BlockElem::multi_layouter(
-            Packed::new(BoundsElem::new(content)),
-            layout_bounds,
-        )
-        .pack())
+        Ok(BlockElem::multi_layouter(Packed::new(BoundsElem::new(content)), layout_bounds).pack())
     }
 
     #[elem]

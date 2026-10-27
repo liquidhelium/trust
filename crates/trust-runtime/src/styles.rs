@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 styles 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*, stub::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*,
+    macros::*, slots::*, stub::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// `#set elem(..)`: builds the style sheet (mirrors `Eval for
 /// ast::SetRule`'s `target.set(engine, args)`).
@@ -36,13 +38,11 @@ pub fn set_rule(
     Ok(element.set(engine, args)?.spanned(span).liftable())
 }
 
-
 /// An empty style sheet (when a set rule's condition is false; mirrors
 /// `Ok(Styles::new())`).
 pub fn styles_empty() -> typst::foundations::Styles {
     typst::foundations::Styles::new()
 }
-
 
 /// `#show selector?: transform`: builds the recipe (mirrors `Eval for
 /// ast::ShowRule`: the selector is cast to `ShowableSelector` (a
@@ -57,7 +57,11 @@ pub fn show_rule(
     engine: &mut Engine,
 ) -> SourceResult<typst::foundations::Recipe> {
     let selector = selector
-        .map(|value| value.cast::<typst::foundations::ShowableSelector>().at(sel_span))
+        .map(|value| {
+            value
+                .cast::<typst::foundations::ShowableSelector>()
+                .at(sel_span)
+        })
         .transpose()?
         .map(|selector| selector.0);
     let transform = transform.cast::<Transformation>().at(span)?;
@@ -65,7 +69,6 @@ pub fn show_rule(
     check_show_rules(engine, &recipe);
     Ok(recipe)
 }
-
 
 /// `#show selector?: set ..`: the transform is styles (mirrors
 /// `Transformation::Style(set.eval(..)?)`).
@@ -77,14 +80,17 @@ pub fn show_rule_style(
     engine: &mut Engine,
 ) -> SourceResult<typst::foundations::Recipe> {
     let selector = selector
-        .map(|value| value.cast::<typst::foundations::ShowableSelector>().at(sel_span))
+        .map(|value| {
+            value
+                .cast::<typst::foundations::ShowableSelector>()
+                .at(sel_span)
+        })
         .transpose()?
         .map(|selector| selector.0);
     let recipe = typst::foundations::Recipe::new(selector, Transformation::Style(styles), span);
     check_show_rules(engine, &recipe);
     Ok(recipe)
 }
-
 
 /// The original's two show-rule warnings (mirrors `check_show_page_rule`
 /// and `check_show_par_set_block`).
@@ -95,9 +101,7 @@ fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
         engine.sink.warn(
             SourceDiagnostic::warning(
                 recipe.span(),
-                typst::foundations::Str::from(
-                    "`show page` is not supported and has no effect",
-                ),
+                typst::foundations::Str::from("`show page` is not supported and has no effect"),
             )
             .with_hint("customize pages with `set page(..)` instead"),
         );
@@ -107,8 +111,7 @@ fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
         && let Transformation::Style(styles) = recipe.transform()
     {
         let chain = typst::foundations::StyleChain::new(styles);
-        if chain.has(typst::layout::BlockElem::above)
-            || chain.has(typst::layout::BlockElem::below)
+        if chain.has(typst::layout::BlockElem::above) || chain.has(typst::layout::BlockElem::below)
         {
             engine.sink.warn(
                 SourceDiagnostic::warning(
@@ -126,7 +129,6 @@ fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
     }
 }
 
-
 /// Attaches styles to the tail content after a rule (mirrors eval_markup's
 /// `tail.styled_with_map(styles)`).
 pub fn styled_with_map(
@@ -135,7 +137,6 @@ pub fn styled_with_map(
 ) -> typst::foundations::Content {
     tail.styled_with_map(styles)
 }
-
 
 /// Attaches a show rule to the tail content after a rule (mirrors
 /// `tail.styled_with_recipe`; a rule without a selector applies
@@ -148,4 +149,3 @@ pub fn styled_with_recipe(
 ) -> SourceResult<typst::foundations::Content> {
     tail.styled_with_recipe(engine, context, recipe)
 }
-

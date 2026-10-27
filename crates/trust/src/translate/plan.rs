@@ -240,21 +240,14 @@ pub(super) fn build_export_table(
                         });
                         for (item, rename) in list {
                             let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                            let slot =
-                                module_list_slot(&plan.mod_name, root, fields, &as_name);
+                            let slot = module_list_slot(&plan.mod_name, root, fields, &as_name);
                             exports.entry(as_name).or_insert(slot);
                         }
                     }
                     ImportItems::List(list) => {
                         for (item, rename) in list {
-                            let as_name =
-                                rename.clone().unwrap_or_else(|| item.clone());
-                            let slot = module_list_slot(
-                                &plan.mod_name,
-                                root,
-                                fields,
-                                &as_name,
-                            );
+                            let as_name = rename.clone().unwrap_or_else(|| item.clone());
+                            let slot = module_list_slot(&plan.mod_name, root, fields, &as_name);
                             exports.entry(as_name).or_insert(slot);
                         }
                     }
@@ -298,7 +291,9 @@ pub(super) fn build_export_table(
                             && let Some(target_exports) = table.get(target)
                         {
                             for (wname, wslot) in target_exports {
-                                exports.entry(wname.clone()).or_insert_with(|| wslot.clone());
+                                exports
+                                    .entry(wname.clone())
+                                    .or_insert_with(|| wslot.clone());
                             }
                         }
                     }
@@ -361,13 +356,14 @@ pub(super) fn build_export_table(
                     // dep_entries maps spec → the dependency entry's full
                     // merge key ("@preview/cetz:0.5.2/src/lib.typ").
                     if let Some(entry_path) = dep_entries.get(&spec)
-                        && let Some(target_exports) = table.get(entry_path) {
-                            for (wname, wslot) in target_exports {
-                                exports
-                                    .entry(wname.clone())
-                                    .or_insert_with(|| wslot.clone());
-                            }
+                        && let Some(target_exports) = table.get(entry_path)
+                    {
+                        for (wname, wslot) in target_exports {
+                            exports
+                                .entry(wname.clone())
+                                .or_insert_with(|| wslot.clone());
                         }
+                    }
                 }
                 continue;
             }
@@ -472,9 +468,10 @@ pub(super) fn spec_prefix(target: &str) -> String {
     if !target.starts_with('@') {
         return String::new();
     }
-    match target.find(':').and_then(|colon| {
-        target[colon..].find('/').map(|rel| colon + rel)
-    }) {
+    match target
+        .find(':')
+        .and_then(|colon| target[colon..].find('/').map(|rel| colon + rel))
+    {
         Some(end) => target[..end].to_string(),
         // No trailing path: the whole string is the spec (an untranslated
         // external edge; the target is the raw spec, e.g.
@@ -569,8 +566,7 @@ pub(super) fn resolve_import_slot_file(
         .iter()
         .find_map(|p| {
             let prefix = format!("IMPORT_{}_", sanitize_key(&p.mod_name));
-            slot.strip_prefix(&prefix)
-                .map(|b| (p, b.to_string()))
+            slot.strip_prefix(&prefix).map(|b| (p, b.to_string()))
         })
         .or({
             // The regular shape (module name without underscores) also
@@ -683,9 +679,10 @@ pub(super) fn import_reaches(
             return true;
         }
         if visited.insert(node)
-            && let Some(nexts) = edges_ref.get(node) {
-                stack.extend(nexts.iter().copied());
-            }
+            && let Some(nexts) = edges_ref.get(node)
+        {
+            stack.extend(nexts.iter().copied());
+        }
     }
     false
 }

@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 assign 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    calls::*, content::*, context::*, destruct::*, eval::*, host::*, lookup::*, macros::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// Path segments of mutable places (assignment / mutable-method targets),
 /// mirroring typst-eval's `access.rs`: field access and accessor methods
@@ -49,7 +51,6 @@ pub enum PlaceSeg {
 // name hits the globals. We reuse typst's pub types directly to trigger the
 // same error construction — zero message drift.
 
-
 /// Assignment / mutable method landing on a **captured binding**: mirrors
 /// `Binding::write`'s rejection of `BindingKind::Captured` — construct a
 /// Captured binding and call its `write`; the error message (including the
@@ -63,7 +64,6 @@ pub fn bail_captured(capturer: Capturer) -> SourceResult<Value> {
     Err(eco_vec![SourceDiagnostic::error(Span::detached(), err)])
 }
 
-
 /// Assignment target is a **non-lvalue expression**: evaluate side effects
 /// first, then error; mirrors the fallback arm of `Access for ast::Expr`
 /// (`access.rs:21-24`).
@@ -71,18 +71,13 @@ pub fn bail_temporary(span: Span) -> SourceResult<Value> {
     bail!(span, "cannot mutate a temporary value")
 }
 
-
 /// Identifier assignment target missing from every lexical scope: mirrors
 /// `Scopes::get_mut`'s miss branch — build `Scopes` with an empty local
 /// scope + the global library and call its `get_mut` directly; hitting the
 /// globals yields "cannot mutate a constant: {name}" (the `std` special
 /// case included), otherwise "unknown variable: {name}" (minus hint
 /// included).
-pub fn check_mut_unknown(
-    engine: &mut Engine,
-    name: &str,
-    span: Span,
-) -> SourceResult<()> {
+pub fn check_mut_unknown(engine: &mut Engine, name: &str, span: Span) -> SourceResult<()> {
     let library: &Library = engine.library;
     Scopes::new(Some(library))
         .get_mut(name)
@@ -90,7 +85,6 @@ pub fn check_mut_unknown(
         .at(span)?;
     Ok(())
 }
-
 
 /// Evaluation of plain assignments `a.b..k = v` (mirrors
 /// `apply_assignment`'s FieldAccess special case: after `access_dict` walks
@@ -121,7 +115,6 @@ pub fn assign_value(
     *place_mut(root, path, span)? = value;
     Ok(())
 }
-
 
 /// Walks the path segments to a mutable reference (mirrors `Expr::access`;
 /// field-segment error messages mirror `access_dict`'s three-way branch).
@@ -179,7 +172,6 @@ pub fn place_mut<'a>(
     Ok(current)
 }
 
-
 /// Non-dictionary branch of mutable field access (mirrors `access_dict`'s
 /// three-way split: dedicated getter types / types without fields / static
 /// fields not open for mutation).
@@ -200,4 +192,3 @@ fn access_dict_error(value: &mut Value, span: Span) -> SourceResult<&mut Value> 
         ))
         .at(span)
 }
-

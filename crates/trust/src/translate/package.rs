@@ -35,7 +35,8 @@ use super::naming::{escape, lowercase, sanitize, sanitize_key, uppercase};
 use super::paths::{normalize_import, parse_module_access};
 use super::plan::{
     FilePlan, ImportEdge, ImportItems, build_export_table, has_import_cycle, module_stem, nth_slot,
-    topo_order, spec_name, spec_prefix, resolve_import_slot_file};
+    resolve_import_slot_file, spec_name, spec_prefix, topo_order,
+};
 
 /// The multi-file package to translate.
 pub struct PackageInput {
@@ -114,7 +115,6 @@ pub fn translate_package(input: &PackageInput, module_name: &str) -> Result<Stri
     }
     Ok(render_single(&parts))
 }
-
 
 // ─── Staged assembly (mirrors typst-eval `eval()`'s directory-style entry:
 // every step fully delegates; reading the entry shows the whole
@@ -226,7 +226,8 @@ fn plan_files(
                         // naturally via directory joining; absolute ones
                         // would land at top-level keys and lose package
                         // ownership).
-                        if raw.starts_with('/') && let Some(colon) = path.find(':')
+                        if raw.starts_with('/')
+                            && let Some(colon) = path.find(':')
                             && let Some(rel) = path[colon..].find('/')
                         {
                             let prefix_end = colon + rel;
@@ -333,7 +334,10 @@ fn plan_files(
                     // Include edge: enters the dependency graph (cycle
                     // detection / topo order), binds no names.
                     let Some(ast::Expr::Str(path_expr)) = Some(include.source()) else {
-                        cx.diag(expr.span(), "include source must currently be a string path".into());
+                        cx.diag(
+                            expr.span(),
+                            "include source must currently be a string path".into(),
+                        );
                         continue;
                     };
                     let raw = path_expr.get().to_string();
@@ -386,9 +390,7 @@ fn plan_files(
         {
             let mut skip: Vec<*const typst_syntax::SyntaxNode> = markup
                 .exprs()
-                .filter(|e| {
-                    matches!(e, ast::Expr::ModuleImport(_) | ast::Expr::ModuleInclude(_))
-                })
+                .filter(|e| matches!(e, ast::Expr::ModuleImport(_) | ast::Expr::ModuleInclude(_)))
                 .map(|e| e.to_untyped() as *const _)
                 .collect();
             let mut stack = vec![root.clone()];
@@ -479,7 +481,7 @@ fn assemble_package_world(
     // imports can reach upstream import re-exports.
     let order = topo_order(plans, &input.dep_entries);
     let export_table = build_export_table(plans, &order, &input.dep_entries);
-        cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
+    cx.export_table = Some(std::rc::Rc::new(export_table.clone()));
 
     // Mutable slots: the union of in-place-mutated root names, marking each
     // plan's own same-named slots (mirrors typst's in-place mutation
@@ -505,100 +507,95 @@ fn assemble_package_world(
     // module-value-chain wildcards):
     // V{i}_{name} → plans[i].path; IMPORT_{mod}_{bound} → edge target.
     if cx.slot_files.is_none() {
-    let mut idx = std::collections::BTreeMap::new();
-    for (i, p) in plans.iter().enumerate() {
-    for (name, slot) in &p.tops {
-    let _ = slot;
-    idx.insert(
-    format!("V{i}_{}", sanitize_key(name)),
-    p.path.clone(),
-    );
-    }
-    for edge in &p.imports {
-    if edge.is_include {
-    continue;
-    }
-    let bound = if edge.external {
-    match &edge.items {
-    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => {
-    n.clone()
-    }
-    _ => spec_name(&edge.target),
-    }
-    } else {
-    match &edge.items {
-    ImportItems::Bare => module_stem_pub(&edge.target),
-    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => {
-    n.clone()
-    }
-    _ => continue,
-    }
-    };
-    idx.insert(
-    format!("IMPORT_{}_{}", p.mod_name, bound),
-    edge.target.clone(),
-    );
-    if let Some((root, fields)) = &edge.module_access {
-    let via_bound = match &edge.items {
-    ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
-    ImportItems::Bare => fields.last().cloned().unwrap_or_else(|| root.clone()),
-    _ => bound.clone(),
-    };
-    idx.insert(
-    super::plan::module_list_slot(&p.mod_name, root, fields, &via_bound),
-    edge.target.clone(),
-    );
-    }
-    }
-    }
-    // Backfill: LIST/RenameList item slots and cross-file chained
-    // identities, via the generic resolver (e.g. `import t4t: *` where t4t
-    // is a module introduced via an internal list item).
-    for p in plans.iter() {
-        for edge in &p.imports {
-            if edge.is_include {
-                continue;
+        let mut idx = std::collections::BTreeMap::new();
+        for (i, p) in plans.iter().enumerate() {
+            for (name, slot) in &p.tops {
+                let _ = slot;
+                idx.insert(format!("V{i}_{}", sanitize_key(name)), p.path.clone());
             }
-            let names: Vec<String> = match &edge.items {
-                ImportItems::List(list) => list
-                    .iter()
-                    .map(|(item, rename)| {
-                        rename.clone().unwrap_or_else(|| item.clone())
-                    })
-                    .collect(),
-                ImportItems::RenameList(n, list) => {
-                    let mut v = vec![n.clone()];
-                    v.extend(
-                        list.iter()
-                            .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone())),
-                    );
-                    v
+            for edge in &p.imports {
+                if edge.is_include {
+                    continue;
                 }
-                _ => continue,
-            };
-            for name in names {
-                let slot = format!(
-                    "IMPORT_{}_{}",
-                    sanitize_key(&p.mod_name),
-                    sanitize_key(&name)
+                let bound = if edge.external {
+                    match &edge.items {
+                        ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
+                        _ => spec_name(&edge.target),
+                    }
+                } else {
+                    match &edge.items {
+                        ImportItems::Bare => module_stem_pub(&edge.target),
+                        ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
+                        _ => continue,
+                    }
+                };
+                idx.insert(
+                    format!("IMPORT_{}_{}", p.mod_name, bound),
+                    edge.target.clone(),
                 );
-                if !idx.contains_key(&slot)
-                    && let Some(file) = resolve_import_slot_file(
-                        &slot,
-                        plans,
-                        &export_table,
-                        &input.dep_entries,
-                        plans.len(),
-                    )
-                {
-                    idx.insert(slot, file);
+                if let Some((root, fields)) = &edge.module_access {
+                    let via_bound = match &edge.items {
+                        ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
+                        ImportItems::Bare => fields.last().cloned().unwrap_or_else(|| root.clone()),
+                        _ => bound.clone(),
+                    };
+                    idx.insert(
+                        super::plan::module_list_slot(&p.mod_name, root, fields, &via_bound),
+                        edge.target.clone(),
+                    );
                 }
             }
         }
+        // Backfill: LIST/RenameList item slots and cross-file chained
+        // identities, via the generic resolver (e.g. `import t4t: *` where t4t
+        // is a module introduced via an internal list item).
+        for p in plans.iter() {
+            for edge in &p.imports {
+                if edge.is_include {
+                    continue;
+                }
+                let names: Vec<String> = match &edge.items {
+                    ImportItems::List(list) => list
+                        .iter()
+                        .map(|(item, rename)| rename.clone().unwrap_or_else(|| item.clone()))
+                        .collect(),
+                    ImportItems::RenameList(n, list) => {
+                        let mut v = vec![n.clone()];
+                        v.extend(
+                            list.iter()
+                                .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone())),
+                        );
+                        v
+                    }
+                    _ => continue,
+                };
+                for name in names {
+                    let slot = format!(
+                        "IMPORT_{}_{}",
+                        sanitize_key(&p.mod_name),
+                        sanitize_key(&name)
+                    );
+                    if !idx.contains_key(&slot)
+                        && let Some(file) = resolve_import_slot_file(
+                            &slot,
+                            plans,
+                            &export_table,
+                            &input.dep_entries,
+                            plans.len(),
+                        )
+                    {
+                        idx.insert(slot, file);
+                    }
+                }
+            }
+        }
+        cx.slot_files = Some(std::rc::Rc::new(idx));
     }
-    cx.slot_files = Some(std::rc::Rc::new(idx));
-    }
-    Some(PkgWorld { order, export_table, package_mods })
+    Some(PkgWorld {
+        order,
+        export_table,
+        package_mods,
+    })
 }
 
 /// Pass-two single-file accumulator (the Vm equivalent: one bundle per
@@ -626,7 +623,11 @@ struct TopGen {
 impl TopGen {
     fn new() -> Self {
         Self {
-            env: Env { locals: Vec::new(), module: Vec::new(), wildcards: Vec::new() },
+            env: Env {
+                locals: Vec::new(),
+                module: Vec::new(),
+                wildcards: Vec::new(),
+            },
             own: Vec::new(),
             own_seen: std::collections::HashMap::new(),
             binding_code: String::new(),
@@ -657,259 +658,264 @@ impl TopGen {
         state_fields: &mut Vec<(String, String)>,
         lets: ast::LetBinding,
     ) {
-            match lets.kind() {
-                ast::LetBindingKind::Closure(name) => {
-                    let Some(ast::Expr::Closure(closure)) = lets.init() else {
-                        cx.diag(lets.span(), "closure binding is missing its closure initializer".into());
-return;
-                    };
-                    let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
-                    self.own_seen.insert(name.as_str().to_string(), nth + 1);
-                    let Some(slot) = nth_slot(plan, name.as_str(), nth) else {
-return;
-                    };
-                    let mut env2 = self.env.clone();
-                    for (seen, seen_slot) in &self.own {
-                        env2.module
-                            .push((seen.clone(), Ref::Slot(seen_slot.clone())));
-                    }
+        match lets.kind() {
+            ast::LetBindingKind::Closure(name) => {
+                let Some(ast::Expr::Closure(closure)) = lets.init() else {
+                    cx.diag(
+                        lets.span(),
+                        "closure binding is missing its closure initializer".into(),
+                    );
+                    return;
+                };
+                let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
+                self.own_seen.insert(name.as_str().to_string(), nth + 1);
+                let Some(slot) = nth_slot(plan, name.as_str(), nth) else {
+                    return;
+                };
+                let mut env2 = self.env.clone();
+                for (seen, seen_slot) in &self.own {
                     env2.module
-                        .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
-                    let fun = format!("f_{}", lowercase(&slot));
-                    let data = format!("D_{}", uppercase(&slot));
-                    // Global names materialize at creation time (mirrors
-                    // typst closure capture). Inject the closure's own
-                    // bindings first (name/params/sink) — parameters are
-                    // not free names (otherwise `__merge(base, …)`'s base
-                    // was collected as a global slot; mirrors
-                    // CapturesVisitor's Closure branch).
-                    let mut g_env = env2.clone();
-                    // Global names materialize at creation time (mirrors
-                    // typst closure capture). The routing rules live with
-                    // the capture analysis (see global_capture_slots).
-                    let closure_body = closure.body().to_untyped();
-                    let g_captures = super::captures::global_capture_slots(
-                        super::captures::top_closure_free_names(closure),
-                        &env2.module,
-                        super::captures::has_wildcard_import(closure_body),
-                        &slot,
-                    );
-                    for g in &g_captures {
-                        state_fields.push((plan.path.clone(), g.slot.clone()));
-                        let gname_escaped = escape(&g.name);
-                        let resolver = if g.in_math { "capture_math_opt" } else { "capture_code_opt" };
-                        let _ = writeln!(
-                            self.binding_code,
-                            "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{}, v)?; }}",
-                            g.slot
-                        );
-                        g_env.module.push((
-                            g.name.clone(),
-                            Ref::GlobalFallback {
-                                slot: g.slot.clone(),
-                                name: gname_escaped,
-                            },
-                        ));
-                    }
-                    self.file_fns.push_str(&cx.gen_function(&fun, &slot, closure, &mut g_env));
-                    self.file_fns.push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
-                    // Defaults materialize at creation time (mirrors typst:
-                    // a closure evaluates its parameters when created; env2
-                    // = imports + prior bindings, without the function
-                    // itself). The same expression batch feeds the stub's
-                    // defaults (used for missing arguments at call time,
-                    // mirroring Closure.defaults semantics).
-                    let mut defaults = Vec::new();
-                    for param in closure.params().children() {
-                        if let ast::Param::Named(named) = param {
-                            let pname = named.name().as_str();
-                            let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
-                            state_fields.push((plan.path.clone(), def_slot.clone()));
-                            let value = cx.expr(named.expr(), &mut env2);
-                            defaults.push(format!(
-                                "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
-                            ));
-                        }
-                    }
-                    // Native closure (scheme C): signature-faithful stub +
-                    // state travels with the value. Pure functions that
-                    // reference no module slots stay bare native (no state
-                    // prefix, no take_state prologue; both sides decided by
-                    // the same used_state flag).
-                    let params_src = closure.params().to_untyped().full_text();
-                    let defaults = if defaults.is_empty() {
-                        "Vec::new()".to_string()
+                        .push((seen.clone(), Ref::Slot(seen_slot.clone())));
+                }
+                env2.module
+                    .push((name.as_str().to_string(), Ref::Slot(slot.clone())));
+                let fun = format!("f_{}", lowercase(&slot));
+                let data = format!("D_{}", uppercase(&slot));
+                // Global names materialize at creation time (mirrors
+                // typst closure capture). Inject the closure's own
+                // bindings first (name/params/sink) — parameters are
+                // not free names (otherwise `__merge(base, …)`'s base
+                // was collected as a global slot; mirrors
+                // CapturesVisitor's Closure branch).
+                let mut g_env = env2.clone();
+                // Global names materialize at creation time (mirrors
+                // typst closure capture). The routing rules live with
+                // the capture analysis (see global_capture_slots).
+                let closure_body = closure.body().to_untyped();
+                let g_captures = super::captures::global_capture_slots(
+                    super::captures::top_closure_free_names(closure),
+                    &env2.module,
+                    super::captures::has_wildcard_import(closure_body),
+                    &slot,
+                );
+                for g in &g_captures {
+                    state_fields.push((plan.path.clone(), g.slot.clone()));
+                    let gname_escaped = escape(&g.name);
+                    let resolver = if g.in_math {
+                        "capture_math_opt"
                     } else {
-                        format!("vec![{}]", defaults.join(", "))
+                        "capture_code_opt"
                     };
-                    // Uniform Closure-form stub: whether state is carried
-                    // is an internal detail and must not leak into the
-                    // external identity (a bare Native's scope()=Some would
-                    // be dispatched as a native function by imports;
-                    // mirrors the original's None for user closures).
-                    let state_arg = if cx.used_state {
-                        "Some(&rt::StateSlot::new(__st.clone()))"
-                    } else {
-                        "None"
-                    };
-                    let func_value = format!(
-                        "rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})"
-                    );
                     let _ = writeln!(
                         self.binding_code,
-                        "    rt::fill(&__st.{slot}, Value::Func({func_value}))?;"
+                        "    if let Some(v) = rt::{resolver}(engine, \"{gname_escaped}\")? {{ rt::fill(&__st.{}, v)?; }}",
+                        g.slot
                     );
-                    let _ = writeln!(
-                        self.file_defines,
-                        "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
-                        escape(name.as_str())
-                    );
-                    self.own.push((name.as_str().to_string(), slot.clone()));
+                    g_env.module.push((
+                        g.name.clone(),
+                        Ref::GlobalFallback {
+                            slot: g.slot.clone(),
+                            name: gname_escaped,
+                        },
+                    ));
                 }
-                ast::LetBindingKind::Normal(pattern) => {
-                    // Declaration without initializer (`#let x`): binds
-                    // none (mirrors typst-eval LetBinding's define(name,
-                    // None) for the no-init case).
-                    let Some(init_expr) = lets.init() else {
-                        if let Some(name) = pattern.bindings().first() {
-                            let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
-                            self.own_seen.insert(name.as_str().to_string(), nth + 1);
-                            if let Some(slot) = nth_slot(plan, name.as_str(), nth) {
-                                let fill_none = if cx.mutable_slots.contains(&slot) {
-                                    format!("rt::fill_ms(&__st.{slot}, Value::None)?")
-                                } else {
-                                    format!("rt::fill(&__st.{slot}, Value::None)?")
-                                };
-                                let _ = writeln!(self.binding_code, "    {fill_none};");
-                                let _ = writeln!(
-                                    self.file_defines,
-                                    "    scope.define(\"{}\", Value::None);",
-                                    escape(name.as_str())
-                                );
-                                self.own.push((name.as_str().to_string(), slot));
-                            }
+                self.file_fns
+                    .push_str(&cx.gen_function(&fun, &slot, closure, &mut g_env));
+                self.file_fns
+                    .push_str(&gen_func_data(&data, &fun, name.as_str(), closure));
+                // Defaults materialize at creation time (mirrors typst:
+                // a closure evaluates its parameters when created; env2
+                // = imports + prior bindings, without the function
+                // itself). The same expression batch feeds the stub's
+                // defaults (used for missing arguments at call time,
+                // mirroring Closure.defaults semantics).
+                let mut defaults = Vec::new();
+                for param in closure.params().children() {
+                    if let ast::Param::Named(named) = param {
+                        let pname = named.name().as_str();
+                        let def_slot = format!("DEF_{slot}_{}", sanitize_key(pname));
+                        state_fields.push((plan.path.clone(), def_slot.clone()));
+                        let value = cx.expr(named.expr(), &mut env2);
+                        defaults.push(format!(
+                            "{{ let v = {value}; rt::fill(&__st.{def_slot}, v.clone())?; v }}"
+                        ));
+                    }
+                }
+                // Native closure (scheme C): signature-faithful stub +
+                // state travels with the value. Pure functions that
+                // reference no module slots stay bare native (no state
+                // prefix, no take_state prologue; both sides decided by
+                // the same used_state flag).
+                let params_src = closure.params().to_untyped().full_text();
+                let defaults = if defaults.is_empty() {
+                    "Vec::new()".to_string()
+                } else {
+                    format!("vec![{}]", defaults.join(", "))
+                };
+                // Uniform Closure-form stub: whether state is carried
+                // is an internal detail and must not leak into the
+                // external identity (a bare Native's scope()=Some would
+                // be dispatched as a native function by imports;
+                // mirrors the original's None for user closures).
+                let state_arg = if cx.used_state {
+                    "Some(&rt::StateSlot::new(__st.clone()))"
+                } else {
+                    "None"
+                };
+                let func_value =
+                    format!("rt::native_closure(&{data}, {params_src:?}, {defaults}, {state_arg})");
+                let _ = writeln!(
+                    self.binding_code,
+                    "    rt::fill(&__st.{slot}, Value::Func({func_value}))?;"
+                );
+                let _ = writeln!(
+                    self.file_defines,
+                    "    scope.define(\"{}\", rt::read(&__st.{slot})?);",
+                    escape(name.as_str())
+                );
+                self.own.push((name.as_str().to_string(), slot.clone()));
+            }
+            ast::LetBindingKind::Normal(pattern) => {
+                // Declaration without initializer (`#let x`): binds
+                // none (mirrors typst-eval LetBinding's define(name,
+                // None) for the no-init case).
+                let Some(init_expr) = lets.init() else {
+                    if let Some(name) = pattern.bindings().first() {
+                        let nth = self.own_seen.get(name.as_str()).copied().unwrap_or(0);
+                        self.own_seen.insert(name.as_str().to_string(), nth + 1);
+                        if let Some(slot) = nth_slot(plan, name.as_str(), nth) {
+                            let fill_none = if cx.mutable_slots.contains(&slot) {
+                                format!("rt::fill_ms(&__st.{slot}, Value::None)?")
+                            } else {
+                                format!("rt::fill(&__st.{slot}, Value::None)?")
+                            };
+                            let _ = writeln!(self.binding_code, "    {fill_none};");
+                            let _ = writeln!(
+                                self.file_defines,
+                                "    scope.define(\"{}\", Value::None);",
+                                escape(name.as_str())
+                            );
+                            self.own.push((name.as_str().to_string(), slot));
                         }
-return;
+                    }
+                    return;
+                };
+                // Each pattern name pairs with this file's next
+                // same-named slot (destructuring binds several).
+                let mut bound: Vec<(String, String)> = Vec::new();
+                for ident in pattern.bindings().iter() {
+                    let name = ident.as_str();
+                    let nth = self.own_seen.get(name).copied().unwrap_or(0);
+                    self.own_seen.insert(name.to_string(), nth + 1);
+                    let Some(slot) = nth_slot(plan, name, nth) else {
+                        return;
                     };
-                    // Each pattern name pairs with this file's next
-                    // same-named slot (destructuring binds several).
-                    let mut bound: Vec<(String, String)> = Vec::new();
-                    for ident in pattern.bindings().iter() {
-                        let name = ident.as_str();
-                        let nth = self.own_seen.get(name).copied().unwrap_or(0);
-                        self.own_seen.insert(name.to_string(), nth + 1);
-                        let Some(slot) = nth_slot(plan, name, nth) else {
-return;
-                        };
-                        bound.push((name.to_string(), slot));
-                    }
-                    if bound.is_empty() {
-                        // No bindings (a `_`-only pattern, or an empty
-                        // destructuring pattern like `()`): typst still
-                        // evaluates the init (side effects must run —
-                        // e.g. `#let _ = decimal(1.234)` warns about the
-                        // imprecise float literal) and runs the full
-                        // destructure — an empty pattern is NOT a skip:
-                        // `#let () = (1, 2)` errors with "too many
-                        // elements to destructure" (binding.rs runs the
-                        // same destructure_impl; Placeholder is its no-op
-                        // leaf).
-                        let mut env2 = self.env.clone();
-                        for (seen, seen_slot) in &self.own {
-                            env2.module
-                                .push((seen.clone(), Ref::Slot(seen_slot.clone())));
-                        }
-                        let value = cx.expr(init_expr, &mut env2);
-                        let stmts = cx.destructure(pattern, value, &mut env2, true);
-                        let _ = writeln!(self.binding_code, "    {{ {stmts} }}");
-return;
-                    }
+                    bound.push((name.to_string(), slot));
+                }
+                if bound.is_empty() {
+                    // No bindings (a `_`-only pattern, or an empty
+                    // destructuring pattern like `()`): typst still
+                    // evaluates the init (side effects must run —
+                    // e.g. `#let _ = decimal(1.234)` warns about the
+                    // imprecise float literal) and runs the full
+                    // destructure — an empty pattern is NOT a skip:
+                    // `#let () = (1, 2)` errors with "too many
+                    // elements to destructure" (binding.rs runs the
+                    // same destructure_impl; Placeholder is its no-op
+                    // leaf).
                     let mut env2 = self.env.clone();
                     for (seen, seen_slot) in &self.own {
                         env2.module
                             .push((seen.clone(), Ref::Slot(seen_slot.clone())));
                     }
-                    // The init is evaluated before the binding takes
-                    // effect: same-name references resolve to the outer
-                    // scope (e.g. a global type); env2 excludes this
-                    // binding. The single-name fast path applies only to
-                    // **plain identifier patterns** — single-binding
-                    // destructuring patterns like `(a,)` must still go
-                    // through destructuring (binding the whole value was
-                    // once the root cause of the destructuring-let
-                    // single-element-array and dictionary-sink failures).
-                    let plain_ident = matches!(
-                        pattern,
-                        ast::Pattern::Normal(ast::Expr::Ident(_))
-                            | ast::Pattern::Parenthesized(_)
+                    let value = cx.expr(init_expr, &mut env2);
+                    let stmts = cx.destructure(pattern, value, &mut env2, true);
+                    let _ = writeln!(self.binding_code, "    {{ {stmts} }}");
+                    return;
+                }
+                let mut env2 = self.env.clone();
+                for (seen, seen_slot) in &self.own {
+                    env2.module
+                        .push((seen.clone(), Ref::Slot(seen_slot.clone())));
+                }
+                // The init is evaluated before the binding takes
+                // effect: same-name references resolve to the outer
+                // scope (e.g. a global type); env2 excludes this
+                // binding. The single-name fast path applies only to
+                // **plain identifier patterns** — single-binding
+                // destructuring patterns like `(a,)` must still go
+                // through destructuring (binding the whole value was
+                // once the root cause of the destructuring-let
+                // single-element-array and dictionary-sink failures).
+                let plain_ident = matches!(
+                    pattern,
+                    ast::Pattern::Normal(ast::Expr::Ident(_)) | ast::Pattern::Parenthesized(_)
+                );
+                if let [(name, slot)] = bound.as_slice()
+                    && plain_ident
+                {
+                    let value = cx.expr(init_expr, &mut env2);
+                    let fill_call = if cx.mutable_slots.contains(slot) {
+                        format!("rt::fill_ms(&__st.{slot}, v.clone())?")
+                    } else {
+                        format!("rt::fill(&__st.{slot}, v.clone())?")
+                    };
+                    let read_call = if cx.mutable_slots.contains(slot) {
+                        format!("rt::read_ms(&__st.{slot})?")
+                    } else {
+                        format!("rt::read(&__st.{slot})?")
+                    };
+                    let _ = writeln!(self.binding_code, "    {{ let v = {value}; {fill_call}; }}");
+                    let _ = writeln!(
+                        self.file_defines,
+                        "    scope.define(\"{}\", {read_call});",
+                        escape(name)
                     );
-                    if let [(name, slot)] = bound.as_slice() && plain_ident {
-                        let value = cx.expr(init_expr, &mut env2);
-                        let fill_call = if cx.mutable_slots.contains(slot) {
-                            format!("rt::fill_ms(&__st.{slot}, v.clone())?")
+                } else {
+                    // Top-level destructuring: slot names are pre-bound
+                    // as temporary locals; destructure writes back to
+                    // these names, then each slot is filled and
+                    // registered.
+                    let value = cx.expr(init_expr, &mut env2);
+                    let mut tmp_env = env2.clone();
+                    let mut decls = String::new();
+                    for (name, slot) in &bound {
+                        tmp_env.locals.push((name.clone(), slot.clone()));
+                        let _ = writeln!(decls, "        let mut {slot} = Value::None;");
+                    }
+                    let stmts =
+                        cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
+                    let mut fills = String::new();
+                    for (name, slot) in &bound {
+                        // Mutable slots (fill_ms/read_ms) and write-once
+                        // slots (fill/read) split by the plan-time
+                        // marking.
+                        let (fill_call, read_call) = if cx.mutable_slots.contains(slot) {
+                            (
+                                format!("rt::fill_ms(&__st.{slot}, {slot}.clone())?;"),
+                                format!("rt::read_ms(&__st.{slot})?"),
+                            )
                         } else {
-                            format!("rt::fill(&__st.{slot}, v.clone())?")
+                            (
+                                format!("rt::fill(&__st.{slot}, {slot}.clone())?;"),
+                                format!("rt::read(&__st.{slot})?"),
+                            )
                         };
-                        let read_call = if cx.mutable_slots.contains(slot) {
-                            format!("rt::read_ms(&__st.{slot})?")
-                        } else {
-                            format!("rt::read(&__st.{slot})?")
-                        };
-                        let _ = writeln!(
-                            self.binding_code,
-                            "    {{ let v = {value}; {fill_call}; }}"
-                        );
+                        let _ = writeln!(fills, "        {fill_call}");
                         let _ = writeln!(
                             self.file_defines,
                             "    scope.define(\"{}\", {read_call});",
                             escape(name)
                         );
-                    } else {
-                        // Top-level destructuring: slot names are pre-bound
-                        // as temporary locals; destructure writes back to
-                        // these names, then each slot is filled and
-                        // registered.
-                        let value = cx.expr(init_expr, &mut env2);
-                        let mut tmp_env = env2.clone();
-                        let mut decls = String::new();
-                        for (name, slot) in &bound {
-                            tmp_env.locals.push((name.clone(), slot.clone()));
-                            let _ = writeln!(decls, "        let mut {slot} = Value::None;");
-                        }
-                        let stmts =
-                            cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
-                        let mut fills = String::new();
-                        for (name, slot) in &bound {
-                            // Mutable slots (fill_ms/read_ms) and write-once
-                            // slots (fill/read) split by the plan-time
-                            // marking.
-                            let (fill_call, read_call) =
-                                if cx.mutable_slots.contains(slot) {
-                                    (
-                                        format!("rt::fill_ms(&__st.{slot}, {slot}.clone())?;"),
-                                        format!("rt::read_ms(&__st.{slot})?"),
-                                    )
-                                } else {
-                                    (
-                                        format!("rt::fill(&__st.{slot}, {slot}.clone())?;"),
-                                        format!("rt::read(&__st.{slot})?"),
-                                    )
-                                };
-                            let _ = writeln!(fills, "        {fill_call}");
-                            let _ = writeln!(
-                                self.file_defines,
-                                "    scope.define(\"{}\", {read_call});",
-                                escape(name)
-                            );
-                        }
-                        let _ = writeln!(
-                            self.binding_code,
-                            "    {{ let v = {value};\n{decls}{stmts}{fills}    }}"
-                        );
                     }
-                    self.own.extend(bound);
+                    let _ = writeln!(
+                        self.binding_code,
+                        "    {{ let v = {value};\n{decls}{stmts}{fills}    }}"
+                    );
                 }
+                self.own.extend(bound);
             }
+        }
     }
 }
 
@@ -942,7 +948,11 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     let Some(world) = assemble_package_world(input, &plans, entry, cx) else {
         return PackageParts::default();
     };
-    let PkgWorld { order, export_table, package_mods } = world;
+    let PkgWorld {
+        order,
+        export_table,
+        package_mods,
+    } = world;
     // Pass two: per file, generate eval (slot filling) + module (export
     // surface) + function bodies.
     let mut top_defines = String::new();
@@ -1037,9 +1047,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     let refs: Vec<(String, Ref)> = top.env.module.clone();
                     let mut caps: Vec<String> = refs
                         .iter()
-                        .map(|(n, r)| {
-                            format!("(\"{}\", {})", escape(n), cx.ref_value(r))
-                        })
+                        .map(|(n, r)| format!("(\"{}\", {})", escape(n), cx.ref_value(r)))
                         .collect();
                     for (seen, seen_slot) in &top.own {
                         caps.push(format!(
@@ -1141,11 +1149,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
         let parse_guard_src = if plan.parse_diags.is_empty() {
             String::new()
         } else {
-            let msgs: Vec<String> = plan
-                .parse_diags
-                .iter()
-                .map(|m| format!("{m:?}"))
-                .collect();
+            let msgs: Vec<String> = plan.parse_diags.iter().map(|m| format!("{m:?}")).collect();
             // All parse diagnostics in one go (Err carries an EcoVec;
             // mirrors the official compile parse stage's collection — a
             // single bail once made multi-error tests mismatch).
@@ -1204,8 +1208,14 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 
         if is_entry {
             top_defines = file_defines;
-            let _ = writeln!(eval_flat, "    // Entry `{entry}` (dependencies were evaluated above).");
-            let _ = writeln!(eval_tree, "    // Entry `{entry}` (dependencies were evaluated above).");
+            let _ = writeln!(
+                eval_flat,
+                "    // Entry `{entry}` (dependencies were evaluated above)."
+            );
+            let _ = writeln!(
+                eval_tree,
+                "    // Entry `{entry}` (dependencies were evaluated above)."
+            );
         }
         let _ = writeln!(
             eval_flat,
@@ -1234,7 +1244,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
     }
 
     let degraded_header = if cx.lenient && !cx.diags.is_empty() {
-        let mut header = String::from("// Degradation list (lenient mode; missing features, warned at runtime):\n");
+        let mut header = String::from(
+            "// Degradation list (lenient mode; missing features, warned at runtime):\n",
+        );
         for d in &cx.diags {
             header.push_str(&format!(
                 "// - [{}] {}\n",
@@ -1271,14 +1283,9 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
             continue;
         }
         let node = root.node_for(file);
-        node.slots.push((
-            slot.clone(),
-            cx.mutable_slots.contains(slot.as_str()),
-        ));
-        slot_paths.insert(
-            slot.clone(),
-            file_segments(file).join("."),
-        );
+        node.slots
+            .push((slot.clone(), cx.mutable_slots.contains(slot.as_str())));
+        slot_paths.insert(slot.clone(), file_segments(file).join("."));
     }
     let mut decls = String::new();
     let mut fields = String::new();
@@ -1336,16 +1343,17 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
 /// maps a plan to its reference path (flat `m5_foo` or tree
 /// `dir::foo`); the arm assembles the dependency closure in
 /// topological order, then the file's own eval+module.
-fn render_registry(
-    registry: &[(String, Vec<(String, String)>)],
-    tree: bool,
-) -> String {
+fn render_registry(registry: &[(String, Vec<(String, String)>)], tree: bool) -> String {
     let pick = |p: &(String, String)| if tree { p.1.clone() } else { p.0.clone() };
     let mut out = String::new();
     for (path, closure) in registry {
         let _ = writeln!(out, "        \"{path}\" => Some((|| {{");
         for pair in closure {
-            let _ = writeln!(out, "            {}::eval(board, engine, context)?;", pick(pair));
+            let _ = writeln!(
+                out,
+                "            {}::eval(board, engine, context)?;",
+                pick(pair)
+            );
         }
         let _ = writeln!(
             out,
@@ -1453,7 +1461,10 @@ fn tree_impl(
     }
     root.push_str(&closure_items);
     root.push_str(&cx_nodes);
-    tree.insert("mod.rs".to_string(), nest_state_access(&root, &parts.slot_paths));
+    tree.insert(
+        "mod.rs".to_string(),
+        nest_state_access(&root, &parts.slot_paths),
+    );
 
     // Directory → direct child segments (ordered, deduped); the root is
     // the empty segment, depth = segment index.
@@ -1529,8 +1540,6 @@ fn dedent4(s: &str) -> String {
     out
 }
 
-
-
 /// Collect the root names of bindings mutated in place: targets of
 /// mutating method calls (push/pop/insert/remove) and of
 /// assignments/compound assignments (mirrors typst's mutable access
@@ -1538,10 +1547,14 @@ fn dedent4(s: &str) -> String {
 pub(super) fn collect_mutated_roots(node: &typst_syntax::SyntaxNode, out: &mut Vec<String>) {
     if let Some(fc) = node.cast::<typst_syntax::ast::FuncCall>()
         && let typst_syntax::ast::Expr::FieldAccess(access) = fc.callee()
-        && matches!(access.field().as_str(), "push" | "pop" | "insert" | "remove")
-        && let Some(root) = place_root(access.target().to_untyped()) {
-            out.push(root);
-        }
+        && matches!(
+            access.field().as_str(),
+            "push" | "pop" | "insert" | "remove"
+        )
+        && let Some(root) = place_root(access.target().to_untyped())
+    {
+        out.push(root);
+    }
     if let Some(bin) = node.cast::<typst_syntax::ast::Binary>()
         && matches!(
             bin.op(),
@@ -1621,8 +1634,7 @@ fn dep_closure(
         }
         state[i] = 1;
         for edge in &plans[i].imports {
-            if let Some(target) =
-                super::plan::edge_effective_target(edge, dep_entries)
+            if let Some(target) = super::plan::edge_effective_target(edge, dep_entries)
                 && let Some(j) = plans.iter().position(|p| p.path == target)
             {
                 visit(j, plans, dep_entries, order, state);
@@ -1664,10 +1676,7 @@ fn item_file(
 /// Slot name → owning file (`V{i}_…` where i is the plan index;
 /// `IMPORT_{mod}_…` reverse-looks-up that mod's internal import edge
 /// target). Used by module-value-chain wildcard resolution.
-fn slot_target_file(
-    slot: &str,
-    plans: &[super::plan::FilePlan],
-) -> Option<String> {
+fn slot_target_file(slot: &str, plans: &[super::plan::FilePlan]) -> Option<String> {
     if let Some(rest) = slot.strip_prefix('V')
         && let Some((idx, _)) = rest.split_once('_')
         && let Ok(i) = idx.parse::<usize>()
@@ -1777,7 +1786,9 @@ fn import_edge_via_glue(
             .iter()
             .map(|(i, r)| r.clone().unwrap_or_else(|| i.clone()))
             .collect(),
-        ImportItems::Wildcard => unreachable!("wildcards do not take the set-difference glue (layer mechanism)"),
+        ImportItems::Wildcard => {
+            unreachable!("wildcards do not take the set-difference glue (layer mechanism)")
+        }
     };
     // Materialize the visible names (the current env's module domain;
     // mirrors the original: the lexical surface at the statement position).
@@ -1844,7 +1855,6 @@ fn import_edge_via_glue(
     );
 }
 
-
 impl Ctx {
     /// Handling of a single top-level import edge (env injection + slot
     /// filling + export surface; called by pass two's **source-order
@@ -1853,16 +1863,16 @@ impl Ctx {
     /// native statement-by-statement evaluation, so it must not be hoisted
     /// wholesale).
     #[allow(clippy::too_many_arguments)]
-/// Zone-1 glue edge handling: the statement text drives the original
-/// `Eval for ast::ModuleImport` via `rt::eval_import` (source
-/// dispatch/loading including file-not-found plus the cycle/bare-name
-/// tiers/Items nesting and unresolved/all warnings — all original code);
-/// the difference set fills slots and re-exports by the statically known
-/// binding names.
-/// `bare_expected`: the static name for the bare form (the stem of a Str
-/// literal / the last segment of a module chain or the root name); pass
-/// None for a dynamic-source bare (the original reports the dynamic error
-/// at runtime).
+    /// Zone-1 glue edge handling: the statement text drives the original
+    /// `Eval for ast::ModuleImport` via `rt::eval_import` (source
+    /// dispatch/loading including file-not-found plus the cycle/bare-name
+    /// tiers/Items nesting and unresolved/all warnings — all original code);
+    /// the difference set fills slots and re-exports by the statically known
+    /// binding names.
+    /// `bare_expected`: the static name for the bare form (the stem of a Str
+    /// literal / the last segment of a module chain or the root name); pass
+    /// None for a dynamic-source bare (the original reports the dynamic error
+    /// at runtime).
     /// One top-level import edge: env injection + slot/define emission,
     /// dispatched by edge kind (external package / arbitrary-expression
     /// source / module-value chain / internal file target). `continue` in
@@ -1945,7 +1955,11 @@ impl Ctx {
                 ImportItems::Rename(name) => name.clone(),
                 _ => spec_name(&spec),
             };
-            let slot = format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&name));
+            let slot = format!(
+                "IMPORT_{}_{}",
+                sanitize_key(&plan.mod_name),
+                sanitize_key(&name)
+            );
             state_fields.push((plan.path.clone(), slot.clone()));
             let ext_at = self.span_of(edge.span);
             if input.dep_entries.contains_key(&spec) {
@@ -2038,7 +2052,12 @@ impl Ctx {
                                 Ref::ModuleField {
                                     expr: format!("rt::read(&__st.{slot})?"),
                                     name: wname.clone(),
-                                    file: item_file(export_table, &self.slot_files, &edge.target, wname),
+                                    file: item_file(
+                                        export_table,
+                                        &self.slot_files,
+                                        &edge.target,
+                                        wname,
+                                    ),
                                 },
                             ));
                             let _ = writeln!(
@@ -2091,10 +2110,7 @@ impl Ctx {
                     .expect("source_node casts");
                 let mut env_m = env.clone();
                 let value = self.expr(expr_node, &mut env_m);
-                let mslot = format!(
-                    "IMPORT_{}_WILD_SRC",
-                    sanitize_key(&plan.mod_name)
-                );
+                let mslot = format!("IMPORT_{}_WILD_SRC", sanitize_key(&plan.mod_name));
                 state_fields.push((plan.path.clone(), mslot.clone()));
                 let at = self.span_of(edge.span);
                 let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {value})?;");
@@ -2155,8 +2171,7 @@ impl Ctx {
             // enum` and the dynamic error for `import p` where p is a
             // string).
             if !matches!(edge.items, ImportItems::Wildcard) {
-                let bare =
-                    fields.last().cloned().unwrap_or_else(|| root.clone());
+                let bare = fields.last().cloned().unwrap_or_else(|| root.clone());
                 import_edge_via_glue(
                     self,
                     plan,
@@ -2204,17 +2219,9 @@ impl Ctx {
                     let name = fields.last().cloned().unwrap_or_else(|| root.clone());
                     // module_list_slot verbatim (same formula as the
                     // glue minter and the export table — see plan.rs).
-                    let slot = super::plan::module_list_slot(
-                        &plan.mod_name,
-                        root,
-                        fields,
-                        &name,
-                    );
+                    let slot = super::plan::module_list_slot(&plan.mod_name, root, fields, &name);
                     state_fields.push((plan.path.clone(), slot.clone()));
-                    let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{slot}, {expr})?;"
-                    );
+                    let _ = writeln!(import_fills, "    rt::fill(&__st.{slot}, {expr})?;");
                     env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(
                         file_defines,
@@ -2223,17 +2230,9 @@ impl Ctx {
                     );
                 }
                 ImportItems::Rename(name) => {
-                    let slot = super::plan::module_list_slot(
-                        &plan.mod_name,
-                        root,
-                        fields,
-                        name,
-                    );
+                    let slot = super::plan::module_list_slot(&plan.mod_name, root, fields, name);
                     state_fields.push((plan.path.clone(), slot.clone()));
-                    let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{slot}, {expr})?;"
-                    );
+                    let _ = writeln!(import_fills, "    rt::fill(&__st.{slot}, {expr})?;");
                     env.module.push((name.clone(), Ref::Slot(slot.clone())));
                     let _ = writeln!(
                         file_defines,
@@ -2243,16 +2242,9 @@ impl Ctx {
                 }
                 // Module rename + member list: double binding.
                 ImportItems::RenameList(mname, list) => {
-                    let mslot = format!(
-                        "IMPORT_{}_{}",
-                        sanitize(&plan.mod_name),
-                        sanitize(mname)
-                    );
+                    let mslot = format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(mname));
                     state_fields.push((plan.path.clone(), mslot.clone()));
-                    let _ = writeln!(
-                        import_fills,
-                        "    rt::fill(&__st.{mslot}, {expr})?;"
-                    );
+                    let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {expr})?;");
                     env.module.push((mname.clone(), Ref::Slot(mslot.clone())));
                     let _ = writeln!(
                         file_defines,
@@ -2261,20 +2253,14 @@ impl Ctx {
                     );
                     for (item, rename) in list {
                         let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&as_name)
-                        );
+                        let slot =
+                            format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&as_name));
                         state_fields.push((plan.path.clone(), slot.clone()));
                         let item_expr = format!(
                             "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
                             escape(item)
                         );
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {item_expr})?;"
-                        );
+                        let _ = writeln!(import_fills, "    rt::fill(&__st.{slot}, {item_expr})?;");
                         env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
                         let _ = writeln!(
                             file_defines,
@@ -2286,20 +2272,14 @@ impl Ctx {
                 ImportItems::List(list) => {
                     for (item, rename) in list {
                         let as_name = rename.clone().unwrap_or_else(|| item.clone());
-                        let slot = format!(
-                            "IMPORT_{}_{}",
-                            sanitize(&plan.mod_name),
-                            sanitize(&as_name)
-                        );
+                        let slot =
+                            format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(&as_name));
                         state_fields.push((plan.path.clone(), slot.clone()));
                         let item_expr = format!(
                             "rt::field(&({expr}), \"{}\", engine, context, SPAN)?",
                             escape(item)
                         );
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{slot}, {item_expr})?;"
-                        );
+                        let _ = writeln!(import_fills, "    rt::fill(&__st.{slot}, {item_expr})?;");
                         env.module.push((as_name.clone(), Ref::Slot(slot.clone())));
                         let _ = writeln!(
                             file_defines,
@@ -2315,14 +2295,14 @@ impl Ctx {
                     // file), expand by that file's export table (e.g.
                     // `import cetz.draw: *`).
                     let mut cur: Option<String> = None;
-                    if let Some((_, r#ref)) =
-                        env.module.iter().rev().find(|(n, _)| n == root)
-                        && let super::ctx::Ref::Slot(slot) = r#ref {
-                            cur = slot_target_file(slot, plans);
-                            if std::env::var_os("TRUST_TRACE_WILD").is_some() {
-                                eprintln!("[wild] root={root} slot={slot} → {cur:?}");
-                            }
+                    if let Some((_, r#ref)) = env.module.iter().rev().find(|(n, _)| n == root)
+                        && let super::ctx::Ref::Slot(slot) = r#ref
+                    {
+                        cur = slot_target_file(slot, plans);
+                        if std::env::var_os("TRUST_TRACE_WILD").is_some() {
+                            eprintln!("[wild] root={root} slot={slot} → {cur:?}");
                         }
+                    }
                     for field in fields {
                         let next = cur
                             .as_ref()
@@ -2372,10 +2352,7 @@ impl Ctx {
                         );
                         state_fields.push((plan.path.clone(), mslot.clone()));
                         let at = self.span_of(edge.span);
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{mslot}, {expr})?;"
-                        );
+                        let _ = writeln!(import_fills, "    rt::fill(&__st.{mslot}, {expr})?;");
                         let w = format!("__wild{}", self.fresh_id());
                         let _ = writeln!(
                             import_fills,
@@ -2424,10 +2401,7 @@ impl Ctx {
             // file-not-found); runtime layer + runtime export-surface
             // enumeration.
             if matches!(edge.items, ImportItems::Wildcard) && !edge.raw.is_empty() {
-                let mslot = format!(
-                    "IMPORT_{}_WILD",
-                    sanitize_key(&plan.mod_name)
-                );
+                let mslot = format!("IMPORT_{}_WILD", sanitize_key(&plan.mod_name));
                 state_fields.push((plan.path.clone(), mslot.clone()));
                 let at = self.span_of(edge.span);
                 let raw_escaped = escape(&edge.raw);
@@ -2498,17 +2472,19 @@ impl Ctx {
                 // A bare import's derived name must be a valid
                 // identifier (upstream BareImportError::PathInvalid,
                 // import.rs:99-101; `as` renames escape the check).
-                if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound)
-                {
+                if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound) {
                     let message = "module name would not be a valid identifier".to_string();
                     self.diag(edge.span, message.clone());
-                    let _ =
-                        writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+                    let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
                     return;
                 }
                 let slot = match import_slots.get(&edge.target) {
                     Some(slot) => slot.clone(),
-                    None => format!("IMPORT_{}_{}", sanitize_key(&plan.mod_name), sanitize_key(&bound)),
+                    None => format!(
+                        "IMPORT_{}_{}",
+                        sanitize_key(&plan.mod_name),
+                        sanitize_key(&bound)
+                    ),
                 };
                 let existed = import_slots
                     .insert(edge.target.clone(), slot.clone())
@@ -2533,11 +2509,7 @@ impl Ctx {
             ImportItems::RenameList(mname, list) => {
                 let mslot = match import_slots.get(&edge.target) {
                     Some(slot) => slot.clone(),
-                    None => format!(
-                        "IMPORT_{}_{}",
-                        sanitize(&plan.mod_name),
-                        sanitize(mname)
-                    ),
+                    None => format!("IMPORT_{}_{}", sanitize(&plan.mod_name), sanitize(mname)),
                 };
                 let existed = import_slots
                     .insert(edge.target.clone(), mslot.clone())
@@ -2561,34 +2533,27 @@ impl Ctx {
                     // value, the remaining chain walks fields — the
                     // same split as the plain List arm (a dotted name
                     // used as a single field would never match).
-                    let (first, rest): (&str, &[&str]) =
-                        match name.split_once('.') {
-                            Some((f, r)) => {
-                                (f, r.split('.').collect::<Vec<_>>().leak())
-                            }
-                            None => (name.as_str(), &[]),
-                        };
-                    let as_name =
-                        rename.clone().unwrap_or_else(|| name.clone());
+                    let (first, rest): (&str, &[&str]) = match name.split_once('.') {
+                        Some((f, r)) => (f, r.split('.').collect::<Vec<_>>().leak()),
+                        None => (name.as_str(), &[]),
+                    };
+                    let as_name = rename.clone().unwrap_or_else(|| name.clone());
                     // `Ref::ModuleField` semantics: `expr` is the module
                     // value, `name` the field to access (ref_value adds
                     // that one hop) — so the chain covers all segments
                     // except the last, which is the name.
                     let segments: Vec<&str> =
                         std::iter::once(first).chain(rest.iter().copied()).collect();
-                    let (field_name, chain) = (
-                        segments.last().copied().unwrap_or(first),
-                        {
-                            let mut c = format!("rt::read(&__st.{mslot})?");
-                            for seg in segments[..segments.len() - 1].iter() {
-                                c = format!(
-                                    "rt::field(&({c}), \"{}\", engine, context, SPAN)?",
-                                    escape(seg)
-                                );
-                            }
-                            c
-                        },
-                    );
+                    let (field_name, chain) = (segments.last().copied().unwrap_or(first), {
+                        let mut c = format!("rt::read(&__st.{mslot})?");
+                        for seg in segments[..segments.len() - 1].iter() {
+                            c = format!(
+                                "rt::field(&({c}), \"{}\", engine, context, SPAN)?",
+                                escape(seg)
+                            );
+                        }
+                        c
+                    });
                     env.module.push((
                         as_name.clone(),
                         Ref::ModuleField {
@@ -2617,16 +2582,17 @@ impl Ctx {
                     // field chain is materialized into an independent
                     // IMPORT slot.
                     let (first, rest): (&str, &[&str]) = match name.split_once('.') {
-                        Some((f, r)) => {
-                            (f, r.split('.').collect::<Vec<_>>().leak())
-                        }
+                        Some((f, r)) => (f, r.split('.').collect::<Vec<_>>().leak()),
                         None => (name.as_str(), &[]),
                     };
                     let Some(slot) = exports.get(first) else {
                         // Upstream reports the unresolved component as an
                         // eval error (import.rs:121); the detailed note
                         // stays in the translator's degradation log.
-                        self.diag(edge.span, format!("`{}` does not export `{first}`", edge.target));
+                        self.diag(
+                            edge.span,
+                            format!("`{}` does not export `{first}`", edge.target),
+                        );
                         let _ = writeln!(
                             import_fills,
                             "    rt::bail_value(engine, \"unresolved import\")?;"
@@ -2655,11 +2621,9 @@ impl Ctx {
                                 escape(field)
                             );
                         }
-                        let _ = writeln!(
-                            import_fills,
-                            "    rt::fill(&__st.{dot_slot}, {chain})?;"
-                        );
-                        env.module.push((as_name.clone(), Ref::Slot(dot_slot.clone())));
+                        let _ = writeln!(import_fills, "    rt::fill(&__st.{dot_slot}, {chain})?;");
+                        env.module
+                            .push((as_name.clone(), Ref::Slot(dot_slot.clone())));
                         let _ = writeln!(
                             file_defines,
                             "    scope.define(\"{}\", rt::read(&__st.{dot_slot})?);",
@@ -2737,10 +2701,7 @@ impl StateNode {
             // The root's body becomes __State's fields directly.
             body.push_str(&inner);
         } else {
-            let _ = writeln!(
-                decls,
-                "#[derive(Default)]\nstruct {prefix} {{\n{inner}}}\n"
-            );
+            let _ = writeln!(decls, "#[derive(Default)]\nstruct {prefix} {{\n{inner}}}\n");
         }
     }
 }
@@ -2757,9 +2718,7 @@ fn nest_state_access(text: &str, paths: &std::collections::HashMap<String, Strin
         out.push_str(&text[pos..at]);
         let mut end = at + 5;
         let bytes = text.as_bytes();
-        while end < bytes.len()
-            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-        {
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
             end += 1;
         }
         let ident = &text[at + 5..end];
@@ -2788,4 +2747,3 @@ struct ImportEdgeIo<'a> {
     import_slots: &'a mut std::collections::HashMap<String, String>,
     binding_code: &'a mut String,
 }
-

@@ -39,7 +39,8 @@ fn parse_note(line: &str) -> Option<Note> {
     let rest = line.trim_start();
     let (kind, text) = ["Error", "Warning", "Hint"].iter().find_map(|k| {
         let prefix = format!("// {k}: ");
-        rest.strip_prefix(&prefix).map(|t| (k.to_lowercase(), t.to_string()))
+        rest.strip_prefix(&prefix)
+            .map(|t| (k.to_lowercase(), t.to_string()))
     })?;
     let text = if kind == "hint" {
         text
@@ -88,16 +89,25 @@ fn sections_of(text: &str) -> Vec<Section> {
     let mut cur: Option<Section> = None;
     for line in text.split('\n') {
         let t = line.trim_end();
-        if let Some(inner) = t.strip_prefix("--- ") && let Some(header) = inner.strip_suffix(" ---") {
+        if let Some(inner) = t.strip_prefix("--- ")
+            && let Some(header) = inner.strip_suffix(" ---")
+        {
             if let Some(sec) = cur.take() {
                 out.push(sec);
             }
             let mut parts = header.split_whitespace();
             let name = parts.next().unwrap_or_default().to_string();
             let attrs = parts.map(str::to_string).collect();
-            cur = Some(Section { name, attrs, notes: Vec::new(), body: Vec::new() });
+            cur = Some(Section {
+                name,
+                attrs,
+                notes: Vec::new(),
+                body: Vec::new(),
+            });
         } else if let Some(sec) = cur.as_mut() {
-            if t.trim_start().starts_with("// ") && let Some(note) = parse_note(t) {
+            if t.trim_start().starts_with("// ")
+                && let Some(note) = parse_note(t)
+            {
                 sec.notes.push(note);
             } else {
                 sec.body.push(line.to_string());
@@ -117,7 +127,13 @@ fn crate_key(rel: &Path) -> String {
         .replace(['/', '.'], "-")
         .to_lowercase();
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -135,7 +151,10 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
     // reg 文件的类别键加前缀,与官方类目隔离。
     for f in files {
         let in_reg = f.starts_with(&reg);
-        let rel = f.strip_prefix(if in_reg { &reg } else { &suite }).unwrap().to_path_buf();
+        let rel = f
+            .strip_prefix(if in_reg { &reg } else { &suite })
+            .unwrap()
+            .to_path_buf();
         let text = std::fs::read_to_string(&f).expect("read suite file");
         let secs = sections_of(&text);
         let key = if in_reg {
@@ -150,7 +169,12 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
             continue;
         }
         for sec in secs {
-            assert!(seen.insert(sec.name.clone()), "重复测试名 {} ({})", sec.name, rel.display());
+            assert!(
+                seen.insert(sec.name.clone()),
+                "重复测试名 {} ({})",
+                sec.name,
+                rel.display()
+            );
             let file_rel = rel
                 .parent()
                 .map(|p| p.join(format!("__t__{}.typ", sec.name)))
@@ -184,10 +208,8 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
     std::fs::create_dir_all(&cats_dir).expect("create cats");
     std::fs::create_dir_all(&gen_dir).expect("create gen");
 
-    let counts: BTreeMap<String, usize> = crates
-        .iter()
-        .map(|(k, v)| (k.clone(), v.len()))
-        .collect();
+    let counts: BTreeMap<String, usize> =
+        crates.iter().map(|(k, v)| (k.clone(), v.len())).collect();
     let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
     std::thread::scope(|s| {
         for (key, sections) in &crates {
@@ -231,7 +253,10 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
                     std::fs::write(&out, code).expect("write gen file");
                 }
                 if tree.is_empty() {
-                    errors.lock().unwrap().push(format!("类别 {key} 翻译产物为空"));
+                    errors
+                        .lock()
+                        .unwrap()
+                        .push(format!("类别 {key} 翻译产物为空"));
                 }
             });
         }
@@ -246,7 +271,9 @@ fn walk_typ(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         let mut level: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         level.sort();
         for p in level {

@@ -1,24 +1,26 @@
 //! `trust_runtime` 的 eval 分区(自 lib.rs 机械拆分)。
 
 #![allow(unused_imports)]
-use crate::{assign::*, calls::*, content::*, context::*, destruct::*, host::*, lookup::*, macros::*, slots::*, stub::*, styles::*};
+use crate::{
+    assign::*, calls::*, content::*, context::*, destruct::*, host::*, lookup::*, macros::*,
+    slots::*, stub::*, styles::*,
+};
 
 use comemo::{Track, Tracked, TrackedMut};
+use ecow::{EcoString, EcoVec, eco_format, eco_vec};
 use typst::Library;
 use typst::World;
 use typst::diag::{At, SourceResult, bail};
+use typst::diag::{Hint, SourceDiagnostic, Trace};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func,
-    IntoValue, Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
+    Arg, Args, Array, Binding, Capturer, Closure, ClosureNode, Content, Context, Func, IntoValue,
+    Module, Scope, Scopes, Selector, Str, Transformation, Value, ops,
 };
 use typst::introspection::{EmptyIntrospector, Introspector};
-use typst::utils::{LazyHash, Protected};
 use typst::syntax::ast::{self, AstNode};
 use typst::syntax::{Span, Spanned, SyntaxKind};
-use ecow::{EcoString, EcoVec, eco_format, eco_vec};
-use typst::diag::{Hint, SourceDiagnostic, Trace};
-
+use typst::utils::{LazyHash, Protected};
 
 /// **Math expressions** outside the v1 language subset (Equation): their
 /// volume is large but they pose almost no performance problem — they are
@@ -36,7 +38,6 @@ pub fn eval_expr(
     let func = context_closure(src, Span::detached(), 0, captured, pending, engine);
     func.call::<[Value; 0]>(engine, context, [])
 }
-
 
 /// Interprets an **import statement** (glue; mirrors `Eval for
 /// ast::ModuleImport` — import.rs:15-178, a private trait impl, driven
@@ -105,13 +106,12 @@ pub fn eval_import(
                 return Err(eco_vec![SourceDiagnostic::error(
                     span,
                     eco_format!("import diff is missing binding `{name}` (generator bug)"),
-                )])
+                )]);
             }
         }
     }
     Ok(out)
 }
-
 
 /// Interprets an **include statement** (same glue; mirrors `Eval for
 /// ast::ModuleInclude`): returns its content, with no bindings read back.
@@ -154,7 +154,6 @@ pub fn eval_include(
         )]),
     }
 }
-
 
 /// Interpreted evaluation with read-back (the escape hatch for `#let`
 /// embedded in math): **drives the pub `Vm`/`Eval` directly** (mirroring
@@ -207,7 +206,6 @@ pub fn eval_vm_exports(
         .collect();
     Ok((value, out))
 }
-
 
 /// Propagate a collected diagnostic list (the dict literal's
 /// invalid-key aggregation: all keys reported together, mirrors

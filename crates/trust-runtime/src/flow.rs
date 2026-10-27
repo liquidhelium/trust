@@ -49,13 +49,14 @@ pub fn warn_return_discard(
 ) {
     use typst::foundations::Selector;
     use typst::introspection::{Counter, State};
-    let Some(FlowEvent::Return(_, span, false)) = flow else { return };
-    let Value::Content(tree) = &joined else { return };
+    let Some(FlowEvent::Return(_, span, false)) = flow else {
+        return;
+    };
+    let Value::Content(tree) = &joined else {
+        return;
+    };
 
-    let selector = Selector::Or(ecow::eco_vec![
-        State::select_any(),
-        Counter::select_any()
-    ]);
+    let selector = Selector::Or(ecow::eco_vec![State::select_any(), Counter::select_any()]);
 
     let mut warning = typst::diag::warning!(
         *span,

@@ -236,32 +236,10 @@ pub fn closure_source(id: typst::syntax::FileId) -> Option<String> {
 /// snippet is also registered in [`CLOSURE_SOURCES`] (diagnostic lookup,
 /// cold path; the virtual file lets spans resolve to snippet lines).
 pub fn parse_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
-    let trimmed = src.trim_start();
-    let text = if trimmed.starts_with("let ") {
-        format!("#{trimmed}")
-    } else {
-        format!("#let __trust_closure = ({trimmed})")
-    };
-    let n = CLOSURE_SOURCES.read().unwrap().len();
-    let id = typst::syntax::RootedPath::new(
-        typst::syntax::VirtualRoot::Project,
-        typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
-            .expect("valid closure path"),
-    )
-    .intern();
+    let text = wrap_closure_source(src);
+    let id = register_closure_source(text.clone());
     let source = typst::syntax::Source::new(id, text.clone());
-    CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
-    let node = find_closure_node(source.root())
-        .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
-        .clone();
-    let num_pos_params = node
-        .cast::<ast::Closure>()
-        .expect("closure node casts")
-        .params()
-        .children()
-        .filter(|p| matches!(p, ast::Param::Pos(_)))
-        .count();
-    (node, num_pos_params)
+    locate_closure(&source, &text)
 }
 
 fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
@@ -271,30 +249,57 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
     if let Some(hit) = CACHE.read().unwrap().get(src) {
         return hit.clone();
     }
-    // Valid markup forms: a named binding embeds directly; anything else (a
-    // bare closure / context body) is wrapped in parentheses — markup's
-    // `#let x = expr` init ends **at the end of the line**, so a multi-line
-    // bare closure body would be truncated to an empty body; the
-    // parentheses force a code context that spans lines.
+    let text = wrap_closure_source(src);
+    let id = register_closure_source(text.clone());
+    let source = typst::syntax::Source::new(id, text.clone());
+    let pair = locate_closure(&source, &text);
+    CACHE
+        .write()
+        .unwrap()
+        .insert(src.to_string(), pair.clone());
+    pair
+}
+
+/// Wraps a raw snippet into parseable markup source. Valid markup forms: a
+/// named binding (`let f(x) = ..`) embeds directly; anything else (a bare
+/// closure / context body) is wrapped in parentheses — markup's
+/// `#let x = expr` init ends **at the end of the line**, so a multi-line
+/// bare closure body would be truncated to an empty body; the parentheses
+/// force a code context that spans lines.
+fn wrap_closure_source(src: &str) -> String {
     let trimmed = src.trim_start();
-    let text = if trimmed.starts_with("let ") {
+    if trimmed.starts_with("let ") {
         format!("#{trimmed}")
     } else {
         format!("#let __trust_closure = ({trimmed})")
-    };
-    let n = CLOSURE_SOURCES.read().unwrap().len();
+    }
+}
+
+/// Allocates a virtual FileId for a closure snippet and registers the
+/// snippet text for diagnostic lookup. One write-lock section covers the
+/// id allocation and the push, so concurrent initialization cannot mint
+/// two ids for the same virtual path.
+fn register_closure_source(text: String) -> typst::syntax::FileId {
+    let mut guard = CLOSURE_SOURCES.write().unwrap();
     let id = typst::syntax::RootedPath::new(
         typst::syntax::VirtualRoot::Project,
-        typst::syntax::VirtualPath::new(format!("__trust_closure_{n}.typ"))
+        typst::syntax::VirtualPath::new(format!("__trust_closure_{}.typ", guard.len()))
             .expect("valid closure path"),
     )
     .intern();
-    let source = typst::syntax::Source::new(id, text.clone());
-    CLOSURE_SOURCES.write().unwrap().push((id, text.clone()));
-    // The snippet may be a bare closure `(x) => ..` or a named binding
-    // `f(x) = ..` (a LetBinding wrapping the Closure); take the first
-    // Closure node either way. The named form keeps its name, so recursive
-    // self-reference works.
+    guard.push((id, text));
+    id
+}
+
+/// Parses the wrapped snippet and locates its Closure node — a bare
+/// closure `(x) => ..` or a named binding `f(x) = ..` (a LetBinding
+/// wrapping the Closure; the named form keeps its name, so recursive
+/// self-reference works) — returning the node and its positional-parameter
+/// count.
+fn locate_closure(
+    source: &typst::syntax::Source,
+    text: &str,
+) -> (typst_syntax::SyntaxNode, usize) {
     let node = find_closure_node(source.root())
         .unwrap_or_else(|| panic!("closure source parses to a closure: {text:?}"))
         .clone();
@@ -305,10 +310,6 @@ fn cached_closure_node(src: &str) -> (typst_syntax::SyntaxNode, usize) {
         .children()
         .filter(|p| matches!(p, ast::Param::Pos(_)))
         .count();
-    CACHE
-        .write()
-        .unwrap()
-        .insert(src.to_string(), (node.clone(), num_pos_params));
     (node, num_pos_params)
 }
 

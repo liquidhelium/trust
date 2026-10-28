@@ -427,16 +427,33 @@ impl Ctx {
                         }
                     }
                     Some(ast::Imports::Items(items)) => {
+                        // Walk the full item path component by component
+                        // (mirrors typst-eval's peekable walk in
+                        // import.rs): `import x: a.b as c` resolves a,
+                        // then b. A single-component path emits the same
+                        // single rt::field call as before.
                         for item in items.iter() {
-                            let original = item.original_name().as_str().to_string();
                             let bound = item.bound_name().as_str().to_string();
                             let rust = bind_local(&mut env, &bound);
                             let at = self.span_of(stmt.span());
-                            let _ = writeln!(
-                                out,
-                                "    let mut {rust} = rt::field(&({module_expr}), \"{}\", engine, context, {at})?;",
-                                escape(&original)
-                            );
+                            let mut chain = format!("&({module_expr})");
+                            let mut first = true;
+                            for component in item.path().iter() {
+                                // The first hop starts on a reference;
+                                // every later hop borrows the previous
+                                // hop's result.
+                                let base = if first {
+                                    chain
+                                } else {
+                                    format!("&({chain})")
+                                };
+                                first = false;
+                                chain = format!(
+                                    "rt::field({base}, \"{}\", engine, context, {at})?",
+                                    escape(component.as_str())
+                                );
+                            }
+                            let _ = writeln!(out, "    let mut {rust} = {chain};");
                         }
                     }
                 }

@@ -508,17 +508,16 @@ fn assemble_package_world(
         }
     }
 
-    // Slot name → file index (built once before pass two starts, used by
-    // in-body module-value-chain wildcards):
-    // Slot name → file index (built once, used by in-body
-    // module-value-chain wildcards):
-    // V{i}_{name} → plans[i].path; IMPORT_{mod}_{bound} → edge target.
+    // Slot name → owning file (built once before pass two starts, used by
+    // in-body module-value-chain wildcards): keyed by the same slot names
+    // the env/plans side mints (V{fresh_id}_{name} value slots;
+    // IMPORT_{mod}_{bound} and module-list slots, sanitized exactly as
+    // plan.rs mints them).
     if cx.slot_files.is_none() {
         let mut idx = std::collections::BTreeMap::new();
-        for (i, p) in plans.iter().enumerate() {
-            for (name, slot) in &p.tops {
-                let _ = slot;
-                idx.insert(format!("V{i}_{}", sanitize_key(name)), p.path.clone());
+        for p in plans {
+            for (_name, slot) in &p.tops {
+                idx.insert(slot.clone(), p.path.clone());
             }
             for edge in &p.imports {
                 if edge.is_include {
@@ -536,8 +535,13 @@ fn assemble_package_world(
                         _ => continue,
                     }
                 };
+                // Sanitized exactly as plan.rs mints the IMPORT_ slots.
                 idx.insert(
-                    format!("IMPORT_{}_{}", p.mod_name, bound),
+                    format!(
+                        "IMPORT_{}_{}",
+                        sanitize_key(&p.mod_name),
+                        sanitize_key(&bound)
+                    ),
                     edge.target.clone(),
                 );
                 if let Some((root, fields)) = &edge.module_access {
@@ -1714,72 +1718,6 @@ fn item_file(
     slot_files.as_ref()?.get(slot).cloned()
 }
 
-/// Take the short name from a package spec (`@preview/oxifmt:1.0.0` →
-/// `oxifmt`). Extracting the spec prefix of a merge key
-/// `{spec}/{path-inside-package}` (the spec itself contains `/`; bounded
-/// by the first `/` after the colon); returns an empty string for
-/// non-merge keys.
-///
-/// Slot name → owning file (`V{i}_…` where i is the plan index;
-/// `IMPORT_{mod}_…` reverse-looks-up that mod's internal import edge
-/// target). Used by module-value-chain wildcard resolution.
-fn slot_target_file(slot: &str, plans: &[super::plan::FilePlan]) -> Option<String> {
-    if let Some(rest) = slot.strip_prefix('V')
-        && let Some((idx, _)) = rest.split_once('_')
-        && let Ok(i) = idx.parse::<usize>()
-        && i < plans.len()
-    {
-        return Some(plans[i].path.clone());
-    }
-    if let Some(rest) = slot.strip_prefix("IMPORT_") {
-        // The mod_name itself contains underscores (m55_anchors) — strip
-        // by "plan prefix + _".
-        let plan = plans.iter().find(|p| {
-            rest.strip_prefix(&p.mod_name)
-                .and_then(|r| r.strip_prefix('_'))
-                .is_some()
-        })?;
-        let plan = &plans[plans.iter().position(|p| std::ptr::eq(p, plan)).unwrap()];
-        for edge in &plan.imports {
-            if edge.is_include {
-                continue;
-            }
-            // External packages (including merged dependencies): the
-            // binding name is the spec name or the rename.
-            let bound = if edge.external {
-                match &edge.items {
-                    super::plan::ImportItems::Rename(name)
-                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
-                    _ => spec_name(&edge.target),
-                }
-            } else {
-                match &edge.items {
-                    super::plan::ImportItems::Bare => module_stem_pub(&edge.target),
-                    super::plan::ImportItems::Rename(name)
-                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
-                    _ => continue,
-                }
-            };
-            let via = edge.module_access.as_ref().map(|(root, fields)| {
-                let via_bound = match &edge.items {
-                    super::plan::ImportItems::Rename(name)
-                    | super::plan::ImportItems::RenameList(name, _) => name.clone(),
-                    super::plan::ImportItems::Bare => {
-                        fields.last().cloned().unwrap_or_else(|| root.clone())
-                    }
-                    _ => bound.clone(),
-                };
-                super::plan::module_list_slot(&plan.mod_name, root, fields, &via_bound)
-            });
-            if format!("IMPORT_{}_{}", plan.mod_name, bound) == *slot
-                || via.as_deref() == Some(slot)
-            {
-                return Some(edge.target.clone());
-            }
-        }
-    }
-    None
-}
 
 /// A module-level reachable copy of module_stem (pub(super) inside
 /// plan.rs).
@@ -1961,7 +1899,7 @@ impl Ctx {
         } else if edge.source_node.is_some() {
             self.import_edge_source_expr(edge, plan, &mut io);
         } else if edge.module_access.is_some() {
-            self.import_edge_module_value(edge, plan, plans, export_table, &mut io);
+            self.import_edge_module_value(edge, plan, export_table, &mut io);
         } else {
             self.import_edge_internal(edge, plan, input, plans, export_table, &mut io);
         }
@@ -2194,7 +2132,6 @@ impl Ctx {
         &mut self,
         edge: &super::plan::ImportEdge,
         plan: &super::plan::FilePlan,
-        plans: &[super::plan::FilePlan],
         export_table: &std::collections::BTreeMap<
             String,
             std::collections::BTreeMap<String, String>,
@@ -2345,7 +2282,7 @@ impl Ctx {
                     if let Some((_, r#ref)) = env.module.iter().rev().find(|(n, _)| n == root)
                         && let super::ctx::Ref::Slot(slot) = r#ref
                     {
-                        cur = slot_target_file(slot, plans);
+                        cur = self.slot_files.as_ref().and_then(|m| m.get(slot).cloned());
                         if std::env::var_os("TRUST_TRACE_WILD").is_some() {
                             eprintln!("[wild] root={root} slot={slot} → {cur:?}");
                         }
@@ -2355,7 +2292,7 @@ impl Ctx {
                             .as_ref()
                             .and_then(|f| export_table.get(f.as_str()))
                             .and_then(|exports| exports.get(field))
-                            .and_then(|slot| slot_target_file(slot, plans));
+                            .and_then(|slot| self.slot_files.as_ref()?.get(slot).cloned());
                         match next {
                             Some(f) => cur = Some(f),
                             None => {

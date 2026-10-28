@@ -1077,25 +1077,38 @@ fn collect_translatable_deps(
                 }
                 eprintln!("missing dependency fetched automatically: {spec}");
             }
-            let manifest = match std::fs::read_to_string(dir.join("typst.toml")) {
+            let manifest_text = match std::fs::read_to_string(dir.join("typst.toml")) {
                 Ok(m) => m,
                 Err(_) => {
                     eprintln!("failed to read dependency manifest: {spec}");
                     continue;
                 }
             };
-            let Ok(table) = manifest.parse::<toml::Table>() else {
-                eprintln!("failed to parse dependency manifest: {spec}");
-                continue;
+            // The exact protocol of typst-eval's package import: a typed
+            // manifest parse, then validate against the spec (mismatched
+            // name/version or a too-new `compiler` floor means the cached
+            // tree is not what the import asked for — fall back to runtime
+            // interpretation rather than translating the wrong package).
+            let parsed_spec = match spec.parse::<typst_syntax::package::PackageSpec>() {
+                Ok(s) => s,
+                Err(_) => {
+                    eprintln!("unsupported dependency spec format: {spec}");
+                    continue;
+                }
             };
-            let Some(entry) = table
-                .get("package")
-                .and_then(|p| p.get("entrypoint"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-            else {
+            let manifest =
+                match toml::from_str::<typst_syntax::package::PackageManifest>(&manifest_text) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        eprintln!("failed to parse dependency manifest: {spec}");
+                        continue;
+                    }
+                };
+            if let Err(msg) = manifest.validate(&parsed_spec) {
+                eprintln!("dependency manifest mismatch ({spec}): {msg}");
                 continue;
-            };
+            }
+            let entry = manifest.package.entrypoint.to_string();
             let src_root = entry
                 .rsplit_once('/')
                 .map(|(d, _)| format!("{d}/"))

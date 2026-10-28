@@ -129,6 +129,7 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.pad(\"x\")",
             "m.dec(3.14159)",
         ],
+        "pkg_nested_item" => vec!["m.renamed()", "m.plain()"],
         "sysinputs" => vec!["m.who", "m.shout(\"hi\")"],
         "set_show" => vec!["m.styled", "m.cond(true)", "m.cond(false)", "m.shown"],
         "context" => vec!["m.ctx-size", "m.ctx-call"],
@@ -339,6 +340,7 @@ fn gen_module_init(fixture: &str) -> trust_world::ModuleInit {
         "set_show" => trust_diff::gen_modules::set_show::module_init,
         "context" => trust_diff::gen_modules::context::module_init,
         "pkg_include" => trust_diff::gen_modules::pkg_include::module_init,
+        "pkg_nested_item" => trust_diff::gen_modules::pkg_nested_item::module_init,
         "regress" => trust_diff::gen_modules::regress::module_init,
         _ => panic!("unregistered fixture {fixture}"),
     }
@@ -364,6 +366,7 @@ diff_test!(
     toplevel,
     destructuring,
     sysinputs,
+    pkg_nested_item,
     set_show,
     context,
     pkg_include,
@@ -400,6 +403,7 @@ fn all_fixtures_covered() {
         "set_show",
         "context",
         "pkg_include",
+        "pkg_nested_item",
         "regress",
     ];
     for name in declared.keys() {

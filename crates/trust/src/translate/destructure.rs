@@ -52,6 +52,13 @@ impl Ctx {
             ast::Pattern::Destructuring(d) => {
                 let at = self.span_of(d.span());
                 let id = self.fresh_id();
+                let n_pattern = d
+                    .items()
+                    .filter(|it| matches!(it, ast::DestructuringItem::Pattern(_)))
+                    .count();
+                let has_spread = d
+                    .items()
+                    .any(|it| matches!(it, ast::DestructuringItem::Spread(_)));
                 let tmp = format!("__d{id}");
                 let n_items = d.items().count();
                 let mut out = format!("let {tmp} = {value};\n");
@@ -82,7 +89,9 @@ impl Ctx {
                 for item in d.items() {
                     match item {
                         ast::DestructuringItem::Pattern(p) => {
-                            let v = format!("rt::d_at(&{arr_ref}, {idx}, {at})?");
+                            let v = format!(
+                                "rt::d_at(&{arr_ref}, {idx}, {n_pattern}, {has_spread}, {at})?"
+                            );
                             arr.push_str(&self.destructure(p, v, env, true));
                             arr.push_str(&format!("{idx} += 1usize;\n"));
                         }

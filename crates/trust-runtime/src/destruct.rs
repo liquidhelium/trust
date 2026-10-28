@@ -137,21 +137,6 @@ pub fn method_mut(
                     .at(span)?
             }
         },
-        // Mirrors maybe_resolve_mutating's dictionary fallback: push/pop are
-        // **not** a dictionary's mutable methods (is_dict_mutating_method
-        // only accepts insert/remove), so this falls through to a plain
-        // field call — dictionary fields cannot be called directly (present
-        // vs. missing key produce different errors, mirroring
-        // eval_field_callee's dictionary branch).
-        Value::Dict(dict) if matches!(method, "push" | "pop") => {
-            let key = Str::from(method);
-            return match dict.at(key, None) {
-                Ok(_) => {
-                    bail!(span, "cannot directly call dictionary keys as functions")
-                }
-                Err(err) => Err(err).at(span),
-            };
-        }
         _ => bail!(span, "type {ty} has no method `{method}`"),
     }
     args.finish()?;
@@ -184,11 +169,6 @@ pub fn method_mut_dispatch(
     if (is_array && matches!(method, "push" | "pop" | "insert" | "remove"))
         || (is_dict && matches!(method, "insert" | "remove"))
     {
-        return method_mut(engine, value, method, args, span);
-    }
-    if is_dict {
-        // Dictionary push/pop: the same branch inside method_mut reports the
-        // field-call error.
         return method_mut(engine, value, method, args, span);
     }
     // Fall back to a plain field call: a method call passes the target as
@@ -242,14 +222,24 @@ pub fn iter_values<'a>(
 // --- Destructuring helpers (mirroring the semantics and error messages of
 // typst-eval/src/binding.rs) ---
 
-/// Array destructuring: the i-th element (errors when short).
-pub fn d_at(array: &typst::foundations::Array, i: usize, span: Span) -> SourceResult<Value> {
+/// Array destructuring: the i-th element (errors when short). `expected` is
+/// the pattern's total positional-item count and `at_least` whether it has
+/// a sink, exactly as `wrong_number_of_elements` computes them
+/// (binding.rs: the hint carries the pattern's count, not the index the
+/// destructure reached).
+pub fn d_at(
+    array: &typst::foundations::Array,
+    i: usize,
+    expected: usize,
+    at_least: bool,
+    span: Span,
+) -> SourceResult<Value> {
     match array.at(i as i64, None) {
         Ok(value) => Ok(value),
         Err(_) => Err(elements_mismatch_diagnostic(
             array.len(),
-            i + 1,
-            false,
+            expected,
+            at_least,
             span,
         )),
     }

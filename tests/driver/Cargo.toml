@@ -182,6 +182,7 @@ tcat-pdftags-text = { path = "../gencrate-pdftags-text" }
 tcat-playground = { path = "../gencrate-playground" }
 tcat-reg-capture-analysis = { path = "../gencrate-reg-capture-analysis" }
 tcat-reg-import-chains = { path = "../gencrate-reg-import-chains" }
+tcat-reg-in-body-nested-import = { path = "../gencrate-reg-in-body-nested-import" }
 tcat-scripting-blocks = { path = "../gencrate-scripting-blocks" }
 tcat-scripting-call = { path = "../gencrate-scripting-call" }
 tcat-scripting-closure = { path = "../gencrate-scripting-closure" }

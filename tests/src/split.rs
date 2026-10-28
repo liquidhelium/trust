@@ -247,6 +247,9 @@ pub fn split_and_write(root: &Path, build: &Path) -> (Vec<Case>, BTreeMap<String
                     files: input_files,
                     entry: format!("{prefix}lib.typ"),
                     dep_entries: BTreeMap::new(),
+                    // Suite cases are all .typ text sources; no binary data
+                    // files exist to embed.
+                    data_files: BTreeMap::new(),
                 };
                 let (tree, _diags) =
                     trust::translate_package_tree_lenient(&input, &format!("suite-{key}"));

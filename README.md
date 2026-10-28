@@ -171,6 +171,6 @@ content construction, context expressions, multi-file packages with all
 import forms — and whole real packages compile and link without errors;
 constructs outside the supported subset surface as explicit translation
 errors, never as silent behavior changes. On the official typst
-`tests/suite` corpus, all but 2 of the 3018 comparison cases currently
+`tests/suite` corpus, all but 2 of the 3696 comparison cases currently
 produce results identical to the interpreter; the two remainders are
 tracked in the suite's known-divergence list.

@@ -57,6 +57,7 @@ pub fn register_embedded_files(files: &[(&'static str, &'static [u8])]) {
 /// The embedded bytes for a FileId, if a registered module owns it.
 pub fn embedded_bytes(id: FileId) -> Option<Bytes> {
     let guard = registry().read().unwrap();
-    let bytes = guard.get(&id)?;
-    Some(Bytes::new(bytes.to_vec()))
+    // &'static [u8] rides in the Arc directly — Bytes::new promises no
+    // extra allocation for 'static slices.
+    Some(Bytes::new(*guard.get(&id)?))
 }

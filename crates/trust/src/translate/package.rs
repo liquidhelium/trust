@@ -233,18 +233,10 @@ fn plan_files(
                         // naturally via directory joining; absolute ones
                         // would land at top-level keys and lose package
                         // ownership).
-                        if raw.starts_with('/')
-                            && let Some(colon) = path.find(':')
-                            && let Some(rel) = path[colon..].find('/')
+                        if let Some(qualified) =
+                            super::paths::qualify_package_absolute(path, &raw, &target)
                         {
-                            let prefix_end = colon + rel;
-                            if path.starts_with('@') && prefix_end < path.len() {
-                                target = format!(
-                                    "{}/{}",
-                                    &path[..prefix_end],
-                                    target.trim_start_matches('/')
-                                );
-                            }
+                            target = qualified;
                         }
                         target
                     };
@@ -253,7 +245,6 @@ fn plan_files(
                     // still resolve it at runtime (suite fixtures etc.);
                     // hand it to the glue path and let the original
                     // import's file-not-found carry it.
-                    let _ = &raw;
                     let items = match import.imports() {
                         None => match import.new_name() {
                             Some(new_name) => ImportItems::Rename(new_name.as_str().to_string()),
@@ -267,56 +258,13 @@ fn plan_files(
                                 new_name.as_str().to_string(),
                                 items
                                     .iter()
-                                    .map(|item| {
-                                        let original = item
-                                            .path()
-                                            .iter()
-                                            .map(|seg| seg.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(".");
-                                        let bound = match item {
-                                            ast::ImportItem::Simple(_) => original
-                                                .rsplit('.')
-                                                .next()
-                                                .unwrap_or(&original)
-                                                .to_string(),
-                                            ast::ImportItem::Renamed(renamed) => {
-                                                renamed.new_name().as_str().to_string()
-                                            }
-                                        };
-                                        (original, Some(bound))
-                                    })
+                                    .map(import_item_pair)
                                     .collect(),
                             ),
                             None => ImportItems::List(
                                 items
                                     .iter()
-                                    .map(|item| {
-                                        // Full names carry a dotted path
-                                        // (`a.b as c`):
-                                        // original_name() gives only the
-                                        // last segment, so the full name is
-                                        // rejoined here; without a rename
-                                        // the bound name = the last segment
-                                        // (typst semantics).
-                                        let original = item
-                                            .path()
-                                            .iter()
-                                            .map(|seg| seg.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(".");
-                                        let bound = match item {
-                                            ast::ImportItem::Simple(_) => original
-                                                .rsplit('.')
-                                                .next()
-                                                .unwrap_or(&original)
-                                                .to_string(),
-                                            ast::ImportItem::Renamed(renamed) => {
-                                                renamed.new_name().as_str().to_string()
-                                            }
-                                        };
-                                        (original, Some(bound))
-                                    })
+                                    .map(import_item_pair)
                                     .collect(),
                             ),
                         },
@@ -395,7 +343,7 @@ fn plan_files(
         // body's `Value::Module(m::module(&__st))` runs (block.rs owns the
         // emission; see ImportEdge::in_body).
         {
-            let mut skip: Vec<*const typst_syntax::SyntaxNode> = markup
+            let skip: Vec<*const typst_syntax::SyntaxNode> = markup
                 .exprs()
                 .filter(|e| matches!(e, ast::Expr::ModuleImport(_) | ast::Expr::ModuleInclude(_)))
                 .map(|e| e.to_untyped() as *const _)
@@ -430,7 +378,6 @@ fn plan_files(
                     }
                 }
                 stack.extend(node.children().cloned());
-                let _ = &mut skip;
             }
         }
         plans.push(FilePlan {
@@ -530,7 +477,7 @@ fn assemble_package_world(
                     }
                 } else {
                     match &edge.items {
-                        ImportItems::Bare => module_stem_pub(&edge.target),
+                        ImportItems::Bare => module_stem(&edge.target),
                         ImportItems::Rename(n) | ImportItems::RenameList(n, _) => n.clone(),
                         _ => continue,
                     }
@@ -796,7 +743,7 @@ impl TopGen {
                         self.own_seen.insert(name.as_str().to_string(), nth + 1);
                         if let Some(slot) = nth_slot(plan, name.as_str(), nth) {
                             let fill_none = if cx.mutable_slots.contains(&slot) {
-                                format!("rt::fill_ms(&__st.{slot}, Value::None)?")
+                                format!("rt::write_ms(&__st.{slot}, Value::None)?")
                             } else {
                                 format!("rt::fill(&__st.{slot}, Value::None)?")
                             };
@@ -867,7 +814,7 @@ impl TopGen {
                 {
                     let value = cx.expr(init_expr, &mut env2);
                     let fill_call = if cx.mutable_slots.contains(slot) {
-                        format!("rt::fill_ms(&__st.{slot}, v.clone())?")
+                        format!("rt::write_ms(&__st.{slot}, v.clone())?")
                     } else {
                         format!("rt::fill(&__st.{slot}, v.clone())?")
                     };
@@ -898,12 +845,12 @@ impl TopGen {
                         cx.destructure(pattern, "v.clone()".to_string(), &mut tmp_env, true);
                     let mut fills = String::new();
                     for (name, slot) in &bound {
-                        // Mutable slots (fill_ms/read_ms) and write-once
+                        // Mutable slots (write_ms/read_ms) and write-once
                         // slots (fill/read) split by the plan-time
                         // marking.
                         let (fill_call, read_call) = if cx.mutable_slots.contains(slot) {
                             (
-                                format!("rt::fill_ms(&__st.{slot}, {slot}.clone())?;"),
+                                format!("rt::write_ms(&__st.{slot}, {slot}.clone())?;"),
                                 format!("rt::read_ms(&__st.{slot})?"),
                             )
                         } else {
@@ -1323,7 +1270,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
          pub fn module_init(engine: &mut Engine, context: Tracked<Context>) -> SourceResult<Module> {{\n    let __st = std::sync::Arc::new(__State::default());\n{{EVAL_CALLS}}    let mut scope = Scope::new();\n{top_defines}    Ok(Module::new(\"{module_name}\", scope).with_content(rt::read_content(&__st.BODY_{entry_mod})?))\n}}\n\n\
          /// One-line integration: drives module_init and returns the module (to inject into a host library use\n\
          /// `rt::bind_module`; the test world's InjectWorld::init_native_module already wires it).\n\
-         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n    rt::init_module(world, library, module_init)\n}}\n\n\
+         pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {{\n{{INSTALL_PRELUDE}}    rt::init_module(world, library, module_init)\n}}\n\n\
          /// Creates a fresh evaluation slot board (for batch drivers managing their own lifecycle).\n\
          pub fn new_state() -> std::sync::Arc<__State> {{ std::sync::Arc::new(__State::default()) }}\n\n\
          /// Assembles on demand by file path: on the given slot board, first evaluates the file's\n\
@@ -1392,6 +1339,7 @@ fn render_single(parts: &PackageParts) -> String {
         .header
         .replace("{EVAL_CALLS}", &parts.eval_flat)
         .replace("{REGISTRY}", &render_registry(&parts.registry, false))
+        .replace("{INSTALL_PRELUDE}", "")
         .replace("{ITEMS}", &items);
     nest_state_access(&rendered, &parts.slot_paths)
 }
@@ -1486,14 +1434,18 @@ fn tree_impl(
         decl.push_str(&entries);
         decl.push_str("    ]);\n}\n");
         tree.insert("embedded_files.rs".to_string(), decl);
-        root = root.replace(
-            "pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {\n    rt::init_module(world, library, module_init)\n}",
-            "pub fn install(world: comemo::Tracked<dyn typst::World + '_>, library: &typst::utils::LazyHash<typst::Library>) -> SourceResult<Module> {\n    embedded_files::register();\n    rt::init_module(world, library, module_init)\n}",
-        );
         // {ITEMS} is already substituted into `root` at this point; the
         // module declaration appends at the end (same namespace).
         root.push_str("\nmod embedded_files;\n");
     }
+    root = root.replace(
+        "{INSTALL_PRELUDE}",
+        if input.data_files.is_empty() {
+            ""
+        } else {
+            "    embedded_files::register();\n"
+        },
+    );
     let cx_nodes = std::mem::take(&mut parts.closure_nodes);
     // The C2 closure section gets the same treatment as file bodies:
     // flat-module references to other files inside the bodies
@@ -1700,6 +1652,21 @@ fn dep_closure(
     order
 }
 
+/// The (full dotted path, bound name) pair for an import item: the joined
+/// path is the lookup key (`a.b as c` carries `a.b`); the bound name is
+/// exactly the upstream accessor's (`ast::ImportItem::bound_name` — last
+/// path segment, or the rename).
+fn import_item_pair(item: ast::ImportItem) -> (String, Option<String>) {
+    let original = item
+        .path()
+        .iter()
+        .map(|seg| seg.as_str())
+        .collect::<Vec<_>>()
+        .join(".");
+    let bound = item.bound_name().as_str().to_string();
+    (original, Some(bound))
+}
+
 /// Target file of an item binding (module field): base module entry export
 /// table → item slot → file index (IMPORT slots only — their edge target
 /// is the module's file identity). Feeds the static expansion of in-body
@@ -1716,19 +1683,6 @@ fn item_file(
         return None;
     }
     slot_files.as_ref()?.get(slot).cloned()
-}
-
-
-/// A module-level reachable copy of module_stem (pub(super) inside
-/// plan.rs).
-fn module_stem_pub(path: &str) -> String {
-    path.rsplit('/')
-        .next()
-        .unwrap_or("m")
-        .split('.')
-        .next()
-        .unwrap_or("m")
-        .to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2436,7 +2390,7 @@ impl Ctx {
         if super::plan::import_reaches(plans, &edge.target, &plan.path, &input.dep_entries) {
             let message = "cyclic import".to_string();
             self.diag(edge.span, message.clone());
-            let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+            let _ = writeln!(import_fills, "    rt::bail_value(\"{message}\")?;");
             return;
         }
         match &edge.items {
@@ -2459,7 +2413,7 @@ impl Ctx {
                 if matches!(edge.items, ImportItems::Bare) && !typst_syntax::is_ident(&bound) {
                     let message = "module name would not be a valid identifier".to_string();
                     self.diag(edge.span, message.clone());
-                    let _ = writeln!(import_fills, "    rt::bail_value(engine, \"{message}\")?;");
+                    let _ = writeln!(import_fills, "    rt::bail_value(\"{message}\")?;");
                     return;
                 }
                 let slot = match import_slots.get(&edge.target) {
@@ -2579,7 +2533,7 @@ impl Ctx {
                         );
                         let _ = writeln!(
                             import_fills,
-                            "    rt::bail_value(engine, \"unresolved import\")?;"
+                            "    rt::bail_value(\"unresolved import\")?;"
                         );
                         continue;
                     };

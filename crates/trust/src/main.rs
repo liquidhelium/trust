@@ -31,9 +31,7 @@ fn resolve_key(from: &str, raw: &str) -> Option<String> {
     let vpath = joined.get_with_slash().trim_start_matches('/');
     Some(match rooted.root() {
         typst_syntax::VirtualRoot::Project => vpath.to_string(),
-        typst_syntax::VirtualRoot::Package(spec) => {
-            format!("@{}/{name}:{version}/{vpath}", spec.namespace, name = spec.name, version = spec.version)
-        }
+        typst_syntax::VirtualRoot::Package(spec) => format!("{spec}/{vpath}"),
     })
 }
 
@@ -399,17 +397,14 @@ fn main() {
                     })
                     .unwrap_or_else(|| std::path::PathBuf::from(".cache/typst/packages"));
                 for spec in dep_entries.keys() {
-                    // "@ns/name:ver" → cache/<ns>/<name>/<ver>
-                    let Some(rest) = spec.strip_prefix('@') else {
+                    // `@ns/name:ver` → cache/<ns>/<name>/<ver>
+                    let Ok(parsed) = spec.parse::<typst_syntax::package::PackageSpec>() else {
                         continue;
                     };
-                    let Some((ns, name_ver)) = rest.split_once('/') else {
-                        continue;
-                    };
-                    let Some((name, ver)) = name_ver.split_once(':') else {
-                        continue;
-                    };
-                    let base = cache_root.join(ns).join(name).join(ver);
+                    let base = cache_root
+                        .join(parsed.namespace.as_str())
+                        .join(parsed.name.as_str())
+                        .join(parsed.version.to_string());
                     let mut stack = vec![base.clone()];
                     while let Some(d) = stack.pop() {
                         let Ok(entries) = std::fs::read_dir(&d) else {
@@ -519,15 +514,9 @@ fn main() {
                 None => std::fs::read_to_string(root.join("typst.toml"))
                     .map_err(|e| format!("failed to read typst.toml: {e}"))
                     .and_then(|text| {
-                        let manifest: toml::Table =
+                        let manifest: typst_syntax::package::PackageManifest =
                             toml::from_str(&text).map_err(|e| e.to_string())?;
-                        Ok(manifest
-                            .get("package")
-                            .and_then(|p| p.get("entrypoint"))
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| "typst.toml is missing package.entrypoint".to_string())?
-                            .trim_start_matches('/')
-                            .to_string())
+                        Ok(manifest.package.entrypoint.trim_start_matches('/').to_string())
                     }),
             };
             let dir_mode = single_entry.is_none();
@@ -567,11 +556,12 @@ fn main() {
                 let manifest_name = std::fs::read_to_string(root.join("typst.toml"))
                     .ok()
                     .and_then(|text| {
-                        let manifest: toml::Table = toml::from_str(&text).ok()?;
-                        let package = manifest.get("package")?;
-                        let name = package.get("name")?.as_str()?.to_string();
-                        let version = package.get("version")?.as_str()?.to_string();
-                        Some((name, version))
+                        let manifest: typst_syntax::package::PackageManifest =
+                            toml::from_str(&text).ok()?;
+                        Some((
+                            manifest.package.name.to_string(),
+                            manifest.package.version.to_string(),
+                        ))
                     });
                 // Package identity: explicit `--spec` relays the
                 // consuming host's declaration (the only place a real
@@ -686,12 +676,9 @@ fn main() {
                     std::fs::read_to_string(root.join("typst.toml"))
                         .ok()
                         .and_then(|text| {
-                            let manifest: toml::Table = toml::from_str(&text).ok()?;
-                            manifest
-                                .get("package")?
-                                .get("name")?
-                                .as_str()
-                                .map(str::to_string)
+                            let manifest: typst_syntax::package::PackageManifest =
+                                toml::from_str(&text).ok()?;
+                            Some(manifest.package.name.to_string())
                         })
                 })
                 .or_else(|| {
@@ -1032,20 +1019,14 @@ fn collect_translatable_deps(
                 continue;
             }
             // A spec looks like @ns/name:ver.
-            let Some(rest) = spec.strip_prefix('@') else {
-                continue;
-            };
-            let Some((ns_name, _ver)) = rest.split_once(':') else {
+            let Ok(parsed) = spec.parse::<typst_syntax::package::PackageSpec>() else {
                 eprintln!("unsupported dependency spec format: {spec}");
                 continue;
             };
-            let Some((ns, name)) = ns_name.split_once('/') else {
-                continue;
-            };
             let dir = cache_root
-                .join(ns)
-                .join(name)
-                .join(rest.split_once(':').map(|(_, v)| v).unwrap_or(""));
+                .join(parsed.namespace.as_str())
+                .join(parsed.name.as_str())
+                .join(parsed.version.to_string());
             // Automatic fetch of missing packages (mirrors the typst CLI's
             // registry download): registry form
             // {name}-{version}.tar.gz; TRUST_NO_FETCH=1 disables it. Only
@@ -1053,22 +1034,12 @@ fn collect_translatable_deps(
             if !dir.join("typst.toml").exists() {
                 // typst-kit's SystemPackages: same cache layout the CLI
                 // uses (atomic unpack into the cache, data dir first).
-                let ok = std::env::var_os("TRUST_NO_FETCH").is_none()
-                    && rest
-                        .split_once(':')
-                        .and_then(|(_, v)| v.parse().ok())
-                        .map(|version| {
-                            let spec = typst_syntax::package::PackageSpec {
-                                namespace: ns.into(),
-                                name: name.into(),
-                                version,
-                            };
-                            let packages = typst_kit::packages::SystemPackages::new(
-                                typst_kit::downloader::SystemDownloader::new("trust"),
-                            );
-                            packages.obtain(&spec).is_ok()
-                        })
-                        .unwrap_or(false);
+                let ok = std::env::var_os("TRUST_NO_FETCH").is_none() && {
+                    let packages = typst_kit::packages::SystemPackages::new(
+                        typst_kit::downloader::SystemDownloader::new("trust"),
+                    );
+                    packages.obtain(&parsed).is_ok()
+                };
                 if !ok {
                     eprintln!(
                         "dependency not found in local package cache (falling back to runtime interpretation): {spec}"

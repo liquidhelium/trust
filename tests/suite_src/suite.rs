@@ -30,7 +30,7 @@ fn compile(w: &InjectWorld) -> Compiled {
         .warnings
         .iter()
         .map(|d| d.message.to_string())
-        .filter(|m| !m.contains("trust degraded"))
+        .filter(|m| !trust_runtime::is_degraded_message(m))
         .collect();
     match warned.output {
         Ok(doc) => {
@@ -76,7 +76,7 @@ fn assemble(
         .warnings()
         .iter()
         .map(|d| d.message.to_string())
-        .filter(|m| !m.contains("trust degraded"))
+        .filter(|m| !trust_runtime::is_degraded_message(m))
         .collect();
     match result {
         Some(Ok(module)) => {

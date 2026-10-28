@@ -318,7 +318,7 @@ fn locate_closure(
 /// CapturesVisitor resolves against the scopes at the creation point, where
 /// both `get` and `get_in_math` carry the library base; an interpreted
 /// snippet's captured scope has no base, which this restores), with the
-/// `std` special case as in [`global_opt`]. A name still not found is
+/// `std` special case as in [`capture_code_opt`]. A name still not found is
 /// simply not captured (call time then reports unknown variable, same as
 /// native).
 pub(crate) fn resolve_pending(
@@ -341,49 +341,6 @@ pub(crate) fn resolve_pending(
     }
 }
 
-pub fn closure(
-    src: &str,
-    defaults: Vec<Value>,
-    captured: &[(&'static str, Value)],
-    pending: &[(&'static str, bool)],
-    engine: &mut Engine,
-) -> Func {
-    let (node, num_pos_params) = cached_closure_node(src);
-    let mut captured: Vec<(&'static str, Value)> = captured.to_vec();
-    resolve_pending(engine, &mut captured, pending);
-    // Probe the debug switch once (previously this ran getenv on **every
-    // closure creation** — glibc's getenv also takes the environ lock, pure
-    // overhead on the generated side's cold compiles).
-    static DEBUG_CAPTURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let debug = *DEBUG_CAPTURE.get_or_init(|| std::env::var_os("TRUST_DEBUG_CAPTURE").is_some());
-    let mut scope = Scope::new();
-    for (name, value) in &captured {
-        if debug && src.contains("ctx => {") {
-            let brief = format!("{value:?}");
-            eprintln!("[capture] {name} = {}", &brief[..brief.len().min(120)]);
-        }
-        // Captured bindings get the read-only mark (mirrors
-        // `Binding::capture(Capturer::Function)` on typst closures'
-        // captured scope): writes to captures are rejected by typst's
-        // evaluator via `Binding::write` with its read-only error.
-        scope.bind(
-            (*name).into(),
-            Binding::detached(value.clone()).capture(Capturer::Function),
-        );
-    }
-    let closure_span = node.span();
-    Func::from(Closure {
-        node: ClosureNode::Closure(node),
-        defaults,
-        captured: scope,
-        num_pos_params,
-    })
-    // Mirrors typst: the closure is spanned at creation (the definition
-    // site); error propagation points inside the interpreted body (e.g. the
-    // cast in array.any's predicate using test.span()) can now resolve to
-    // the virtual source.
-    .spanned(closure_span)
-}
 
 /// Finds the first Closure node in pre-order.
 fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::SyntaxNode> {
@@ -393,9 +350,9 @@ fn find_closure_node(node: &typst_syntax::SyntaxNode) -> Option<&typst_syntax::S
     node.children().find_map(find_closure_node)
 }
 
-/// Per-call-site static version of interpreted closure creation (the node
-/// comes from the call site's static; the pending materialization protocol
-/// is as in [`closure`]).
+/// Per-call-site static version of interpreted closure creation: the node
+/// comes from the call site's static, and not-yet-captured names are
+/// materialized at creation time via [`resolve_pending`].
 pub fn closure_node_at(
     node: &(typst_syntax::SyntaxNode, usize),
     span: Span,

@@ -98,13 +98,11 @@ fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
     if let Some(Selector::Elem(elem, _)) = recipe.selector()
         && *elem == typst::foundations::Element::of::<typst::layout::PageElem>()
     {
-        engine.sink.warn(
-            SourceDiagnostic::warning(
-                recipe.span(),
-                typst::foundations::Str::from("`show page` is not supported and has no effect"),
-            )
-            .with_hint("customize pages with `set page(..)` instead"),
-        );
+        engine.sink.warn(typst::diag::warning!(
+            recipe.span(),
+            "`show page` is not supported and has no effect";
+            hint: "customize pages with `set page(..)` instead"
+        ));
     }
     if let Some(Selector::Elem(elem, _)) = recipe.selector()
         && *elem == typst::foundations::Element::of::<typst::model::ParElem>()
@@ -113,18 +111,12 @@ fn check_show_rules(engine: &mut Engine, recipe: &typst::foundations::Recipe) {
         let chain = typst::foundations::StyleChain::new(styles);
         if chain.has(typst::layout::BlockElem::above) || chain.has(typst::layout::BlockElem::below)
         {
-            engine.sink.warn(
-                SourceDiagnostic::warning(
-                    recipe.span(),
-                    typst::foundations::Str::from(
-                        "`show par: set block(spacing: ..)` has no effect anymore",
-                    ),
-                )
-                .with_hint("write `set par(spacing: ..)` instead")
-                .with_hint(
-                    "this is specific to paragraphs as they are not considered blocks anymore",
-                ),
-            );
+            engine.sink.warn(typst::diag::warning!(
+                recipe.span(),
+                "`show par: set block(spacing: ..)` has no effect anymore";
+                hint: "write `set par(spacing: ..)` instead";
+                hint: "this is specific to paragraphs as they are not considered blocks anymore"
+            ));
         }
     }
 }

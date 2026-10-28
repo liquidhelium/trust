@@ -61,13 +61,6 @@ pub fn capture_math_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<
         .map(|b| b.read_checked((engine, Span::detached())).clone()))
 }
 
-/// Global lookup (code name) returning `None` when absent (mirrors typst
-/// capture semantics: names not visible at creation time are not captured;
-/// they are bound at call time by the closure body's own imports).
-pub fn global_opt(engine: &mut Engine, name: &str) -> SourceResult<Option<Value>> {
-    capture_code_opt(engine, name)
-}
-
 /// Field access `target.name` (mirrors `access_field`: `Value::field` plus
 /// a get-rule style-chain fallback — a field of an element function (e.g.
 /// `text.size`) that misses the static field is read from the context's
@@ -142,22 +135,6 @@ pub fn wild_import(value: &Value, at: Span) -> SourceResult<typst::foundations::
         layer.bind(name.clone(), binding.clone());
     }
     Ok(layer)
-}
-
-/// Name lookup across wildcard layers (innermost first): a hit returns the
-/// value; a full miss with no fallback reports the same "unknown variable"
-/// as typst.
-pub fn wild_get(
-    layers: &[&typst::foundations::Scope],
-    name: &str,
-    at: Span,
-) -> SourceResult<Value> {
-    wild_lookup(layers, name).ok_or_else(|| {
-        eco_vec![SourceDiagnostic::error(
-            at,
-            eco_format!("unknown variable: {name}")
-        )]
-    })
 }
 
 fn wild_lookup(layers: &[&typst::foundations::Scope], name: &str) -> Option<Value> {

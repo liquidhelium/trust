@@ -393,7 +393,7 @@ impl Ctx {
                     // module/function scope).
                     let message = "cannot return outside of function".to_string();
                     self.diag(func_return.span(), message.clone());
-                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
+                    return format!("{{ rt::bail_value({:?})? }}", message);
                 }
                 // `return` sets the flag (mirrors typst-eval FlowReturn):
                 // the statement completes, the boundary check stops the
@@ -415,7 +415,7 @@ impl Ctx {
                 if self.in_loop == 0 {
                     let message = "cannot break outside of loop".to_string();
                     self.diag(lb.span(), message.clone());
-                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
+                    return format!("{{ rt::bail_value({:?})? }}", message);
                 }
                 // Flag-set only (mirrors typst-eval FlowBreak): the
                 // enclosing statement completes, the next statement
@@ -427,7 +427,7 @@ impl Ctx {
                 if self.in_loop == 0 {
                     let message = "cannot continue outside of loop".to_string();
                     self.diag(lc.span(), message.clone());
-                    return format!("{{ rt::bail_value(engine, {:?})? }}", message);
+                    return format!("{{ rt::bail_value({:?})? }}", message);
                 }
                 "{ __flow = Some(rt::FlowEvent::Continue); Value::None }".into()
             }
@@ -621,13 +621,13 @@ impl Ctx {
             ast::Expr::SetRule(set) => {
                 let message = "set is only allowed directly in code and content blocks".to_string();
                 self.diag(set.span(), message.clone());
-                format!("{{ rt::bail_value(engine, {:?})? }}", message)
+                format!("{{ rt::bail_value({:?})? }}", message)
             }
             ast::Expr::ShowRule(show) => {
                 let message =
                     "show is only allowed directly in code and content blocks".to_string();
                 self.diag(show.span(), message.clone());
-                format!("{{ rt::bail_value(engine, {:?})? }}", message)
+                format!("{{ rt::bail_value({:?})? }}", message)
             }
             other => {
                 let kind = other.to_untyped().kind();
@@ -827,20 +827,14 @@ impl Ctx {
             Div => self.span_fmt(binary.span(), format!("ops::div({lhs}, {rhs}).at({{at}})?")),
             Eq => self.span_fmt(binary.span(), format!("ops::eq({lhs}, {rhs}).at({{at}})?")),
             Neq => self.span_fmt(binary.span(), format!("ops::neq({lhs}, {rhs}).at({{at}})?")),
-            Lt | Leq | Gt | Geq => {
-                let ord = self.span_fmt(
-                    binary.span(),
-                    format!("ops::compare(&({lhs}), &({rhs})).at({{at}})?"),
-                );
-                let test = match op {
-                    Lt => "std::cmp::Ordering::Less",
-                    Leq => "std::cmp::Ordering::Less | std::cmp::Ordering::Equal",
-                    Gt => "std::cmp::Ordering::Greater",
-                    Geq => "std::cmp::Ordering::Greater | std::cmp::Ordering::Equal",
-                    _ => unreachable!(),
-                };
-                format!("Value::Bool(matches!({ord}, {test}))")
-            }
+            // Direct reuse of typst-library's comparison wrappers — the
+            // exact route typst-eval takes (`apply_binary(self, vm,
+            // ops::lt)`); each wrapper is compare + matches! inside, with
+            // the same error text.
+            Lt => self.span_fmt(binary.span(), format!("ops::lt({lhs}, {rhs}).at({{at}})?")),
+            Leq => self.span_fmt(binary.span(), format!("ops::leq({lhs}, {rhs}).at({{at}})?")),
+            Gt => self.span_fmt(binary.span(), format!("ops::gt({lhs}, {rhs}).at({{at}})?")),
+            Geq => self.span_fmt(binary.span(), format!("ops::geq({lhs}, {rhs}).at({{at}})?")),
             In => self.span_fmt(binary.span(), format!("ops::in_({lhs}, {rhs}).at({{at}})?")),
             NotIn => self.span_fmt(
                 binary.span(),

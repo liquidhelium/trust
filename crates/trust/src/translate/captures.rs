@@ -43,11 +43,22 @@
 
 use typst_syntax::ast::{self, AstNode};
 
-/// The name a bare `import <source>` binds (mirrors typst-eval import.rs's
-/// stem/package-name derivation, statically): a Str source that parses as a
-/// package spec binds the package name; any other Str source binds the file
-/// stem; a non-Str source (dotted path / call result) binds its last dotted
-/// segment.
+/// The name a bare `import <source>` binds, as the upstream accessor
+/// computes it (`ast::ModuleImport::bare_name`: ident/field access, spec
+/// name, or file stem validated as an identifier). Emission sites report
+/// the error forms with upstream's wording.
+pub(super) fn bare_import_name(
+    import: ast::ModuleImport,
+) -> Result<String, ast::BareImportError> {
+    import.bare_name().map(|name| name.to_string())
+}
+
+/// Analysis fallback for capture bookkeeping when the upstream accessor
+/// errors (the import itself will error at runtime; the name never
+/// binds, so the guess is inert): a Str source that parses as a package
+/// spec binds the package name; any other Str source binds the file
+/// stem; a non-Str source (dotted path / call result) binds its last
+/// dotted segment.
 pub(super) fn bare_import_bound_name(source: ast::Expr) -> String {
     if let ast::Expr::Str(s) = source {
         let raw = s.get();

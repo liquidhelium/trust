@@ -34,19 +34,6 @@ pub fn dict_put(dict: &mut typst::foundations::Dict, key: &str, value: Value) {
     dict.insert(key.into(), value);
 }
 
-/// Dictionary item with an expression key (`("a" + x: v)`; mirrors
-/// `Eval for ast::DictItem::Keyed`: the key is evaluated then cast to a
-/// string, with errors reported at the key expression's span).
-pub fn dict_put_key(
-    dict: &mut typst::foundations::Dict,
-    key: Value,
-    value: Value,
-    span: Span,
-) -> SourceResult<()> {
-    let key: Str = key.cast().at(span)?;
-    dict.insert(key, value);
-    Ok(())
-}
 
 /// Insert with an already-cast key (the dict literal's aggregating path:
 /// invalid keys were collected by the caller, the default key is

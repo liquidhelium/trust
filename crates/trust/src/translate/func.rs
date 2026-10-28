@@ -56,87 +56,14 @@ impl Ctx {
             .filter(|p| matches!(p, ast::Param::Pos(_)))
             .count();
         let mut sink_stash: Vec<(Option<String>, String)> = Vec::new();
-        // The total positional-argument count must be taken **before any
-        // binding** (sink_size's denominator is the full count; computing
-        // it at the Spread position would already have earlier parameters
-        // deducted).
-        let has_sink = closure
-            .params()
-            .children()
-            .any(|p| matches!(p, ast::Param::Spread(_)));
-        if has_sink {
-            let _ = writeln!(body, "    let __n_pos_args = __args.to_pos().len();");
-        }
-        for param in closure.params().children() {
-            match param {
-                ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
-                    let name = ident.as_str().to_string();
-                    let rust = bind_local(&mut fn_env, &name);
-                    let _ = writeln!(
-                        body,
-                        "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;",
-                        escape(&name)
-                    );
-                }
-                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
-                    // A placeholder consumes one positional argument
-                    // (mirrors eval_closure's
-                    // `args.expect::<Value>("pattern parameter")`).
-                    let _ = writeln!(
-                        body,
-                        "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
-                    );
-                }
-                ast::Param::Pos(pattern) => {
-                    // Destructuring parameter (mirrors eval_closure:
-                    // "pattern parameter").
-                    let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
-                    body.push_str(&self.destructure(pattern, value, &mut fn_env, false));
-                }
-                ast::Param::Named(named) => {
-                    let name = named.name().as_str().to_string();
-                    // Defaults are evaluated and materialized into slots at
-                    // definition time (module_init) and only read at call
-                    // time: evaluation timing matches typst (once, at
-                    // creation).
-                    let def_slot = format!("DEF_{slot}_{}", sanitize_key(&name));
-                    self.used_state = true;
-                    let rust = bind_local(&mut fn_env, &name);
-                    let _ = writeln!(
-                        body,
-                        "    let mut {rust} = match __args.named::<Value>(\"{}\")? {{\n\
-                         \x20       Some(value) => value,\n\
-                         \x20       None => rt::read(&__st.{def_slot})?,\n\
-                         \x20   }};",
-                        escape(&name)
-                    );
-                }
-                ast::Param::Spread(spread) => {
-                    let stash = format!("__sink_pos_{}", sink_stash.len());
-                    let _ = writeln!(
-                        body,
-                        "    let {stash} = __args.consume(__n_pos_args.saturating_sub({num_pos_params}))?;"
-                    );
-                    let sink = spread.sink_ident().map(|ident| {
-                        let name = ident.as_str().to_string();
-                        bind_local(&mut fn_env, &name)
-                    });
-                    sink_stash.push((sink, stash));
-                }
-            }
-        }
-        // sink = take() (the remainder, including named) in declaration
-        // order + the stashed queue-head positional items (mirrors
-        // eval_closure's trailing `remaining_args.items.extend(sink_pos)`).
-        for (sink, stash) in sink_stash {
-            let target = sink.as_deref().unwrap_or("_sink");
-            let _ = writeln!(
-                body,
-                "    let mut {target} = Value::Args(__args.take());\n    if let Value::Args(__sink_inner) = &mut {target} {{ __sink_inner.items.extend({stash}.into_iter()); }}"
-            );
-        }
-        let _ = writeln!(body, "    rt::finish(__args, span)?;");
-        let _ = writeln!(body, "    let mut __flow: Option<rt::FlowEvent> = None;");
+        self.gen_param_protocol(
+            closure,
+            &mut body,
+            &mut fn_env,
+            &mut sink_stash,
+            num_pos_params,
+            NamedParams::DefSlots(slot),
+        );
 
         // Bare-expression function body (let-expression hoisting shell;
         // block bodies re-scan themselves in block()).
@@ -171,6 +98,115 @@ impl Ctx {
         format!(
             "\n#[allow(non_snake_case, dead_code, unused_variables)]\nfn {fun}(engine: &mut Engine, context: Tracked<Context>, __args: &mut Args) -> SourceResult<Value> {{\n    let span = __args.span;\n{prologue}{body}}}\n"
         )
+    }
+
+    /// The shared parameter-binding protocol (mirrors eval_closure's
+    /// parameter loop + trailing sink handling; the full protocol comment
+    /// lives at [`Self::gen_function`]): positional/placeholder/
+    /// destructuring/sink arms and the finish + flow prologue are
+    /// identical everywhere; only named parameters differ — see
+    /// [`NamedParams`].
+    fn gen_param_protocol(
+        &mut self,
+        closure: ast::Closure,
+        out: &mut String,
+        fn_env: &mut Env,
+        sink_stash: &mut Vec<(Option<String>, String)>,
+        num_pos_params: usize,
+        named: NamedParams<'_>,
+    ) {
+        // The total positional-argument count must be taken **before any
+        // binding** (sink_size's denominator is the full count; computing
+        // it at the Spread position would already have earlier parameters
+        // deducted).
+        let has_sink = closure
+            .params()
+            .children()
+            .any(|p| matches!(p, ast::Param::Spread(_)));
+        if has_sink {
+            let _ = writeln!(out, "    let __n_pos_args = __args.to_pos().len();");
+        }
+        for param in closure.params().children() {
+            match param {
+                ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
+                    let name = ident.as_str().to_string();
+                    let rust = bind_local(fn_env, &name);
+                    let _ = writeln!(
+                        out,
+                        "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;",
+                        escape(&name)
+                    );
+                }
+                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
+                    // A placeholder consumes one positional argument
+                    // (mirrors eval_closure's
+                    // `args.expect::<Value>("pattern parameter")`).
+                    let _ = writeln!(
+                        out,
+                        "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
+                    );
+                }
+                ast::Param::Pos(pattern) => {
+                    // Destructuring parameter (mirrors eval_closure:
+                    // "pattern parameter").
+                    let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
+                    out.push_str(&self.destructure(pattern, value, fn_env, false));
+                }
+                ast::Param::Named(named_param) => {
+                    let name = named_param.name().as_str().to_string();
+                    match named {
+                        NamedParams::DefSlots(slot) => {
+                            // Defaults are evaluated and materialized into
+                            // slots at definition time (module_init) and
+                            // only read at call time: evaluation timing
+                            // matches typst (once, at creation).
+                            let def_slot = format!("DEF_{slot}_{}", sanitize_key(&name));
+                            self.used_state = true;
+                            let rust = bind_local(fn_env, &name);
+                            let _ = writeln!(
+                                out,
+                                "    let mut {rust} = match __args.named::<Value>(\"{}\")? {{\n\
+                                 \x20       Some(value) => value,\n\
+                                 \x20       None => rt::read(&__st.{def_slot})?,\n\
+                                 \x20   }};",
+                                escape(&name)
+                            );
+                        }
+                        NamedParams::Runtime => {
+                            let rust = bind_local(fn_env, &name);
+                            let _ = writeln!(
+                                out,
+                                "    let mut {rust} = rt::param_named(__args, \"{}\", span)?;",
+                                escape(&name)
+                            );
+                        }
+                    }
+                }
+                ast::Param::Spread(spread) => {
+                    let stash = format!("__sink_pos_{}", sink_stash.len());
+                    let _ = writeln!(
+                        out,
+                        "    let {stash} = __args.consume(__n_pos_args.saturating_sub({num_pos_params}))?;"
+                    );
+                    let sink = spread
+                        .sink_ident()
+                        .map(|ident| bind_local(fn_env, ident.as_str()));
+                    sink_stash.push((sink, stash));
+                }
+            }
+        }
+        // sink = take() (the remainder, including named) in declaration
+        // order + the stashed queue-head positional items (mirrors
+        // eval_closure's trailing `remaining_args.items.extend(sink_pos)`).
+        for (sink, stash) in sink_stash.drain(..) {
+            let target = sink.as_deref().unwrap_or("_sink");
+            let _ = writeln!(
+                out,
+                "    let mut {target} = Value::Args(__args.take());\n    if let Value::Args(__sink_inner) = &mut {target} {{ __sink_inner.items.extend({stash}.into_iter()); }}"
+            );
+        }
+        let _ = writeln!(out, "    rt::finish(__args, span)?;");
+        let _ = writeln!(out, "    let mut __flow: Option<rt::FlowEvent> = None;");
     }
     pub(super) fn gen_closure_fn(
         &mut self,
@@ -232,70 +268,13 @@ impl Ctx {
             .filter(|p| matches!(p, ast::Param::Pos(_)))
             .count();
         let mut sink_stash: Vec<(Option<String>, String)> = Vec::new();
-        let has_sink = closure
-            .params()
-            .children()
-            .any(|p| matches!(p, ast::Param::Spread(_)));
-        if has_sink {
-            let _ = writeln!(params_code, "    let __n_pos_args = __args.to_pos().len();");
-        }
-        for param in closure.params().children() {
-            match param {
-                ast::Param::Pos(ast::Pattern::Normal(ast::Expr::Ident(ident))) => {
-                    let name = ident.as_str().to_string();
-                    let rust = bind_local(&mut fn_env, &name);
-                    let _ = writeln!(
-                        params_code,
-                        "    let mut {rust} = rt::param_pos(__args, \"{}\", span)?;",
-                        escape(&name)
-                    );
-                }
-                ast::Param::Pos(ast::Pattern::Placeholder(_)) => {
-                    // A placeholder consumes one positional argument (same as
-                    // the top-level function prologue).
-                    let _ = writeln!(
-                        params_code,
-                        "    let _ = rt::param_pos(__args, \"pattern parameter\", span)?;"
-                    );
-                }
-                ast::Param::Pos(pattern) => {
-                    let value = "rt::param_pos(__args, \"pattern parameter\", span)?".to_string();
-                    params_code.push_str(&self.destructure(pattern, value, &mut fn_env, false));
-                }
-                ast::Param::Named(named) => {
-                    let name = named.name().as_str().to_string();
-                    let rust = bind_local(&mut fn_env, &name);
-                    let _ = writeln!(
-                        params_code,
-                        "    let mut {rust} = rt::param_named(__args, \"{}\", span)?;",
-                        escape(&name)
-                    );
-                }
-                ast::Param::Spread(spread) => {
-                    let stash = format!("__sink_pos_{}", sink_stash.len());
-                    let _ = writeln!(
-                        params_code,
-                        "    let {stash} = __args.consume(__n_pos_args.saturating_sub({num_pos_params}))?;"
-                    );
-                    let sink = spread.sink_ident().map(|ident| {
-                        let name = ident.as_str().to_string();
-                        bind_local(&mut fn_env, &name)
-                    });
-                    sink_stash.push((sink, stash));
-                }
-            }
-        }
-        for (sink, stash) in sink_stash {
-            let target = sink.as_deref().unwrap_or("_sink");
-            let _ = writeln!(
-                params_code,
-                "    let mut {target} = Value::Args(__args.take());\n    if let Value::Args(__sink_inner) = &mut {target} {{ __sink_inner.items.extend({stash}.into_iter()); }}"
-            );
-        }
-        let _ = writeln!(params_code, "    rt::finish(__args, span)?;");
-        let _ = writeln!(
-            params_code,
-            "    let mut __flow: Option<rt::FlowEvent> = None;"
+        self.gen_param_protocol(
+            closure,
+            &mut params_code,
+            &mut fn_env,
+            &mut sink_stash,
+            num_pos_params,
+            NamedParams::Runtime,
         );
 
         // Bare-expression body hoisting shell (same as gen_function; block
@@ -443,4 +422,14 @@ pub(super) fn gen_func_data(data: &str, fun: &str, name: &str, closure: ast::Clo
          params: LazyLock::new(&{fun}_params),\n    \
          returns: LazyLock::new(&rt::any_cast_info),\n}};\n"
     )
+}
+
+/// How named parameters bind in [`Ctx::gen_param_protocol`].
+enum NamedParams<'a> {
+    /// Read materialized default slots (top-level functions; defaults were
+    /// evaluated once at definition time).
+    DefSlots(&'a str),
+    /// Plain required takes (closure stubs; the interpreted snippet already
+    /// filled defaults at creation).
+    Runtime,
 }

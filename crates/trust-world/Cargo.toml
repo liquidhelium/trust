@@ -12,5 +12,6 @@ typst-syntax = "0.15.1"
 typst-layout = "0.15.1"
 typst-library = "0.15.1"
 typst-utils = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false, features = ["datetime"] }
 comemo = "0.5.1"
 trust-runtime = { path = "../trust-runtime" }

@@ -369,12 +369,8 @@ impl InjectWorld {
     /// them from here on. Evaluation-only scenarios need not call this;
     /// mount `typst-assets` or system fonts for render comparisons.
     pub fn set_fonts(&mut self, fonts: Vec<Font>) {
-        let mut book = FontBook::new();
-        for font in &fonts {
-            book.push(font.info().clone());
-        }
+        self.book = LazyHash::new(FontBook::from_fonts(&fonts));
         self.fonts = fonts;
-        self.book = LazyHash::new(book);
     }
 
     /// Evaluates the main file with typst-eval and returns the module (the
@@ -465,9 +461,10 @@ impl World for InjectWorld {
         // Embedded registry: bytes interpreted as UTF-8 — invalid UTF-8
         // misses here, exactly where typst's own source loading would
         // fail.
-        if let Some(text) = trust_runtime::embedded::embedded_bytes(id)
-            .and_then(|b| String::from_utf8(b.to_vec()).ok())
+        if let Some(bytes) = trust_runtime::embedded::embedded_bytes(id)
+            && let Ok(text) = std::str::from_utf8(bytes.as_slice())
         {
+            let text = text.to_owned();
             let source = Source::new(id, text);
             self.package_sources
                 .write()
@@ -546,83 +543,23 @@ impl World for InjectWorld {
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        // Suite mode: mirrors the official tests world's
-        // Time::fixed(1970-01-01 12:00).today — the result **carries the
-        // date only** (the time-of-day is truncated); offset seconds must
-        // fit in i32 (out of range → None → "unable to get the current
-        // date"), and shifting by the offset may cross a day boundary.
-        if self.suite_today.is_some() {
-            let secs = match offset {
-                None => 0.0f64,
-                Some(d) => {
-                    let [w, dd, h, m, s] = d.decompose();
-                    let total: f64 = w as f64 * 604_800.0
-                        + dd as f64 * 86_400.0
-                        + h as f64 * 3_600.0
-                        + m as f64 * 60.0
-                        + s as f64;
-                    // Mirrors Time::today's two gates: the i32 cast check
-                    // and FixedOffset::east_opt's validity range
-                    // (-86400 < secs < 86400, STRICT — an offset of
-                    // exactly ±24h or more → None → "unable to get the
-                    // current date").
-                    if !total.is_finite()
-                        || total < f64::from(i32::MIN)
-                        || total > f64::from(i32::MAX)
-                        || total <= -86_400.0
-                        || total >= 86_400.0
-                    {
-                        return None;
-                    }
-                    total
-                }
-            };
-            let shifted = 43_200.0 + secs; // counted from 12:00
-            let days = shifted.div_euclid(86_400.0) as i64;
-            let (y, m, d) = civil_from_days(days);
-            return Datetime::from_ymd(y as i32, m as u8, d as u8);
-        }
-        // The system's current time (with the timezone offset; both sides
-        // of a test world share this source — returning None here would
-        // make date accesses like `sys.datetime` fail with "unable to get
-        // the current date").
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?;
-        let offset_secs = offset
-            .map(|d| {
-                let [w, dd, h, m, s] = d.decompose();
-                w * 604_800 + dd * 86_400 + h * 3_600 + m * 60 + s
-            })
-            .unwrap_or(0);
-        let secs = now.as_secs() as i64 + offset_secs;
-        let days = secs.div_euclid(86_400);
-        let rem = secs.rem_euclid(86_400);
-        let (y, m, d) = civil_from_days(days);
-        Datetime::from_ymd_hms(
-            y as i32,
-            m as u8,
-            d as u8,
-            (rem / 3600) as u8,
-            ((rem % 3600) / 60) as u8,
-            (rem % 60) as u8,
-        )
+        // Delegates to typst-kit's Time — the same source the typst CLI's
+        // own world uses: the offset gates (i32 cast check, ±24h strict
+        // validity via FixedOffset::east_opt) and the day-boundary shift
+        // are upstream's, and the result carries the date only.
+        let time = match self.suite_today {
+            // Suite mode: the official tests world's fixed 1970-01-01
+            // 12:00 clock.
+            Some(_) => typst_kit::datetime::Time::fixed(
+                Datetime::from_ymd_hms(1970, 1, 1, 12, 0, 0).expect("valid fixed datetime"),
+            )
+            .ok()?,
+            None => typst_kit::datetime::Time::system(),
+        };
+        time.today(offset)
     }
 }
 
-/// Days since the epoch → Gregorian date (Howard Hinnant's algorithm).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
 
 #[cfg(test)]
 mod tests {

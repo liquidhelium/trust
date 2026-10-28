@@ -102,7 +102,6 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
             other => seq.push(Seq::Content(super::expr::ContentItem::Part(other))),
         }
     }
-    let _ = &mut seq;
     fn collect_top<'a>(
         expr: ast::Expr<'a>,
         tops: &mut Vec<TopBinding<'a>>,
@@ -286,14 +285,10 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                 // Global names materialize at creation time (mirrors typst
                 // closure capture: a name visible at creation time is
                 // captured; invisible ones are left to call-time
-                // resolution).
-                let mut g_env = env.clone();
-                let mut g_code = String::new();
-                // Global names materialize at creation time (mirrors typst
-                // closure capture: a name visible at creation time is
-                // captured; invisible ones are left to call-time
                 // resolution). The routing rules live with the capture
                 // analysis (see global_capture_slots).
+                let mut g_env = env.clone();
+                let mut g_code = String::new();
                 let body = closure.body().to_untyped();
                 let captures = super::captures::global_capture_slots(
                     super::captures::top_closure_free_names(*closure),

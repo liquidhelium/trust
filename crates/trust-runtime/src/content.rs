@@ -77,9 +77,9 @@ pub fn attach_labels(engine: &mut Engine, items: Vec<Value>) -> typst::foundatio
 /// `HeadingElem::new(body).with_depth(depth).pack()`.
 pub fn heading(body: typst::foundations::Content, depth: usize) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    // ast::Heading::depth() is the equals-sign count (a NonZero ≥ 1); pass
-    // it through.
-    let depth = std::num::NonZeroUsize::new(depth.max(1)).expect("depth >= 1");
+    // ast::Heading::depth() is the equals-sign count and is a NonZeroUsize
+    // ≥ 1 by grammar; the generated literal passes it through verbatim.
+    let depth = std::num::NonZeroUsize::new(depth).expect("heading depth >= 1 (grammar)");
     typst::model::HeadingElem::new(body)
         .with_depth(depth)
         .pack()

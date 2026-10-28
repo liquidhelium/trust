@@ -93,6 +93,27 @@ pub(super) fn nth_slot(plan: &FilePlan, name: &str, nth: usize) -> Option<String
         .nth(nth)
 }
 
+/// The static import edge map: file path → non-in-body edge targets.
+/// In-body import edges stay out of graph questions: typst gives them
+/// runtime cycle semantics (they only trigger on a call; meander's
+/// tiling↔contour mutual references are that shape).
+pub(super) fn import_edges(
+    plans: &[FilePlan],
+    dep_entries: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut edges: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for plan in plans {
+        let targets = plan
+            .imports
+            .iter()
+            .filter(|edge| !edge.in_body)
+            .filter_map(|edge| edge_effective_target(edge, dep_entries));
+        edges.entry(plan.path.clone()).or_default().extend(targets);
+    }
+    edges
+}
+
 /// Import cycle detection (typst likewise errors on circular module
 /// evaluation).
 pub(super) fn has_import_cycle(
@@ -119,16 +140,7 @@ pub(super) fn has_import_cycle(
         seen.pop();
         true
     }
-    let mut edges: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for plan in plans {
-        let targets = plan
-            .imports
-            .iter()
-            .filter(|edge| !edge.in_body)
-            .filter_map(|edge| edge_effective_target(edge, dep_entries));
-        edges.entry(plan.path.clone()).or_default().extend(targets);
-    }
+    let edges = import_edges(plans, dep_entries);
     let mut stack = Vec::new();
     !dfs(entry, &edges, &mut stack)
 }
@@ -453,13 +465,15 @@ pub(super) fn build_export_table(
     table
 }
 
-/// Module name for a file path (a bare import's name = the file stem).
+/// The module stem of a path (`dir/util.v2.typ` → `util.v2`): the file
+/// name minus its last extension, via std `Path::file_stem` — the same
+/// computation typst's bare-import binding uses
+/// (`ast::ModuleImport::bare_name`).
 pub(super) fn module_stem(path: &str) -> String {
     path.rsplit('/')
         .next()
-        .unwrap_or("m")
-        .split('.')
-        .next()
+        .and_then(|name| std::path::Path::new(name).file_stem())
+        .and_then(|s| s.to_str())
         .unwrap_or("m")
         .to_string()
 }
@@ -532,14 +546,17 @@ pub(super) fn module_list_slot(
     )
 }
 
+/// The short name of a package spec (`@preview/oxifmt:1.0.0` → `oxifmt`),
+/// via the typed spec parses (versioned first — import strings may also
+/// omit the version).
 pub(super) fn spec_name(spec: &str) -> String {
-    spec.split('/')
-        .nth(1)
-        .unwrap_or("pkg")
-        .split(':')
-        .next()
-        .unwrap_or("pkg")
-        .to_string()
+    if let Ok(parsed) = spec.parse::<typst_syntax::package::PackageSpec>() {
+        return parsed.name.to_string();
+    }
+    if let Ok(parsed) = spec.parse::<typst_syntax::package::VersionlessPackageSpec>() {
+        return parsed.name.to_string();
+    }
+    "pkg".to_string()
 }
 
 /// IMPORT slot → the **file identity** of that binding's module (generic
@@ -655,20 +672,7 @@ pub(super) fn import_reaches(
     to: &str,
     dep_entries: &std::collections::BTreeMap<String, String>,
 ) -> bool {
-    // In-body import edges stay out of cycle detection (typst gives
-    // in-body import cycles runtime semantics — they only trigger on a
-    // call; meander's tiling↔contour mutual references are that shape).
-    let mut edges: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for plan in plans {
-        for edge in &plan.imports {
-            if edge.in_body {
-                continue;
-            }
-            if let Some(target) = edge_effective_target(edge, dep_entries) {
-                edges.entry(plan.path.clone()).or_default().push(target);
-            }
-        }
-    }
+    let edges = import_edges(plans, dep_entries);
     let edges_ref: std::collections::BTreeMap<&str, Vec<&str>> = edges
         .iter()
         .map(|(k, v)| (k.as_str(), v.iter().map(|s| s.as_str()).collect()))

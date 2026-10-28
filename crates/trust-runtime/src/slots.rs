@@ -54,10 +54,20 @@ pub trait SlotField {
     fn slot_fill(&self, value: Value) -> SourceResult<()>;
 }
 
+/// Whether slot tracing is on. Probed once and cached: the slot-read path
+/// runs for every top-level variable reference in generated code, and each
+/// `var_os` takes the environ lock (the same reasoning as stub.rs's
+/// `DEBUG_CAPTURE`).
+fn trace_slots() -> bool {
+    static TRACE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("TRUST_TRACE_SLOTS").is_some());
+    *TRACE
+}
+
 /// Reads a top-level binding slot (write-once cell).
 fn read_lock(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
     if let Some(v) = slot.get() {
-        if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
+        if trace_slots() {
             eprintln!("[slot] read-ok  @{:?}", std::ptr::from_ref(slot));
         }
         return Ok(v.clone());
@@ -76,7 +86,7 @@ fn read_lock(slot: &std::sync::OnceLock<Value>) -> SourceResult<Value> {
 /// eviction) the same value is an idempotent no-op, while a different value
 /// is still a generator bug and is reported as an error.
 fn fill_lock(slot: &std::sync::OnceLock<Value>, value: Value) -> SourceResult<()> {
-    if std::env::var_os("TRUST_TRACE_SLOTS").is_some() {
+    if trace_slots() {
         eprintln!("[slot] fill    @{:?}", std::ptr::from_ref(slot));
     }
     match slot.get() {
@@ -115,7 +125,7 @@ impl SlotField for std::sync::Mutex<Value> {
         read_ms(self)
     }
     fn slot_fill(&self, value: Value) -> SourceResult<()> {
-        fill_ms(self, value)
+        write_ms(self, value)
     }
 }
 
@@ -280,11 +290,6 @@ pub fn take_state<T: std::any::Any + Send + Sync>(
 
 /// Mutable module-slot helpers (top-level bindings modified in place; the
 /// slot is a Mutex<Value>).
-pub fn fill_ms(slot: &std::sync::Mutex<Value>, v: Value) -> SourceResult<()> {
-    *slot.lock().unwrap() = v;
-    Ok(())
-}
-
 pub fn read_ms(slot: &std::sync::Mutex<Value>) -> SourceResult<Value> {
     Ok(slot.lock().unwrap().clone())
 }

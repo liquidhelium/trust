@@ -141,15 +141,25 @@ pub fn package_root_file_id(vkey: &str) -> Option<typst::syntax::FileId> {
     .into()
 }
 
+/// The message prefix marking a degradation warning (single definition:
+/// the producer below and the harness filters both key off this constant —
+/// typst's diagnostic model has no kind/code channel, so the marker rides
+/// in-band).
+pub const DEGRADED_PREFIX: &str = "trust degraded: ";
+
+/// Whether a diagnostic message marks a trust degradation warning.
+pub fn is_degraded_message(message: &str) -> bool {
+    message.starts_with(DEGRADED_PREFIX)
+}
+
 /// Explicit degradation marker: emits a warning and returns none (the
 /// no-silent-degradation principle — the generated artifact lacks
 /// functionality here, and the user must see it).
 pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
-    let diagnostic = typst::diag::SourceDiagnostic::warning(
+    engine.sink.warn(typst::diag::warning!(
         Span::detached(),
-        typst::foundations::Str::from(format!("trust degraded: {message}")),
-    );
-    engine.sink.warn(diagnostic);
+        "{DEGRADED_PREFIX}{message}"
+    ));
     Ok(Value::None)
 }
 
@@ -157,7 +167,7 @@ pub fn degraded(engine: &mut Engine, message: &str) -> SourceResult<Value> {
 /// error rather than a missing feature: break/continue outside a loop,
 /// etc.; complements [`degraded`]'s warning form; the message follows
 /// typst's original wording, and the error tests match on the message).
-pub fn bail_value(_engine: &mut Engine, message: &str) -> SourceResult<Value> {
+pub fn bail_value(message: &str) -> SourceResult<Value> {
     Err(eco_vec![SourceDiagnostic::error(
         Span::detached(),
         eco_format!("{message}"),

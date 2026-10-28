@@ -39,6 +39,41 @@ pub fn eval_expr(
     func.call::<[Value; 0]>(engine, context, [])
 }
 
+/// A plain top scope from captured bindings (the enclosing scope as the
+/// glue sees it: import writes new names and never touches read-only
+/// marks).
+fn captured_top(captured: &[(&'static str, Value)]) -> Scope {
+    let mut top = Scope::new();
+    for (name, value) in captured {
+        top.bind((*name).into(), Binding::detached(value.clone()));
+    }
+    top
+}
+
+/// A child Vm sharing the engine's world/library/introspector/traced/sink
+/// and extending the route (the assembly shape of `typst_eval`'s
+/// `eval_closure` internals — all fields pub, constructed by copy, the
+/// route's depth counter shared via track+extend so nested guards stay
+/// continuous).
+fn child_vm<'a>(
+    engine: &'a mut Engine,
+    context: Tracked<'a, Context>,
+    top: Scope,
+    span: Span,
+) -> typst_eval::Vm<'a> {
+    let mut scopes = Scopes::new(Some(engine.library));
+    scopes.top = top;
+    let engine = Engine {
+        world: engine.world,
+        library: engine.library,
+        introspector: engine.introspector,
+        traced: engine.traced,
+        sink: TrackedMut::reborrow_mut(&mut engine.sink),
+        route: Route::extend(engine.route.track()),
+    };
+    typst_eval::Vm::new(engine, context, scopes, span)
+}
+
 /// Interprets an **import statement** (glue; mirrors `Eval for
 /// ast::ModuleImport` — import.rs:15-178, a private trait impl, driven
 /// directly through the pub `Vm`/`Eval`): visible names are materialized
@@ -65,7 +100,9 @@ pub fn eval_import(
 
     let mut node = cached_body_node(src);
     node.synthesize(span);
-    if std::env::var_os("TRUST_TRACE_IMPORT").is_some() {
+    static TRACE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("TRUST_TRACE_IMPORT").is_some());
+    if *TRACE {
         eprintln!(
             "[eval_import] src={src:?} span_file={:?} span={:?}",
             span.id().map(|id| id.vpath().get_with_slash().to_string()),
@@ -77,21 +114,7 @@ pub fn eval_import(
         .expect("import statement parses to an expression");
     // Visible names = the enclosing scope (plain bindings; import writes
     // new names and never touches read-only marks).
-    let mut top = Scope::new();
-    for (name, value) in captured {
-        top.bind((*name).into(), Binding::detached(value.clone()));
-    }
-    let mut scopes = Scopes::new(Some(engine.library));
-    scopes.top = top;
-    let engine2 = Engine {
-        world: engine.world,
-        library: engine.library,
-        introspector: engine.introspector,
-        traced: engine.traced,
-        sink: TrackedMut::reborrow_mut(&mut engine.sink),
-        route: Route::extend(engine.route.track()),
-    };
-    let mut vm = Vm::new(engine2, context, scopes, span);
+    let mut vm = child_vm(engine, context, captured_top(captured), span);
     expr.eval(&mut vm)?;
     let mut out = Vec::with_capacity(expected.len());
     for name in expected {
@@ -129,21 +152,7 @@ pub fn eval_include(
     let expr = node
         .cast::<ast::Expr>()
         .expect("include statement parses to an expression");
-    let mut top = Scope::new();
-    for (name, value) in captured {
-        top.bind((*name).into(), Binding::detached(value.clone()));
-    }
-    let mut scopes = Scopes::new(Some(engine.library));
-    scopes.top = top;
-    let engine2 = Engine {
-        world: engine.world,
-        library: engine.library,
-        introspector: engine.introspector,
-        traced: engine.traced,
-        sink: TrackedMut::reborrow_mut(&mut engine.sink),
-        route: Route::extend(engine.route.track()),
-    };
-    let mut vm = Vm::new(engine2, context, scopes, span);
+    let mut vm = child_vm(engine, context, captured_top(captured), span);
     match expr.eval(&mut vm)? {
         Value::Content(content) => Ok(content),
         // Mirrors the original: include always evaluates to content; any
@@ -179,20 +188,7 @@ pub fn eval_vm_exports(
         .cast::<ast::Expr>()
         .expect("cached body node casts to an expression");
     let scope = captured_scope(captured, pending, engine);
-    let mut scopes = Scopes::new(Some(engine.library));
-    scopes.top = scope;
-    // Same engine/route shape as eval_closure: all fields pub, constructed
-    // by copy; the route shares its depth counter via track+extend (nested
-    // guards stay continuous).
-    let engine = Engine {
-        world: engine.world,
-        library: engine.library,
-        introspector: engine.introspector,
-        traced: engine.traced,
-        sink: TrackedMut::reborrow_mut(&mut engine.sink),
-        route: Route::extend(engine.route.track()),
-    };
-    let mut vm = Vm::new(engine, context, scopes, node.span());
+    let mut vm = child_vm(engine, context, scope, node.span());
     let value = expr.eval(&mut vm)?;
     let out = exports
         .iter()

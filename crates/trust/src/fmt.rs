@@ -411,7 +411,6 @@ fn spaced(a: &TokenTree, b: &TokenTree, prev: Option<&TokenTree>) -> bool {
     {
         return false;
     }
-    let _ = punct;
     if let TokenTree::Punct(q) = b {
         if matches!(q.as_char(), ',' | ';' | ')' | ']' | '.' | '?') {
             return false;

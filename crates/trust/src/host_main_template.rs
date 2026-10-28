@@ -374,23 +374,34 @@ impl StaticWorld {
 }
 
 fn parse_pages(spec: &str, total: usize) -> Vec<usize> {
-    let mut out = Vec::new();
+    use std::num::NonZeroUsize;
+    use typst::layout::{PageRange, PageRanges};
+
+    fn bound(s: &str) -> Option<NonZeroUsize> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+        NonZeroUsize::new(s.parse().unwrap_or_else(|_| die("bad --pages")))
+    }
+
+    // String → ranges stays local (upstream's parser lives in typst-cli,
+    // not a library); the inclusion semantics are upstream's, open-ended
+    // ranges included (`2-`, `-3`).
+    let mut ranges: Vec<PageRange> = Vec::new();
     for part in spec.split(',') {
         let part = part.trim();
-        if let Some((a, b)) = part.split_once('-') {
-            let a: usize = a.trim().parse().unwrap_or_else(|_| die("bad --pages"));
-            let b: usize = b.trim().parse().unwrap_or_else(|_| die("bad --pages"));
-            for i in a..=b.min(total) {
-                out.push(i - 1);
+        let range = match part.split_once('-') {
+            Some((a, b)) => bound(a)..=bound(b),
+            None => {
+                let n = bound(part).unwrap_or_else(|| die("bad --pages"));
+                Some(n)..=Some(n)
             }
-        } else {
-            let i: usize = part.parse().unwrap_or_else(|_| die("bad --pages"));
-            if i >= 1 && i <= total {
-                out.push(i - 1);
-            }
-        }
+        };
+        ranges.push(range);
     }
-    out
+    let pages = PageRanges::new(ranges);
+    (0..total).filter(|&i| pages.includes_page_index(i)).collect()
 }
 
 fn print_diagnostics(world: &StaticWorld, diags: &[typst::diag::SourceDiagnostic]) {

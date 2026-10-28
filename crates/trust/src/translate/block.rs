@@ -274,16 +274,10 @@ impl Ctx {
                         // Absolute imports inside a dependency package are
                         // qualified into that package's merged key space
                         // (same treatment as top-level imports).
-                        if raw.starts_with('/')
-                            && let Some(colon) = file.find(':')
-                            && let Some(rel) = file[colon..].find('/')
-                            && file.starts_with('@')
+                        if let Some(qualified) =
+                            super::paths::qualify_package_absolute(&file, &raw, &target)
                         {
-                            target = format!(
-                                "{}/{}",
-                                &file[..colon + rel],
-                                target.trim_start_matches('/')
-                            );
+                            target = qualified;
                         }
                         match (files.contains_key(&target), mods.get(&target)) {
                             (true, Some(mod_name)) => {
@@ -324,16 +318,10 @@ impl Ctx {
                         let raw = str_expr.get().to_string();
                         self.current_file.as_ref().map(|file| {
                             let mut target = normalize_import(file, &raw);
-                            if raw.starts_with('/')
-                                && let Some(colon) = file.find(':')
-                                && let Some(rel) = file[colon..].find('/')
-                                && file.starts_with('@')
+                            if let Some(qualified) =
+                                super::paths::qualify_package_absolute(file, &raw, &target)
                             {
-                                target = format!(
-                                    "{}/{}",
-                                    &file[..colon + rel],
-                                    target.trim_start_matches('/')
-                                );
+                                target = qualified;
                             }
                             target
                         })
@@ -343,11 +331,32 @@ impl Ctx {
                 match import.imports() {
                     None => {
                         let name = match import.new_name() {
-                            Some(new_name) => new_name.as_str().to_string(),
-                            None => super::captures::bare_import_bound_name(source),
+                            Some(new_name) => Ok(new_name.as_str().to_string()),
+                            None => super::captures::bare_import_name(import),
                         };
-                        let rust = bind_local(&mut env, &name);
-                        let _ = writeln!(out, "    let mut {rust} = {module_expr};");
+                        match name {
+                            Ok(name) => {
+                                let rust = bind_local(&mut env, &name);
+                                let _ = writeln!(out, "    let mut {rust} = {module_expr};");
+                            }
+                            // Upstream's error forms, verbatim (import.rs:
+                            // "dynamic import requires an explicit name" /
+                            // "module name would not be a valid identifier").
+                            Err(ast::BareImportError::Dynamic) => {
+                                let at = self.span_of(stmt.span());
+                                let _ = writeln!(
+                                    out,
+                                    "    bail!({at}, \"dynamic import requires an explicit name\"; hint: \"you can name the import with `as`\");"
+                                );
+                            }
+                            Err(_) => {
+                                let at = self.span_of(stmt.span());
+                                let _ = writeln!(
+                                    out,
+                                    "    bail!({at}, \"module name would not be a valid identifier\"; hint: \"you can rename the import with `as`\");"
+                                );
+                            }
+                        }
                     }
                     Some(ast::Imports::Wildcard) => {
                         let mut expanded = internal_target.as_ref().and_then(|target| {

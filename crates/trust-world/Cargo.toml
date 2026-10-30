@@ -1,6 +1,6 @@
 [package]
 name = "trust-world"
-description = "Injected Typst World for trust: injects native modules through a custom World/Library without forking typst, and virtualizes packages"
+description = "Test infrastructure for trust: the InjectWorld used by the differential and official-suite harnesses, and the reference implementation of the host-integration contract (native module injection + package virtualization). Generated artifacts never link this crate"
 version.workspace = true
 edition.workspace = true
 publish = false

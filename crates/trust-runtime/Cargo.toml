@@ -6,10 +6,10 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-typst = "0.15.1"
-typst-syntax = "0.15.1"
-typst-eval = "0.15.1"
-comemo = "0.5.1"
+typst.workspace = true
+typst-syntax.workspace = true
+typst-eval.workspace = true
+comemo.workspace = true
 unicode-segmentation = "1"
-toml = "0.8"
-ecow = "0.2"
+toml.workspace = true
+ecow.workspace = true

@@ -6,12 +6,12 @@ edition.workspace = true
 publish = false
 
 [build-dependencies]
-trust = { path = "../trust" }
+trust.workspace = true
 
 [dependencies]
-trust-runtime = { path = "../trust-runtime" }
-trust-world = { path = "../trust-world" }
-typst = "0.15.1"
-typst-syntax = "0.15.1"
-comemo = "0.5.1"
-ecow = "0.2"
+trust-runtime.workspace = true
+trust-world.workspace = true
+typst.workspace = true
+typst-syntax.workspace = true
+comemo.workspace = true
+ecow.workspace = true

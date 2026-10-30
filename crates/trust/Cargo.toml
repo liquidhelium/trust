@@ -6,13 +6,12 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-typst-kit = { version = "0.15.1", default-features = false, features = ["system-packages", "system-downloader"] }
-# Pinned to typst 0.15.1 to match the upstream AST/semantics
-typst-syntax = "0.15.1"
+typst-kit = { workspace = true, features = ["system-packages", "system-downloader"] }
+typst-syntax.workspace = true
 # Package manifest (entrypoint parsing)
-toml = "0.8"
+toml.workspace = true
 walkdir = "2"
-trust-runtime = { path = "../trust-runtime" }
+trust-runtime.workspace = true
 # Output formatting (fmt module): parse the generated code back and
 # pretty-print it — prettyplease for real Rust, our own layout for the
 # runtime DSL macros. span-locations gives exact byte ranges outside a

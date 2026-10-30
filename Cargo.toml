@@ -5,3 +5,20 @@ members = ["crates/*", "tests"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+[workspace.dependencies]
+# All typst-family crates are pinned to one release: trust's transpilation
+# must match the upstream AST/semantics of exactly this version.
+typst = "0.15.1"
+typst-syntax = "0.15.1"
+typst-eval = "0.15.1"
+typst-layout = "0.15.1"
+typst-library = "0.15.1"
+typst-utils = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false }
+comemo = "0.5.1"
+ecow = "0.2"
+toml = "0.8"
+trust = { path = "crates/trust" }
+trust-runtime = { path = "crates/trust-runtime" }
+trust-world = { path = "crates/trust-world" }

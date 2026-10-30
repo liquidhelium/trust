@@ -47,7 +47,7 @@ which verifies byte-identical output before timing; median of 10 runs):
 |---|---|
 | `crates/trust` | The translator: `typst-syntax` AST frontend → Rust code generation |
 | `crates/trust-runtime` | Runtime support for generated code: parameter destructuring, call protocol, closure construction, content/markup construction |
-| `crates/trust-world` | Test infrastructure: the `InjectWorld` differential/official-suite harnesses run on, doubling as the reference implementation of the host-integration contract (module injection, package virtualization). Generated artifacts never link it |
+| `crates/trust-world` | Test infrastructure: the `InjectWorld` differential/official-suite harnesses run on, doubling as the reference implementation of the host-integration contract (module injection, package virtualization) |
 | `crates/trust-diff` | Differential testing: fixtures translated at build time, compared case by case against the `typst-eval` interpreter |
 | `tests/` | Official typst `tests/suite` comparison harness: vendored corpus, per-case differential against the interpreter, known-divergence gating (`cargo suite` regenerates, `cargo testit` runs) |
 | `docs/` | Architecture and host-integration documents |

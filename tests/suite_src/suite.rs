@@ -1,7 +1,6 @@
 //! Suite differential harness: per case, golden (interpreter) vs gen
-//! (translated assembly), judged by the former probe runner's rules and
-//! gated against `known-divergence.txt` (both directions: no new failure,
-//! no silent fix without updating the list).
+//! (translated assembly), judged by the former probe runner's rules. Any
+//! divergence is a failure.
 
 use comemo::Track;
 use std::collections::BTreeMap;
@@ -202,7 +201,7 @@ fn suite() {
 
 fn run() {
     // The driver copy is the compile-time package: tests/build/driver →
-    // the tests/ root (corpus + known-divergence) is two levels up.
+    // the tests/ root (corpus) is two levels up.
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let manifest: Vec<Case> = serde_json::from_str(
         &std::fs::read_to_string(root.join("build/manifest.json"))
@@ -218,12 +217,6 @@ fn run() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let known: BTreeSet<String> = std::fs::read_to_string(root.join("known-divergence.txt"))
-        .expect("known-divergence.txt")
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .map(|l| l.trim().to_string())
-        .collect();
 
     // Shared base: fonts + suite sources (the cats tree mounted under
     // both suite and in-package keys) + optional dev assets (typst-dev-
@@ -323,8 +316,7 @@ fn run() {
 
     let mut cases = manifest;
     // html/pdf/pdftags/bundle exceed the current pipeline (paged/SVG) and
-    // are skipped wholesale (same caliber as the former probe; the
-    // known-divergence list is maintained against this filtered set).
+    // are skipped wholesale (same caliber as the former probe).
     cases.retain(|c| {
         !c.attrs
             .iter()
@@ -336,10 +328,8 @@ fn run() {
     cases.truncate(max);
 
     let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
-    let mut new_failures = Vec::new();
+    let mut failures = Vec::new();
     let mut flaky = Vec::new();
-    let mut fixed = Vec::new();
-    let mut unexpected_pass = Vec::new();
     let mut fail_details = Vec::new();
 
     let run_case = |case: &Case, base: &InjectWorld, root: &std::path::Path| -> (String, String) {
@@ -381,42 +371,28 @@ fn run() {
         let (status, detail) = run_case(case, &base, &root);
         *by_status.entry(status.clone()).or_default() += 1;
         if status != "pass" {
-            if !known.contains(&case.name) {
-                // Single-case retry gate: rerun immediately within the
-                // same round; a passing rerun means flakiness (warned, not
-                // fatal) — a real regression fails both rounds and only
-                // then enters the new-failure list.
-                let (retry_status, retry_detail) = run_case(case, &base, &root);
-                if retry_status == "pass" {
-                    flaky.push(case.name.clone());
-                    continue;
-                }
-                fail_details.push(format!(
-                    "{}  [{}] {}",
-                    case.name, retry_status, retry_detail
-                ));
-                new_failures.push(case.name.clone());
-            } else {
-                fail_details.push(format!("{}  [{}] {}", case.name, status, detail));
+            // Single-case retry gate: rerun immediately within the same
+            // round; a passing rerun means flakiness (warned, not fatal) —
+            // a real regression fails both rounds and only then enters the
+            // failure list.
+            let (retry_status, retry_detail) = run_case(case, &base, &root);
+            if retry_status == "pass" {
+                flaky.push(case.name.clone());
+                continue;
             }
-        } else if known.contains(&case.name) {
-            unexpected_pass.push(case.name.clone());
+            fail_details.push(format!(
+                "{}  [{}] {}",
+                case.name, retry_status, retry_detail
+            ));
+            failures.push(case.name.clone());
         }
     }
     if !flaky.is_empty() {
         println!("  ⚠ flaky (rerun passed, exempted): {}", flaky.join(", "));
     }
-    for k in &known {
-        if !cases.iter().any(|c| c.name == *k) && filters.is_empty() {
-            fixed.push(k.clone()); // no longer failing (stale list entry)
-        }
-    }
 
     let total: usize = by_status.values().sum();
-    println!(
-        "══ trust-suite: {total} cases (known-divergence: {}) ══",
-        known.len()
-    );
+    println!("══ trust-suite: {total} cases ══");
     for (k, v) in &by_status {
         println!("  {k:<24} {v}");
     }
@@ -427,18 +403,8 @@ fn run() {
         println!("  … {} more failures", fail_details.len() - 20);
     }
     assert!(
-        new_failures.is_empty(),
-        "new failures (not in known-divergence.txt):\n  {}",
-        new_failures.join("\n  ")
-    );
-    assert!(
-        unexpected_pass.is_empty(),
-        "known-divergence cases now passing (update the list and review):\n  {}",
-        unexpected_pass.join("\n  ")
-    );
-    assert!(
-        fixed.is_empty(),
-        "list contains unrun/vanished cases (prune it):\n  {}",
-        fixed.join("\n  ")
+        failures.is_empty(),
+        "divergences:\n  {}",
+        failures.join("\n  ")
     );
 }

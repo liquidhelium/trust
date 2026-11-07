@@ -508,32 +508,37 @@ impl Ctx {
             ast::Expr::Label(l) => format!("rt::label({:?})", l.get()),
             ast::Expr::Heading(h) => {
                 // `= body` (depth = number of equals signs): mirrors `Eval
-                // for ast::Heading`.
+                // for ast::Heading`, spanned with the heading's own span
+                // (the interpreter's Expr-level `.spanned(span)`).
+                let at = self.span_of(h.span());
                 let items: Vec<ContentItem> = h.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
-                format!("Value::Content(rt::heading({body}, {}))", h.depth())
+                format!("Value::Content(rt::heading({body}, {}, {at}))", h.depth())
             }
             ast::Expr::ListItem(li) => {
+                let at = self.span_of(li.span());
                 let items: Vec<ContentItem> = li.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
-                format!("Value::Content(rt::list_item({body}))")
+                format!("Value::Content(rt::list_item({body}, {at}))")
             }
             ast::Expr::EnumItem(ei) => {
+                let at = self.span_of(ei.span());
                 let items: Vec<ContentItem> = ei.body().exprs().map(ContentItem::Part).collect();
                 let body = self.content_seq(&items, env);
                 let num = match ei.number() {
                     Some(n) => format!("Some({n}u64)"),
                     None => "None".to_string(),
                 };
-                format!("Value::Content(rt::enum_item({body}, {num}))")
+                format!("Value::Content(rt::enum_item({body}, {num}, {at}))")
             }
             ast::Expr::TermItem(ti) => {
+                let at = self.span_of(ti.span());
                 let term: Vec<ContentItem> = ti.term().exprs().map(ContentItem::Part).collect();
                 let desc: Vec<ContentItem> =
                     ti.description().exprs().map(ContentItem::Part).collect();
                 let term = self.content_seq(&term, env);
                 let desc = self.content_seq(&desc, env);
-                format!("Value::Content(rt::term_item({term}, {desc}))")
+                format!("Value::Content(rt::term_item({term}, {desc}, {at}))")
             }
             ast::Expr::Link(l) => {
                 // Markup bare link: mirrors `Eval for ast::Link`
@@ -1484,7 +1489,11 @@ impl Ctx {
             }
             ContentItem::DynamicInclude(code) => format!("Value::Content({code})"),
             ContentItem::Part(ast::Expr::Text(t)) => {
-                format!("rt::text({:?})", t.get().as_str())
+                // The interpreter's `Eval for ast::Expr` wraps every value
+                // in `.spanned(span)`; the span feeds element hashing and
+                // measure's closest-match introspection.
+                let at = self.span_of(t.span());
+                format!("rt::text({:?}, {at})", t.get().as_str())
             }
             ContentItem::Part(ast::Expr::Space(_)) => "rt::space()".into(),
             ContentItem::Part(ast::Expr::Shorthand(s)) => {
@@ -1507,7 +1516,10 @@ impl Ctx {
             }
             ContentItem::Part(ast::Expr::Strong(strong)) => {
                 // `*body*` (mirrors eval_markup: StrongElem::new(body));
-                // the body translates as a nested markup sequence.
+                // the body translates as a nested markup sequence; spanned
+                // with the expression's own span (the interpreter's Expr
+                // wrapper does the same).
+                let at = self.span_of(strong.span());
                 let items: Vec<ContentItem> = strong
                     .body()
                     .exprs()
@@ -1517,10 +1529,12 @@ impl Ctx {
                         other => ContentItem::Part(other),
                     })
                     .collect();
-                format!("rt::strong({})", self.content_seq(&items, env))
+                format!("rt::strong({}, {at})", self.content_seq(&items, env))
             }
             ContentItem::Part(ast::Expr::Emph(emph)) => {
-                // `_body_` (mirrors eval_markup: EmphElem::new(body)).
+                // `_body_` (mirrors eval_markup: EmphElem::new(body));
+                // spanned with the expression's own span.
+                let at = self.span_of(emph.span());
                 let items: Vec<ContentItem> = emph
                     .body()
                     .exprs()
@@ -1530,7 +1544,7 @@ impl Ctx {
                         other => ContentItem::Part(other),
                     })
                     .collect();
-                format!("rt::emph({})", self.content_seq(&items, env))
+                format!("rt::emph({}, {at})", self.content_seq(&items, env))
             }
             ContentItem::Part(ast::Expr::Linebreak(_)) => "rt::linebreak()".into(),
             ContentItem::Part(ast::Expr::Parbreak(_)) => "rt::parbreak()".into(),

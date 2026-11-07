@@ -732,6 +732,14 @@ impl TopGen {
                     escape(name.as_str())
                 );
                 self.own.push((name.as_str().to_string(), slot.clone()));
+                // Same-scope rebinding, the other direction: a later `#let`
+                // shadows an earlier import's binding of the same name
+                // (typst's top level is one scope; scopes.top.define
+                // overwrites). own is concatenated after env.module by the
+                // env builders, so the let wins once the import's entry is
+                // gone.
+                let name_str = name.as_str();
+                self.env.module.retain(|(n, _)| n != name_str);
             }
             ast::LetBindingKind::Normal(pattern) => {
                 // Declaration without initializer (`#let x`): binds
@@ -754,6 +762,8 @@ impl TopGen {
                                 escape(name.as_str())
                             );
                             self.own.push((name.as_str().to_string(), slot));
+                            let name_str = name.as_str();
+                            self.env.module.retain(|(n, _)| n != name_str);
                         }
                     }
                     return;
@@ -871,7 +881,10 @@ impl TopGen {
                         "    {{ let v = {value};\n{decls}{stmts}{fills}    }}"
                     );
                 }
+                let bound_names: Vec<String> =
+                    bound.iter().map(|(n, _)| n.clone()).collect();
                 self.own.extend(bound);
+                self.env.module.retain(|(n, _)| !bound_names.contains(n));
             }
         }
     }
@@ -946,6 +959,7 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                     // evaluation).
                     if let Some(edge) = plan.imports.get(edge_cursor) {
                         edge_cursor += 1;
+                        let env_len_before = top.env.module.len();
                         cx.process_import_edge(
                             edge,
                             plan,
@@ -960,6 +974,24 @@ fn translate_package_parts(input: &PackageInput, module_name: &str, cx: &mut Ctx
                             &mut import_slots,
                             &mut top.binding_code,
                         );
+                        // typst's top level is one scope with
+                        // statement-order rebinding: an item/bare import
+                        // re-binds a name an earlier `#let` established
+                        // (`#let v = [foo]` + `#import "m.typ": v` → the
+                        // imported value wins downstream, import.rs's
+                        // `scopes.top.bind` writes unconditionally). The
+                        // import's bindings were just pushed onto
+                        // `env.module` **after** `own`'s entries are
+                        // concatenated by content_env — but rev-order
+                        // lookup would still find the let first because
+                        // content_env appends own last. Drop the shadowed
+                        // own entries so the last binding in source order
+                        // is the one resolution finds.
+                        let bound_now: Vec<String> = top.env.module[env_len_before..]
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        top.own.retain(|(n, _)| !bound_now.contains(n));
                     }
                     // Mirrors eval_markup: the statement joins the output
                     // as an empty display slot.

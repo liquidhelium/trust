@@ -74,8 +74,17 @@ pub fn attach_labels(engine: &mut Engine, items: Vec<Value>) -> typst::foundatio
 }
 
 /// `= body` (a level-depth heading): mirrors eval_markup's
-/// `HeadingElem::new(body).with_depth(depth).pack()`.
-pub fn heading(body: typst::foundations::Content, depth: usize) -> typst::foundations::Content {
+/// `HeadingElem::new(body).with_depth(depth).pack()` spanned with the
+/// heading's source span (the interpreter's `Eval for ast::Expr` wraps
+/// every value in `.spanned(span)`; `hash128(&elem)` includes the span, so
+/// a detached span breaks measure-introspection key matching between the
+/// measured copy and the document copy — the convergence loop then
+/// stabilizes where the interpreter's does not).
+pub fn heading(
+    body: typst::foundations::Content,
+    depth: usize,
+    at: Span,
+) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
     // ast::Heading::depth() is the equals-sign count and is a NonZeroUsize
     // ≥ 1 by grammar; the generated literal passes it through verbatim.
@@ -83,36 +92,45 @@ pub fn heading(body: typst::foundations::Content, depth: usize) -> typst::founda
     typst::model::HeadingElem::new(body)
         .with_depth(depth)
         .pack()
+        .spanned(at)
 }
 
 /// `- body` list item: mirrors `ListItem::new(body).pack()` (consecutive
 /// items are grouped into a List at realize time; no aggregation needed on
-/// the translation side).
-pub fn list_item(body: typst::foundations::Content) -> typst::foundations::Content {
+/// the translation side). Spanned like the interpreter's per-expression
+/// `.spanned(span)` wrapper.
+pub fn list_item(
+    body: typst::foundations::Content,
+    at: Span,
+) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    typst::model::ListItem::new(body).pack()
+    typst::model::ListItem::new(body).pack().spanned(at)
 }
 
 /// `+ body` enum item (`number` is the explicit index in the `+3.` form).
+/// Spanned like the interpreter's per-expression `.spanned(span)` wrapper.
 pub fn enum_item(
     body: typst::foundations::Content,
     number: Option<u64>,
+    at: Span,
 ) -> typst::foundations::Content {
     use typst::foundations::{NativeElement, Smart};
     let mut elem = typst::model::EnumItem::new(body);
     if let Some(n) = number {
         elem.number.set(Smart::Custom(n));
     }
-    elem.pack()
+    elem.pack().spanned(at)
 }
 
-/// `/ term: desc` term item.
+/// `/ term: desc` term item. Spanned like the interpreter's
+/// per-expression `.spanned(span)` wrapper.
 pub fn term_item(
     term: typst::foundations::Content,
     description: typst::foundations::Content,
+    at: Span,
 ) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    typst::model::TermItem::new(term, description).pack()
+    typst::model::TermItem::new(term, description).pack().spanned(at)
 }
 
 /// Bare link in markup (`https://…`): mirrors `Url::new(...)` +
@@ -120,19 +138,27 @@ pub fn term_item(
 pub fn link(url: &str, at: Span) -> SourceResult<typst::foundations::Content> {
     use typst::foundations::NativeElement;
     let url = typst::model::Url::new(url.to_string()).at(at)?;
-    Ok(typst::model::LinkElem::from_url(url).pack())
+    Ok(typst::model::LinkElem::from_url(url).pack().spanned(at))
 }
 
-/// `*body*`: mirrors eval_markup's `StrongElem::new(body).pack()`.
-pub fn strong(body: typst::foundations::Content) -> typst::foundations::Content {
+/// `*body*`: mirrors eval_markup's `StrongElem::new(body).pack()` spanned
+/// with the expression's source span.
+pub fn strong(
+    body: typst::foundations::Content,
+    at: Span,
+) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    typst::model::StrongElem::new(body).pack()
+    typst::model::StrongElem::new(body).pack().spanned(at)
 }
 
-/// `_body_`: mirrors eval_markup's `EmphElem::new(body).pack()`.
-pub fn emph(body: typst::foundations::Content) -> typst::foundations::Content {
+/// `_body_`: mirrors eval_markup's `EmphElem::new(body).pack()` spanned
+/// with the expression's source span.
+pub fn emph(
+    body: typst::foundations::Content,
+    at: Span,
+) -> typst::foundations::Content {
     use typst::foundations::NativeElement;
-    typst::model::EmphElem::new(body).pack()
+    typst::model::EmphElem::new(body).pack().spanned(at)
 }
 
 /// Markup escapes/shorthands: mirrors the original
@@ -160,9 +186,10 @@ pub fn raw(lines: EcoVec<EcoString>, lang: Option<EcoString>, block: bool) -> Va
     Value::Content(elem.pack())
 }
 
-/// A text run.
-pub fn text(s: &str) -> typst::foundations::Content {
-    typst::text::TextElem::packed(typst::foundations::Str::from(s))
+/// A text run. Spanned with the text's source span (the interpreter's
+/// `Value::Content(..).spanned(span)` in `Eval for ast::Expr`).
+pub fn text(s: &str, at: Span) -> typst::foundations::Content {
+    typst::text::TextElem::packed(typst::foundations::Str::from(s)).spanned(at)
 }
 
 /// A space.

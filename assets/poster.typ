@@ -2,6 +2,7 @@
 
 #set page(width: 760pt, height: auto, margin: 16pt, fill: white)
 #set text(font: "DejaVu Sans Mono", size: 11pt, fill: rgb("#1f2328"))
+#set underline(offset: 2pt, stroke: 0.5pt)
 
 #show: codly.theme("github-light")
 #show: codly.set_(padding: 6pt, radius: 4pt)

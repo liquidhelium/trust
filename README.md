@@ -1,5 +1,7 @@
 # trust - translator, from <ins>T</ins>ypst to <ins>RUST</ins>
 
+![Typst snippet next to the Rust trust generates](assets/poster.png)
+
 `trust` is a translator from Typst to Rust. It can turn a single `.typ`
 file into a standalone program, or a Typst package into a Rust crate.
 

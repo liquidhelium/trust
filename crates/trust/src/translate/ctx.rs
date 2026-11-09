@@ -151,6 +151,9 @@ pub(super) struct Env {
     /// mirroring typst-eval's wildcard-import scopes.top.bind) → module →
     /// global.
     pub(super) wildcards: Vec<String>,
+    /// Locals held as `f64` for their whole lifetime (L1 float internals).
+    /// Empty outside a function body, where nothing is proven.
+    pub(super) floats: std::collections::BTreeSet<String>,
 }
 
 impl Ctx {

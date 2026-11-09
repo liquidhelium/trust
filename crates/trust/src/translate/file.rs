@@ -184,6 +184,7 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
                         locals: Vec::new(),
                         module: visible.clone(),
                         wildcards: Vec::new(),
+                        floats: std::collections::BTreeSet::new(),
                     },
                 });
             }
@@ -214,18 +215,21 @@ pub fn translate(src: &str, module_name: &str) -> Result<String, Vec<Diag>> {
             locals: Vec::new(),
             module: slots_of(0..=i),
             wildcards: Vec::new(),
+            floats: std::collections::BTreeSet::new(),
         };
         let init_env = if i > 0 {
             Env {
                 locals: Vec::new(),
                 module: slots_of(0..=i - 1),
                 wildcards: Vec::new(),
+                floats: std::collections::BTreeSet::new(),
             }
         } else {
             Env {
                 locals: Vec::new(),
                 module: Vec::new(),
                 wildcards: Vec::new(),
+                floats: std::collections::BTreeSet::new(),
             }
         };
         for (_, slot) in &top.names {

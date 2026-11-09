@@ -23,6 +23,7 @@ impl Ctx {
     ) -> String {
         let mut body = String::new();
         let mut fn_env = env.clone();
+        fn_env.floats = super::typed::float_locals(closure.body().to_untyped());
         // Whether `__st` is needed (function body / defaults reference
         // module slots) is tracked during generation.
         self.used_state = false;
@@ -69,7 +70,7 @@ impl Ctx {
         // block bodies re-scan themselves in block()).
         let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
         let value = self.expr(closure.body(), &mut fn_env);
-        self.close_let_hoists();
+        let value = box_float(value, closure.body(), &fn_env);
         let value = if hoist.is_empty() {
             value
         } else {
@@ -226,6 +227,7 @@ impl Ctx {
             locals: Vec::new(),
             module: Vec::new(),
             wildcards: Vec::new(),
+            floats: super::typed::float_locals(closure.body().to_untyped()),
         };
         self.used_state = false;
         self.in_fn += 1;
@@ -281,6 +283,7 @@ impl Ctx {
         // bodies re-scan themselves in block()).
         let hoist = self.open_let_hoists(std::iter::once(closure.body().to_untyped()));
         let value = self.expr(closure.body(), &mut fn_env);
+        let value = box_float(value, closure.body(), &fn_env);
         self.close_let_hoists();
         let value = if hoist.is_empty() {
             value
@@ -432,4 +435,14 @@ enum NamedParams<'a> {
     /// Plain required takes (closure stubs; the interpreted snippet already
     /// filled defaults at creation).
     Runtime,
+}
+
+/// A float expression used as a function result has to cross back into
+/// `Value`; one that already is a `Value` passes through.
+fn box_float(code: String, body: ast::Expr, env: &super::ctx::Env) -> String {
+    if super::typed::is_float_expr(body, &env.floats) {
+        format!("Value::Float({code})")
+    } else {
+        code
+    }
 }

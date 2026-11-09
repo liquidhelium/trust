@@ -179,6 +179,18 @@ impl Ctx {
                         out.push_str(&check);
                     }
                     ast::LetBindingKind::Normal(pattern) => {
+                        if let ast::Pattern::Normal(ast::Expr::Ident(ident)) = pattern {
+                            if env.floats.contains(ident.as_str())
+                                && lets.init().is_some_and(|init| {
+                                    super::typed::is_float_expr(init, &env.floats)
+                                })
+                            {
+                                let rust = bind_local(&mut env, ident.as_str());
+                                let _ = writeln!(out, "    let mut {rust} = {init};");
+                                out.push_str(&check);
+                                continue;
+                            }
+                        }
                         let tmp = format!("__dval{}", self.fresh_id());
                         let _ = writeln!(out, "    let {tmp} = {init};");
                         out.push_str(&check);
@@ -501,6 +513,11 @@ impl Ctx {
                 continue;
             }
             let value = self.expr(stmt, &mut env);
+            let value = if super::typed::is_float_expr(stmt, &env.floats) {
+                format!("Value::Float({value})")
+            } else {
+                value
+            };
             let at = self.span_of(stmt.span());
             last = Some((value, at));
         }

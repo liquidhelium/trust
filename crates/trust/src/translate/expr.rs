@@ -80,6 +80,11 @@ impl Ctx {
             ast::Expr::Int(i) => format!("Value::Int({})", i.get()),
             // inf/nan Debug shapes are not valid Rust literals; go through
             // constants.
+            ast::Expr::Float(f)
+                if super::typed::is_float_expr(ast::Expr::Float(f), &env.floats) =>
+            {
+                float_literal(f.get())
+            }
             ast::Expr::Float(f) if f.get().is_infinite() => format!(
                 "Value::Float(f64::{}INFINITY)",
                 if f.get() > 0.0 { "" } else { "-" }
@@ -291,17 +296,26 @@ impl Ctx {
             }
             ast::Expr::Unary(unary) => {
                 let inner = self.expr(unary.expr(), env);
+                if matches!(unary.op(), ast::UnOp::Pos | ast::UnOp::Neg)
+                    && super::typed::is_float_expr(ast::Expr::Unary(unary), &env.floats)
+                {
+                    let sign = if matches!(unary.op(), ast::UnOp::Neg) { "-" } else { "" };
+                    return format!("({sign}{inner})");
+                }
                 let op = match unary.op() {
                     ast::UnOp::Pos => "pos",
                     ast::UnOp::Neg => "neg",
                     ast::UnOp::Not => "not",
                 };
-                {
-                    let at = self.span_of(unary.span());
-                    format!("ops::{op}({inner}).at({at})?")
-                }
+                let at = self.span_of(unary.span());
+                format!("ops::{op}({inner}).at({at})?")
             }
-            ast::Expr::Binary(binary) => self.binary(binary, env),
+            ast::Expr::Binary(binary) => {
+                if super::typed::is_float_expr(ast::Expr::Binary(binary), &env.floats) {
+                    return self.float_binary(binary, env);
+                }
+                self.binary(binary, env)
+            }
             ast::Expr::FieldAccess(access) => {
                 let target = self.expr(access.target(), env);
                 let field = access.field().as_str();
@@ -751,6 +765,10 @@ impl Ctx {
     fn ident(&mut self, ident: ast::Ident, env: &mut Env) -> String {
         let name = ident.as_str();
         if let Some((_, rust)) = env.locals.iter().rev().find(|(n, _)| n == name) {
+            // A float local is held as `f64`; copying it is the read.
+            if env.floats.contains(name) {
+                return rust.clone();
+            }
             return format!("{rust}.clone()");
         }
         // Runtime wildcard layer (after `import <runtime value>: *`): names
@@ -800,6 +818,37 @@ impl Ctx {
         )
     }
 
+
+
+    /// Evaluate `expr` and box the result when it is a float fragment:
+    /// call arguments, conditions, and joins all consume `Value`.
+    fn as_value(&mut self, expr: ast::Expr, env: &mut Env) -> String {
+        let code = self.expr(expr, env);
+        if super::typed::is_float_expr(expr, &env.floats) {
+            format!("Value::Float({code})")
+        } else {
+            code
+        }
+    }
+
+    /// `+` `-` `*` `/` over a proven float fragment: plain `f64`
+    /// arithmetic, no `Value` boxing and no `ops::` dispatch. Typst's
+    /// float arithmetic is exactly this and never errors, so nothing is
+    /// lost by skipping the operator function.
+    fn float_binary(&mut self, binary: ast::Binary, env: &mut Env) -> String {
+        use ast::BinOp::*;
+        let lhs = self.expr(binary.lhs(), env);
+        let rhs = self.expr(binary.rhs(), env);
+        let op = match binary.op() {
+            Add => "+",
+            Sub => "-",
+            Mul => "*",
+            Div => "/",
+            _ => unreachable!("float_binary only sees arithmetic"),
+        };
+        format!("({lhs} {op} {rhs})")
+    }
+
     fn binary(&mut self, binary: ast::Binary, env: &mut Env) -> String {
         use ast::BinOp::*;
         let op = binary.op();
@@ -811,8 +860,8 @@ impl Ctx {
         }
         // and/or short-circuit (mirrors typst-eval/src/ops.rs).
         if matches!(op, And | Or) {
-            let lhs = self.expr(binary.lhs(), env);
-            let rhs = self.expr(binary.rhs(), env);
+            let lhs = self.as_value(binary.lhs(), env);
+            let rhs = self.as_value(binary.rhs(), env);
             let (test, fuse, rest) = match op {
                 And => ("__l == Value::Bool(false)", "Value::Bool(false)", "and"),
                 Or => ("__l == Value::Bool(true)", "Value::Bool(true)", "or"),
@@ -823,8 +872,8 @@ impl Ctx {
                 "{{ let __l = {lhs}; if {test} {{ {fuse} }} else {{ ops::{rest}(__l, {rhs}).at({at})? }} }}"
             );
         }
-        let lhs = self.expr(binary.lhs(), env);
-        let rhs = self.expr(binary.rhs(), env);
+        let lhs = self.as_value(binary.lhs(), env);
+        let rhs = self.as_value(binary.rhs(), env);
         match op {
             Add => self.span_fmt(binary.span(), format!("ops::add({lhs}, {rhs}).at({{at}})?")),
             Sub => self.span_fmt(binary.span(), format!("ops::sub({lhs}, {rhs}).at({{at}})?")),
@@ -990,13 +1039,13 @@ impl Ctx {
             let item_at = self.span_of(arg.span());
             match arg {
                 ast::Arg::Pos(expr) => {
-                    let value = self.expr(expr, env);
+                    let value = self.as_value(expr, env);
                     let _ = write!(out, " p({item_at}, {{ {value} }})");
                 }
                 ast::Arg::Named(named) => {
                     let name = named.name().as_str();
                     let value_at = self.span_of(named.expr().span());
-                    let value = self.expr(named.expr(), env);
+                    let value = self.as_value(named.expr(), env);
                     let _ = write!(
                         out,
                         " n({item_at}, {value_at}, \"{}\", {{ {value} }})",
@@ -1004,7 +1053,7 @@ impl Ctx {
                     );
                 }
                 ast::Arg::Spread(spread) => {
-                    let value = self.expr(spread.expr(), env);
+                    let value = self.as_value(spread.expr(), env);
                     let _ = write!(out, " s({item_at}, {{ {value} }})");
                 }
             }
@@ -1864,5 +1913,16 @@ pub(super) fn scan_let_exprs(node: &typst_syntax::SyntaxNode, out: &mut Vec<Stri
     }
     for child in node.children() {
         scan_let_exprs(child, out);
+    }
+}
+
+/// A float literal usable as a bare `f64` operand.
+fn float_literal(value: f64) -> String {
+    if value.is_nan() {
+        "f64::NAN".to_string()
+    } else if value.is_infinite() {
+        format!("f64::{}INFINITY", if value > 0.0 { "" } else { "-" })
+    } else {
+        format!("{:?}", value)
     }
 }

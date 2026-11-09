@@ -13,3 +13,12 @@
 #let deg-sum(a) = a + 45deg
 #let half() = 50%
 #let em-plus(x) = x + 2em
+#let lerp() = {
+  let a = 1.5
+  let b = a * 2.0 + 3.0
+  b - a
+}
+#let scale() = {
+  let k = 0.5
+  -(k * 4.0 + 1.25)
+}

@@ -34,6 +34,8 @@ fn cases(fixture: &str) -> Vec<&'static str> {
             "m.deg-sum(10deg)",
             "m.half()",
             "m.em-plus(1em)",
+            "m.lerp()",
+            "m.scale()",
         ],
         "control" => vec![
             "m.fact(1)",

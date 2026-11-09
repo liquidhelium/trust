@@ -295,55 +295,94 @@ comemo = "0.5.1"
 
 [profile.release]
 opt-level = 3
+
+# Standalone project: detach from any enclosing cargo workspace
+# (generation may run inside one, e.g. a trust checkout).
+[workspace]
 "#
     )
 }
 
 /// Copies the translator's own runtime crate next to the generated
 /// project (`vendor/trust-runtime`). The runtime's manifest inherits
-/// `version`/`edition` from the trust workspace — the vendored copy
-/// stands alone, so those keys are resolved to their concrete values.
+/// `[package]` keys from `[workspace.package]` and dependency specs from
+/// `[workspace.dependencies]` — the vendored copy stands alone, so every
+/// inherited key is resolved to its concrete value.
 fn vendor_runtime(out_dir: &Path) -> Result<(), String> {
     let runtime_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../trust-runtime");
     let dest = out_dir.join("vendor/trust-runtime");
     copy_tree(&runtime_src.join("src"), &dest.join("src"))?;
     let manifest = std::fs::read_to_string(runtime_src.join("Cargo.toml"))
         .map_err(|e| format!("vendor Cargo.toml: {e}"))?;
-    let (version, edition) = workspace_version_edition();
-    let manifest = manifest
-        .replace(
-            "version.workspace = true",
-            &format!("version = \"{version}\""),
-        )
-        .replace(
-            "edition.workspace = true",
-            &format!("edition = \"{edition}\""),
-        );
-    std::fs::write(dest.join("Cargo.toml"), manifest)
+    let resolved = resolve_workspace_inheritance(&manifest)?;
+    std::fs::write(dest.join("Cargo.toml"), resolved)
         .map_err(|e| format!("vendor Cargo.toml: {e}"))?;
     Ok(())
 }
 
-/// The trust workspace's `[workspace.package]` version/edition (resolved
-/// into the vendored manifest; a missing key falls back to the values the
-/// runtime actually builds with).
-fn workspace_version_edition() -> (String, String) {
+/// Resolves every `key.workspace = true` inheritance line against the
+/// trust workspace root: `[package]` keys from `[workspace.package]`,
+/// dependency specs from `[workspace.dependencies]`. Unresolvable
+/// inheritance is an error, never a guess — a silently wrong vendored
+/// manifest fails far from its cause.
+fn resolve_workspace_inheritance(manifest: &str) -> Result<String, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-    let Ok(text) = std::fs::read_to_string(root) else {
-        return ("0.1.0".into(), "2021".into());
-    };
-    let manifest: toml::Table = toml::from_str(&text).unwrap_or_default();
-    let package = manifest.get("workspace").and_then(|w| w.get("package"));
-    let get = |key: &str| {
-        package
-            .and_then(|p| p.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    (
-        get("version").unwrap_or_else(|| "0.1.0".into()),
-        get("edition").unwrap_or_else(|| "2021".into()),
-    )
+    let text = std::fs::read_to_string(&root)
+        .map_err(|e| format!("read {}: {e}", root.display()))?;
+    let root_manifest: toml::Table =
+        toml::from_str(&text).map_err(|e| format!("parse {}: {e}", root.display()))?;
+    let workspace = root_manifest.get("workspace").ok_or("root manifest has no [workspace]")?;
+    let package = workspace.get("package").and_then(|v| v.as_table());
+    let deps = workspace.get("dependencies").and_then(|v| v.as_table());
+
+    let mut out = String::with_capacity(manifest.len());
+    for line in manifest.lines() {
+        let inherited = line
+            .trim()
+            .split_once('=')
+            .filter(|(_, v)| v.trim() == "true")
+            .and_then(|(k, _)| k.trim().strip_suffix(".workspace"));
+        match inherited {
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            Some(name) => {
+                let value = package
+                    .and_then(|p| p.get(name))
+                    .or_else(|| deps.and_then(|d| d.get(name)))
+                    .ok_or(format!("unresolvable workspace inheritance: {name}"))?;
+                out.push_str(&format!("{name} = {}", toml_spec(value)?));
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A workspace-dependency value as an inline TOML spec (string, bool,
+/// array, or inline table of those).
+fn toml_spec(value: &toml::Value) -> Result<String, String> {
+    match value {
+        toml::Value::String(s) => Ok(format!("{s:?}")),
+        toml::Value::Integer(i) => Ok(i.to_string()),
+        toml::Value::Boolean(b) => Ok(b.to_string()),
+        toml::Value::Array(items) => {
+            let parts = items
+                .iter()
+                .map(toml_spec)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+        toml::Value::Table(t) => {
+            let parts = t
+                .iter()
+                .map(|(k, v)| Ok(format!("{k} = {}", toml_spec(v)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("{{ {} }}", parts.join(", ")))
+        }
+        _ => Err(format!("unsupported workspace value: {value:?}")),
+    }
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<(), String> {

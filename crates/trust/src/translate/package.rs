@@ -226,19 +226,12 @@ fn plan_files(
                             .cloned()
                             .unwrap_or_else(|| raw.clone())
                     } else {
-                        let mut target = normalize_import(path, &raw);
-                        // An **absolute** import inside a dependency package
-                        // (`/src/x.typ`) is qualified into that package's
-                        // merged key space (relative imports get the prefix
-                        // naturally via directory joining; absolute ones
-                        // would land at top-level keys and lose package
-                        // ownership).
-                        if let Some(qualified) =
-                            super::paths::qualify_package_absolute(path, &raw, &target)
-                        {
-                            target = qualified;
-                        }
-                        target
+                        // Absolute imports inside a dependency package are
+                        // qualified into that package's merged key space by
+                        // normalize_import's rooted handling (relative
+                        // imports get the prefix naturally via directory
+                        // joining).
+                        normalize_import(path, &raw)
                     };
                     // A non-external Str not in the file set: no
                     // translate-time interception anymore — the world may
@@ -585,6 +578,7 @@ impl TopGen {
                 locals: Vec::new(),
                 module: Vec::new(),
                 wildcards: Vec::new(),
+                floats: std::collections::BTreeSet::new(),
             },
             own: Vec::new(),
             own_seen: std::collections::HashMap::new(),

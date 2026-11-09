@@ -98,24 +98,3 @@ fn normalize_import_segments(from: &str, raw: &str) -> String {
     parts.join("/")
 }
 
-/// Re-qualifies an **absolute** import made from inside a dependency
-/// package into that package's merged key space: `from` is the importing
-/// file's merge key (`@ns/name:ver/rel`), and the raw import's leading `/`
-/// anchors at the package root (the spec prefix), not the top level —
-/// otherwise the target would lose package ownership. Returns `None` for
-/// non-absolute imports or non-package importing files.
-pub(super) fn qualify_package_absolute(from: &str, raw: &str, target: &str) -> Option<String> {
-    if !raw.starts_with('/') {
-        return None;
-    }
-    let colon = from.find(':')?;
-    let rel = from[colon..].find('/')?;
-    if !from.starts_with('@') {
-        return None;
-    }
-    Some(format!(
-        "{}/{}",
-        &from[..colon + rel],
-        target.trim_start_matches('/')
-    ))
-}

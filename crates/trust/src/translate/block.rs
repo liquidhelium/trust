@@ -282,15 +282,11 @@ impl Ctx {
                                 "Value::Module(rt::import_external(engine, \"{raw}\", SPAN)?)"
                             );
                         }
-                        let mut target = normalize_import(&file, &raw);
-                        // Absolute imports inside a dependency package are
-                        // qualified into that package's merged key space
-                        // (same treatment as top-level imports).
-                        if let Some(qualified) =
-                            super::paths::qualify_package_absolute(&file, &raw, &target)
-                        {
-                            target = qualified;
-                        }
+                        let target = normalize_import(&file, &raw);
+                        // (Absolute imports inside a dependency package are
+                        // already qualified into that package's merged key
+                        // space by normalize_import's rooted handling — same
+                        // treatment as top-level imports.)
                         match (files.contains_key(&target), mods.get(&target)) {
                             (true, Some(mod_name)) => {
                                 // The target file's module scope is built
@@ -305,7 +301,7 @@ impl Ctx {
                                 // glue (the original file-not-found carries
                                 // it naturally).
                                 let code = self.in_body_import_glue(&stmt, import, &mut env);
-                                let _ = writeln!(out, "    {{ {code} }}");
+                                let _ = writeln!(out, "    {code}");
                                 continue;
                             }
                         }
@@ -314,7 +310,7 @@ impl Ctx {
                         // Zone-1 glue: any source expression dispatched
                         // through the original Eval.
                         let code = self.in_body_import_glue(&stmt, import, &mut env);
-                        let _ = writeln!(out, "    {{ {code} }}");
+                        let _ = writeln!(out, "    {code}");
                         continue;
                     }
                 };
@@ -328,15 +324,9 @@ impl Ctx {
                 let internal_target = match (&source, import.imports()) {
                     (ast::Expr::Str(str_expr), Some(ast::Imports::Wildcard)) => {
                         let raw = str_expr.get().to_string();
-                        self.current_file.as_ref().map(|file| {
-                            let mut target = normalize_import(file, &raw);
-                            if let Some(qualified) =
-                                super::paths::qualify_package_absolute(file, &raw, &target)
-                            {
-                                target = qualified;
-                            }
-                            target
-                        })
+                        self.current_file
+                            .as_ref()
+                            .map(|file| normalize_import(file, &raw))
                     }
                     _ => None,
                 };
@@ -792,6 +782,11 @@ impl Ctx {
     /// difference set writes new Rust locals for the statically known
     /// binding names. A bare dynamic source has an empty expected list
     /// (the original reports the dynamic error at runtime).
+    ///
+    /// The result is bare statements (no wrapping block, no value): the
+    /// bound locals must stay visible in the enclosing scope — a wrapping
+    /// `{ ... }` would drop them — and an import's `none` value joins as
+    /// identity, so nothing is lost by not joining it.
     fn in_body_import_glue(
         &mut self,
         stmt: &ast::Expr,
@@ -863,10 +858,10 @@ impl Ctx {
             names.push((name.clone(), rust));
         }
         for (i, (_, rust)) in names.iter().enumerate() {
-            let _ = write!(binds, "let mut {rust} = __imported[{i}].clone(); ");
+            let _ = write!(binds, " let mut {rust} = __imported[{i}].clone();");
         }
         format!(
-            "let __caps: Vec<(&'static str, Value)> = {caps_lit}; let __imported = rt::eval_import({stmt_text:?}, {at}, {expected_lit}, &__caps, engine, context)?; {binds} Value::None"
+            "let __caps: Vec<(&'static str, Value)> = {caps_lit}; let __imported = rt::eval_import({stmt_text:?}, {at}, {expected_lit}, &__caps, engine, context)?;{binds}"
         )
     }
 

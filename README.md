@@ -43,6 +43,14 @@ which verifies byte-identical output before timing; median of 10 runs):
 | 20 canvases × 60 elements (1 page) | 343 ms | 775 ms | **2.3×** |
 | 60 canvases × 60 elements (2 pages) | 415 ms | 866 ms | **2.1×** |
 
+Both sides are fresh processes: the CLI pays interpreter setup, source
+parsing, and font loading on every run, and so does the standalone
+program (minus the parse/interpret work it has compiled away). A warm
+in-process compiler is a different scenario — repeating the same compile
+in one process (e.g. `typst-py`) amortizes all of that behind persistent
+memoization caches, so its repeat-compile latency is not comparable to
+either column above; first-compile latency in that mode is far higher.
+
 ## Workspace layout
 
 | Path | Contents |
